@@ -1,0 +1,13 @@
+{
+  "name": "peermesh-relay",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "relay.js",
+  "scripts": {
+    "start": "node relay.js",
+    "dev": "node --watch relay.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

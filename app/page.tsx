@@ -1,65 +1,89 @@
-import Image from "next/image";
+import Link from 'next/link'
 
-export default function Home() {
+const COUNTRIES = ['🇳🇬', '🇬🇧', '🇺🇸', '🇰🇪', '🇩🇪', '🇧🇷', '🇯🇵', '🇿🇦', '🇨🇦']
+
+export default function LandingPage() {
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
-    </div>
-  );
+    <main className="flex flex-col flex-1 items-center justify-center px-6 py-20 text-center">
+      {/* Logo */}
+      <div style={{ fontFamily: 'var(--font-geist-mono)', color: 'var(--accent)', fontSize: '13px', letterSpacing: '4px', marginBottom: '32px', opacity: 0.7 }}>
+        PEERMESH
+      </div>
+
+      {/* Headline */}
+      <h1 style={{ fontSize: 'clamp(2rem, 5vw, 3.5rem)', fontWeight: 700, lineHeight: 1.1, letterSpacing: '-0.03em', maxWidth: '640px', marginBottom: '20px' }}>
+        Browse the world through{' '}
+        <span style={{ color: 'var(--accent)' }}>real connections</span>
+      </h1>
+
+      <p style={{ color: 'var(--muted)', fontSize: '1.1rem', maxWidth: '480px', lineHeight: 1.7, marginBottom: '40px' }}>
+        Access the internet from any country through a verified peer network.
+        Share your connection, browse through others — for free.
+      </p>
+
+      {/* Country flags */}
+      <div style={{ display: 'flex', gap: '10px', marginBottom: '48px', fontSize: '28px' }}>
+        {COUNTRIES.map((flag, i) => (
+          <span key={i} style={{ opacity: 0.8 }}>{flag}</span>
+        ))}
+      </div>
+
+      {/* CTAs */}
+      <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', justifyContent: 'center' }}>
+        <Link
+          href="/auth?mode=signup"
+          style={{
+            padding: '14px 32px',
+            background: 'var(--accent)',
+            color: '#000',
+            borderRadius: '10px',
+            fontFamily: 'var(--font-geist-mono)',
+            fontWeight: 700,
+            fontSize: '13px',
+            letterSpacing: '0.5px',
+            textDecoration: 'none',
+          }}
+        >
+          GET STARTED FREE
+        </Link>
+        <Link
+          href="/extension"
+          style={{
+            padding: '14px 32px',
+            background: 'transparent',
+            color: 'var(--accent)',
+            border: '1px solid var(--accent)',
+            borderRadius: '10px',
+            fontFamily: 'var(--font-geist-mono)',
+            fontSize: '13px',
+            letterSpacing: '0.5px',
+            textDecoration: 'none',
+          }}
+        >
+          🧩 CHROME EXTENSION
+        </Link>
+        <Link
+          href="/auth?mode=login"
+          style={{
+            padding: '14px 32px',
+            background: 'transparent',
+            color: 'var(--text)',
+            border: '1px solid var(--border)',
+            borderRadius: '10px',
+            fontFamily: 'var(--font-geist-mono)',
+            fontSize: '13px',
+            letterSpacing: '0.5px',
+            textDecoration: 'none',
+          }}
+        >
+          SIGN IN
+        </Link>
+      </div>
+
+      {/* Trust line */}
+      <p style={{ marginTop: '48px', color: 'var(--muted)', fontSize: '12px', fontFamily: 'var(--font-geist-mono)' }}>
+        Verified identities · Cryptographic accountability · $1 one-time setup
+      </p>
+    </main>
+  )
 }
