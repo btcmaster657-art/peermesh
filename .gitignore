@@ -2,6 +2,8 @@
 
 # dependencies
 /node_modules
+relay/node_modules
+provider-agent/node_modules
 /.pnp
 .pnp.*
 .yarn/*
