@@ -150,7 +150,7 @@ export async function GET() {
 
     const zip = buildZip(processedFiles)
 
-    return new NextResponse(zip, {
+    return new NextResponse(zip.buffer as ArrayBuffer, {
       headers: {
         'Content-Type': 'application/zip',
         'Content-Disposition': 'attachment; filename="peermesh-extension.zip"',

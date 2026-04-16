@@ -18,9 +18,10 @@ export async function GET(req: Request) {
   target = target.replace(/&amp;/g, '&')
 
   // Fix double-encoding: unwrap nested proxy-asset URLs
-  while (target.includes('/api/proxy-asset')) {
+  while (target && target.includes('/api/proxy-asset')) {
     try {
-      const inner = new URL(target.startsWith('http') ? target : `http://localhost${target}`)
+      const t: string = target.startsWith('http') ? target : `http://localhost${target}`
+      const inner = new URL(t)
       const innerUrl = inner.searchParams.get('url')
       if (!innerUrl || innerUrl === target) break
       target = innerUrl
