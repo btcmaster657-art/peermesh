@@ -1,6 +1,6 @@
 // popup.js — PeerMesh Chrome Extension
 
-const API = 'http://localhost:3000' // replaced with https://your-app.vercel.app in production
+const API = 'https://peermesh-beta.vercel.app'
 
 const COUNTRIES = [
   { code: 'NG', flag: '🇳🇬', name: 'Nigeria' },
