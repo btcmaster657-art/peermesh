@@ -65,7 +65,6 @@ async function init() {
 let authPollInterval = null
 let peerPollInterval = null
 let statusPollInterval = null
-let authBrowserOpened = false // prevent opening browser multiple times
 
 async function refreshRuntimeStatus() {
   try {
@@ -162,20 +161,14 @@ function renderAuth(app) {
     </div>
     <div class="auth-screen">
       <h2>Welcome</h2>
-      <p>Opening your browser to sign in...</p>
+      <p>Sign in to start browsing.</p>
       <div style="margin:20px 0;display:flex;align-items:center;justify-content:center;gap:8px;color:#666680;font-size:11px;font-family:'Courier New',monospace">
         <span style="display:inline-block;width:8px;height:8px;border:2px solid #1e1e2a;border-top-color:#00ff88;border-radius:50%;animation:spin 0.8s linear infinite"></span>
         WAITING FOR SIGN IN...
       </div>
-      <button class="btn-primary" id="openDashboard" style="margin-top:4px">OPEN BROWSER AGAIN</button>
+      <button class="btn-primary" id="openDashboard" style="margin-top:4px">SIGN IN</button>
       <style>@keyframes spin{to{transform:rotate(360deg)}}</style>
     </div>`
-
-  // Auto-open browser only once per popup session
-  if (!authBrowserOpened) {
-    authBrowserOpened = true
-    chrome.tabs.create({ url: `${API}/extension?ext_id=${state.extId}` })
-  }
 
   document.getElementById('openDashboard').onclick = () => {
     chrome.tabs.create({ url: `${API}/extension?ext_id=${state.extId}` })
@@ -424,7 +417,6 @@ async function signOut() {
   state.session = null
   state.isSharing = false
   state.helper = null
-  authBrowserOpened = false
   await chrome.storage.local.clear()
   render()
 }

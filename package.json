@@ -2,6 +2,7 @@
   "name": "peermesh",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -9,7 +10,10 @@
     "lint": "eslint",
     "desktop": "node build-save-desktop.js",
     "desktop:minor": "node build-save-desktop.js minor",
-    "desktop:major": "node build-save-desktop.js major"
+    "desktop:major": "node build-save-desktop.js major",
+    "extension": "node build-save-extension.js",
+    "extension:minor": "node build-save-extension.js minor",
+    "extension:major": "node build-save-extension.js major"
   },
   "dependencies": {
     "@supabase/ssr": "^0.10.2",
