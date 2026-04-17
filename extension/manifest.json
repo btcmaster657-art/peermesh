@@ -9,6 +9,7 @@
     "alarms",
     "notifications",
     "webRequest",
+    "webRequestAuthProvider",
     "declarativeNetRequest"
   ],
   "host_permissions": ["<all_urls>"],

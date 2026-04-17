@@ -303,9 +303,12 @@ const proxyPending = new Map() // requestId/tunnelId → pending
 const proxySessionMap = new Map()
 
 const httpProxyServer = createServer((req, res) => {
-  // Resolve session from X-PeerMesh-Session header injected by the extension
-  const headerSessionId = req.headers['x-peermesh-session']
-  const sessionId = headerSessionId || proxySessionMap.get(req.socket.remotePort)
+  // Session ID comes as proxy credentials username (set by extension onAuthRequired)
+  const authHeader = req.headers['proxy-authorization'] || ''
+  const credSessionId = authHeader.startsWith('Basic ')
+    ? Buffer.from(authHeader.slice(6), 'base64').toString().split(':')[0]
+    : null
+  const sessionId = credSessionId || req.headers['x-peermesh-session'] || proxySessionMap.get(req.socket.remotePort)
   const sessionEntry = sessionId ? sessions.get(sessionId) : null
   const sessionCountry = sessionEntry?.country ?? null
 
@@ -355,9 +358,11 @@ httpProxyServer.on('connect', (req, clientSocket, head) => {
   const [hostname, portStr] = (req.url || '').split(':')
   const port = parseInt(portStr) || 443
 
-  // Session ID passed via Proxy-Authorization: Bearer <sessionId>
+  // Session ID from proxy credentials (Basic auth username = sessionId)
   const authHeader = req.headers['proxy-authorization'] || ''
-  const headerSessionId = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null
+  const headerSessionId = authHeader.startsWith('Basic ')
+    ? Buffer.from(authHeader.slice(6), 'base64').toString().split(':')[0]
+    : authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null
   const connectSessionId = headerSessionId || proxySessionMap.get(clientSocket.remotePort)
   const connectSession = connectSessionId ? sessions.get(connectSessionId) : null
   const connectCountry = connectSession?.country ?? null

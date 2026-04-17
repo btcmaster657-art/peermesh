@@ -176,13 +176,14 @@ function setProxy(relayEndpoint, sessionId) {
   const proxyHost = relayUrl.hostname
   const proxyPort = 8081
 
-  // Pass sessionId as proxy-auth username so relay can route to correct country
+  // Encode sessionId as proxy username so relay can route to correct country.
+  // Chrome sends this automatically as Proxy-Authorization on every CONNECT.
   const pacScript = `
     function FindProxyForURL(url, host) {
       if (host === 'localhost' || host === '127.0.0.1' || isPlainHostName(host)) {
         return 'DIRECT';
       }
-      return 'PROXY ${proxyHost}:${proxyPort}';
+      return 'HTTPS ${proxyHost}:${proxyPort}';
     }
   `
 
@@ -200,19 +201,8 @@ function setProxy(relayEndpoint, sessionId) {
     }
   })
 
-  // Inject session ID via declarativeNetRequest (MV3 compatible)
-  chrome.declarativeNetRequest.updateDynamicRules({
-    removeRuleIds: [1],
-    addRules: [{
-      id: 1,
-      priority: 1,
-      action: {
-        type: 'modifyHeaders',
-        requestHeaders: [{ header: 'X-PeerMesh-Session', operation: 'set', value: sessionId }],
-      },
-      condition: { urlFilter: '|http*', resourceTypes: ['main_frame', 'sub_frame', 'xmlhttprequest', 'other', 'stylesheet', 'script', 'image', 'font', 'media'] },
-    }],
-  })
+  // Store sessionId for use in onAuthRequired
+  chrome.storage.session.set({ proxySessionId: sessionId })
 
   chrome.action.setBadgeText({ text: 'ON' })
   chrome.action.setBadgeBackgroundColor({ color: '#00ff88' })
@@ -220,9 +210,29 @@ function setProxy(relayEndpoint, sessionId) {
 
 function clearProxy() {
   chrome.proxy.settings.clear({ scope: 'regular' })
-  chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: [1] })
+  chrome.storage.session.remove('proxySessionId')
   chrome.action.setBadgeText({ text: '' })
 }
+
+// Supply session ID as proxy credentials — Chrome sends this as
+// Proxy-Authorization on every request including HTTPS CONNECT tunnels
+chrome.webRequest.onAuthRequired.addListener(
+  (details, callback) => {
+    if (details.isProxy) {
+      chrome.storage.session.get('proxySessionId', ({ proxySessionId }) => {
+        if (proxySessionId) {
+          callback({ authCredentials: { username: proxySessionId, password: 'x' } })
+        } else {
+          callback({})
+        }
+      })
+    } else {
+      callback({})
+    }
+  },
+  { urls: ['<all_urls>'] },
+  ['asyncBlocking']
+)
 
 async function disconnect() {
   if (relayWs?.readyState === WebSocket.OPEN) {
