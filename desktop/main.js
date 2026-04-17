@@ -2,10 +2,16 @@ const { app, Tray, Menu, BrowserWindow, nativeImage, ipcMain, shell, Notificatio
 const { WebSocket } = require('ws')
 const path = require('path')
 const http = require('http')
-const net = require('net')
 const fs = require('fs')
 
-// ── Config ────────────────────────────────────────────────────────────────────
+// Prevent uncaught errors from showing Electron's error dialog
+process.on('uncaughtException', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.log(`Port already in use — continuing without control server`)
+    return // swallow silently
+  }
+  console.error('Uncaught exception:', err)
+})
 
 const API_BASE = 'https://peermesh-beta.vercel.app'
 const RELAY_WS = 'wss://peermesh-relay.fly.dev'
@@ -13,18 +19,16 @@ const RELAY_PROXY_PORT = 8081
 const CONTROL_PORT = 7654
 const CONFIG_FILE = path.join(app.getPath('userData'), 'config.json')
 
-// ── State ─────────────────────────────────────────────────────────────────────
-
 let tray = null
 let settingsWindow = null
 let ws = null
 let running = false
-let config = { token: '', userId: '', country: 'RW', trust: 50 }
+let config = { token: '', userId: '', country: 'RW', trust: 50, extId: '' }
 let stats = { bytesServed: 0, requestsHandled: 0, connectedAt: null }
 let reconnectTimer = null
 let reconnectDelay = 2000
 
-// ── Load/save config ──────────────────────────────────────────────────────────
+// ── Config ────────────────────────────────────────────────────────────────────
 
 function loadConfig() {
   try {
@@ -32,6 +36,11 @@ function loadConfig() {
       config = { ...config, ...JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8')) }
     }
   } catch {}
+  // Generate stable ext_id if not present
+  if (!config.extId) {
+    config.extId = require('crypto').randomUUID()
+    saveConfig()
+  }
 }
 
 function saveConfig() {
@@ -82,7 +91,7 @@ async function handleFetch(request) {
   }
 }
 
-// ── Relay connection ──────────────────────────────────────────────────────────
+// ── Relay ─────────────────────────────────────────────────────────────────────
 
 function connectRelay() {
   if (!config.token || !config.userId) return
@@ -105,22 +114,17 @@ function connectRelay() {
   ws.on('message', async (data) => {
     try {
       const msg = JSON.parse(data.toString())
-      switch (msg.type) {
-        case 'registered':
-          stats.connectedAt = new Date().toISOString()
-          showNotification('PeerMesh Active', `Sharing your ${config.country} connection`)
-          updateTray()
-          break
-        case 'session_request':
-          ws.send(JSON.stringify({ type: 'agent_ready', sessionId: msg.sessionId }))
-          break
-        case 'proxy_request':
-          const response = await handleFetch(msg.request)
-          ws.send(JSON.stringify({ type: 'proxy_response', sessionId: msg.sessionId, response }))
-          break
-        case 'session_ended':
-          updateTray()
-          break
+      if (msg.type === 'registered') {
+        stats.connectedAt = new Date().toISOString()
+        showNotification('PeerMesh Active', `Sharing your ${config.country} connection`)
+        updateTray()
+      } else if (msg.type === 'session_request') {
+        ws.send(JSON.stringify({ type: 'agent_ready', sessionId: msg.sessionId }))
+      } else if (msg.type === 'proxy_request') {
+        const response = await handleFetch(msg.request)
+        ws.send(JSON.stringify({ type: 'proxy_response', sessionId: msg.sessionId, response }))
+      } else if (msg.type === 'session_ended') {
+        updateTray()
       }
     } catch {}
   })
@@ -146,14 +150,13 @@ function stopRelay() {
   updateTray()
 }
 
-// ── Control HTTP server (dashboard integration) ───────────────────────────────
+// ── Control server ────────────────────────────────────────────────────────────
 
 const controlServer = http.createServer((req, res) => {
   const origin = req.headers.origin || ''
   res.setHeader('Access-Control-Allow-Origin', origin.includes('peermesh') || origin.includes('localhost') ? origin : '')
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
-
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return }
 
   const url = new URL(req.url, `http://localhost:${CONTROL_PORT}`)
@@ -163,7 +166,6 @@ const controlServer = http.createServer((req, res) => {
     res.end(JSON.stringify({ running, country: config.country, userId: config.userId?.slice(0, 8), proxyPort: RELAY_PROXY_PORT, stats, version: '1.0.0' }))
     return
   }
-
   if (req.method === 'POST' && url.pathname === '/start') {
     let body = ''
     req.on('data', d => body += d)
@@ -183,26 +185,20 @@ const controlServer = http.createServer((req, res) => {
     })
     return
   }
-
   if (req.method === 'POST' && url.pathname === '/stop') {
     stopRelay()
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ success: true }))
     return
   }
-
   res.writeHead(404); res.end()
 })
 
-// ── Tray icon ─────────────────────────────────────────────────────────────────
+// ── Tray ──────────────────────────────────────────────────────────────────────
 
-function createTrayIcon(active) {
-  // Create a simple colored square as icon (16x16 PNG data)
-  // Green when active, grey when inactive
-  const color = active ? '#00ff88' : '#666680'
-  // Use a simple native image - in production replace with real .ico files
+function createTrayIcon() {
   return nativeImage.createFromDataURL(
-    `data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAABHNCSVQICAgIfAhkiAAAAAlwSFlzAAALEwAACxMBAJqcGAAAABZ0RVh0Q3JlYXRpb24gVGltZQAxMC8yOS8xMiCqmi3JAAAAB3RJTUUH3QodEQkWMFCEAAAAGXRFWHRTb2Z0d2FyZQBBZG9iZSBJbWFnZVJlYWR5ccllPAAAAMFJREFUeNpi/P//PwMlgImBQjDwBrCgC4SGhjIwMzMzIGMwMzMzoGNkZGQgxoAFY2JiYmBiYmJAYWBgYGBiYmJAZmBgYGBiYmJAZWBgYGBiYmJAYmBgYGBiYmJAYGBgYGBiYmJAX2BgYGBiYmJAXmBgYGBiYmJAXGBgYGBiYmJAWmBgYGBiYmJAWGBgYGBiYmJAVmBgYGBiYmJAVGBgYGBiYmJAUmBgYGBiYmJAUGBgYGBiYmJATmBgYGBiYmIAAQYAoZAD/kexdGUAAAAASUVORK5CYII=`
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAABHNCSVQICAgIfAhkiAAAAAlwSFlzAAALEwAACxMBAJqcGAAAABZ0RVh0Q3JlYXRpb24gVGltZQAxMC8yOS8xMiCqmi3JAAAAB3RJTUUH3QodEQkWMFCEAAAAGXRFWHRTb2Z0d2FyZQBBZG9iZSBJbWFnZVJlYWR5ccllPAAAAMFJREFUeNpi/P//PwMlgImBQjDwBrCgC4SGhjIwMzMzIGMwMzMzoGNkZGQgxoAFY2JiYmBiYmJAYWBgYGBiYmJAZmBgYGBiYmJAZWBgYGBiYmJAYmBgYGBiYmJAYGBgYGBiYmJAX2BgYGBiYmJAXmBgYGBiYmJAXGBgYGBiYmJAWmBgYGBiYmJAWGBgYGBiYmJAVmBgYGBiYmJAVGBgYGBiYmJAUmBgYGBiYmJAUGBgYGBiYmJATmBgYGBiYmIAAQYAoZAD/kexdGUAAAAASUVORK5CYII='
   )
 }
 
@@ -214,99 +210,64 @@ function formatBytes(bytes) {
 
 function updateTray() {
   if (!tray) return
-
-  const contextMenu = Menu.buildFromTemplate([
-    {
-      label: 'PeerMesh',
-      enabled: false,
-      icon: createTrayIcon(running),
-    },
+  const menu = Menu.buildFromTemplate([
+    { label: 'PeerMesh', enabled: false },
     { type: 'separator' },
-    {
-      label: running
-        ? `● Sharing active — ${config.country}`
-        : '○ Not sharing',
-      enabled: false,
-    },
-    running ? {
-      label: `${stats.requestsHandled} requests · ${formatBytes(stats.bytesServed)} served`,
-      enabled: false,
-    } : { label: 'Toggle to start sharing', enabled: false },
+    { label: running ? `● Sharing — ${config.country}` : '○ Not sharing', enabled: false },
+    { label: running ? `${stats.requestsHandled} requests · ${formatBytes(stats.bytesServed)} served` : 'Click to start sharing', enabled: false },
     { type: 'separator' },
     {
       label: running ? 'Stop Sharing' : 'Start Sharing',
       click: () => {
-        if (running) {
-          stopRelay()
-        } else if (config.token && config.userId) {
-          connectRelay()
-        } else {
-          shell.openExternal(`${API_BASE}/dashboard`)
-          showWindow()
-        }
+        if (running) { stopRelay() }
+        else if (config.token && config.userId) { connectRelay() }
+        else { shell.openExternal(`${API_BASE}/dashboard`); showWindow() }
       },
     },
     { type: 'separator' },
-    {
-      label: 'Settings',
-      click: showWindow,
-    },
-    {
-      label: 'Open Dashboard',
-      click: () => shell.openExternal(`${API_BASE}/dashboard`),
-    },
+    { label: 'Settings', click: showWindow },
+    { label: 'Open Dashboard', click: () => shell.openExternal(`${API_BASE}/dashboard`) },
     { type: 'separator' },
-    {
-      label: 'Quit PeerMesh',
-      click: () => {
-        stopRelay()
-        app.quit()
-      },
-    },
+    { label: 'Quit', click: () => { stopRelay(); app.quit() } },
   ])
-
-  tray.setContextMenu(contextMenu)
+  tray.setContextMenu(menu)
   tray.setToolTip(running ? `PeerMesh — Sharing (${config.country})` : 'PeerMesh — Inactive')
 }
 
 // ── Settings window ───────────────────────────────────────────────────────────
 
 function showWindow() {
-  if (settingsWindow) {
-    settingsWindow.show()
-    settingsWindow.focus()
-    return
-  }
-
+  if (settingsWindow) { settingsWindow.show(); settingsWindow.focus(); return }
   settingsWindow = new BrowserWindow({
-    width: 380,
-    height: 520,
-    resizable: false,
-    title: 'PeerMesh',
-    backgroundColor: '#0a0a0f',
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
+    width: 380, height: 520, resizable: false,
+    title: 'PeerMesh', backgroundColor: '#0a0a0f',
+    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false },
   })
-
   settingsWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'))
-  settingsWindow.on('closed', () => { settingsWindow = null })
-
-  // Remove menu bar
   settingsWindow.setMenuBarVisibility(false)
+  settingsWindow.on('closed', () => { settingsWindow = null })
 }
-
-// ── Notifications ─────────────────────────────────────────────────────────────
 
 function showNotification(title, body) {
-  if (Notification.isSupported()) {
-    new Notification({ title, body, silent: true }).show()
-  }
+  if (Notification.isSupported()) new Notification({ title, body, silent: true }).show()
 }
 
-// ── IPC handlers (from renderer) ──────────────────────────────────────────────
+// ── IPC ───────────────────────────────────────────────────────────────────────
+
+ipcMain.handle('get-ext-id', () => config.extId)
+
+ipcMain.handle('check-website-auth', async () => {
+  try {
+    const res = await fetch(`${API_BASE}/api/extension-auth?ext_id=${config.extId}`)
+    if (!res.ok) return null
+    const data = await res.json()
+    return data.user ?? null
+  } catch { return null }
+})
+
+ipcMain.handle('open-auth', () => {
+  shell.openExternal(`${API_BASE}/auth?mode=login&source=desktop&ext_id=${config.extId}`)
+})
 
 ipcMain.handle('get-state', () => ({
   running,
@@ -314,19 +275,15 @@ ipcMain.handle('get-state', () => ({
   stats,
 }))
 
-ipcMain.handle('sign-in', async (_, { token, userId, country, trust }) => {
+ipcMain.handle('sign-in', (_, { token, userId, country, trust }) => {
   config = { ...config, token, userId, country, trust }
   saveConfig()
   connectRelay()
   return { success: true }
 })
 
-ipcMain.handle('toggle-sharing', async () => {
-  if (running) {
-    stopRelay()
-  } else if (config.token) {
-    connectRelay()
-  }
+ipcMain.handle('toggle-sharing', () => {
+  if (running) { stopRelay() } else if (config.token) { connectRelay() }
   return { running }
 })
 
@@ -345,37 +302,41 @@ ipcMain.handle('open-dashboard', () => {
 // ── App lifecycle ─────────────────────────────────────────────────────────────
 
 app.whenReady().then(() => {
-  // Prevent app from closing when all windows are closed
   app.on('window-all-closed', (e) => e.preventDefault())
-
-  // Auto-start with Windows
-  app.setLoginItemSettings({
-    openAtLogin: true,
-    openAsHidden: true,
-  })
+  app.setLoginItemSettings({ openAtLogin: true, openAsHidden: true })
 
   loadConfig()
 
-  // Create tray
-  tray = new Tray(createTrayIcon(false))
+  tray = new Tray(createTrayIcon())
   tray.setToolTip('PeerMesh')
-  tray.on('click', () => updateTray())
+  tray.on('click', showWindow)
   updateTray()
 
-  // Start control server
-  controlServer.listen(CONTROL_PORT, '127.0.0.1', () => {
-    console.log(`Control server on port ${CONTROL_PORT}`)
+  // Start control server — check port first to avoid EADDRINUSE crash
+  const net = require('net')
+  const tester = net.createServer()
+  tester.once('error', () => {
+    // Port in use — skip control server, app still works
+    console.log(`Port ${CONTROL_PORT} in use, skipping control server`)
   })
+  tester.once('listening', () => {
+    tester.close(() => {
+      // Port is free — start control server
+      controlServer.listen(CONTROL_PORT, '127.0.0.1')
+    })
+  })
+  tester.listen(CONTROL_PORT, '127.0.0.1')
 
-  // Auto-start sharing if was previously sharing
   if (config.token && config.userId) {
     connectRelay()
   } else {
-    // First launch — show settings window
     showWindow()
   }
 })
 
 app.on('before-quit', () => {
   stopRelay()
+  controlServer.close()
 })
+
+app.on('quit', () => process.exit(0))

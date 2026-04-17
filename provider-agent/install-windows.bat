@@ -7,6 +7,9 @@ set AGENT_URL=https://peermesh-beta.vercel.app/api/agent-download
 set TASK_NAME=PeerMeshAgent
 set VBS_FILE=%AGENT_DIR%\start-silent.vbs
 
+:: Uninstall mode: install-windows.bat uninstall
+if /i "%1"=="uninstall" goto :uninstall
+
 echo.
 echo  PEERMESH AGENT SETUP
 echo  ================================================
@@ -108,3 +111,30 @@ if %errorlevel%==0 (
 
 echo.
 timeout /t 5
+
+:uninstall
+echo.
+echo  PEERMESH AGENT UNINSTALL
+echo  ================================================
+echo.
+
+:: 1. Ask agent to shut down gracefully via HTTP
+curl -s -X POST http://127.0.0.1:7654/shutdown >nul 2>&1
+timeout /t 1 /nobreak >nul
+
+:: 2. Kill any remaining node processes running the agent
+for /f "tokens=2" %%p in ('wmic process where "commandline like '%%peermesh-agent%%'" get processid /format:list 2^>nul ^| findstr ProcessId') do (
+    taskkill /PID %%p /F >nul 2>&1
+)
+
+:: 3. Remove scheduled task
+schtasks /delete /tn "%TASK_NAME%" /f >nul 2>&1
+
+:: 4. Remove agent files
+if exist "%AGENT_DIR%" rd /s /q "%AGENT_DIR%"
+
+echo  Agent stopped and removed.
+echo  You can reinstall cleanly by running this script again.
+echo.
+timeout /t 3
+exit /b 0

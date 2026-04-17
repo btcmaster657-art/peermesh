@@ -274,6 +274,15 @@ const controlServer = createServer((req, res) => {
     return
   }
 
+  // POST /shutdown — kill the process entirely (used by uninstaller)
+  if (req.method === 'POST' && url.pathname === '/shutdown') {
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ success: true }))
+    stopRelay()
+    setTimeout(() => process.exit(0), 200)
+    return
+  }
+
   res.writeHead(404)
   res.end()
 })

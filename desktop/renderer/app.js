@@ -1,12 +1,9 @@
-// renderer/app.js — runs in the Electron renderer process
-
-const API_BASE = 'https://peermesh-beta.vercel.app'
+// renderer/app.js
 
 function formatBytes(bytes) {
   if (bytes < 1024) return `${bytes}B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)}MB`
-  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)}GB`
+  return `${(bytes / 1024 / 1024).toFixed(1)}MB`
 }
 
 function getFlagForCountry(code) {
@@ -14,19 +11,14 @@ function getFlagForCountry(code) {
   return flags[code] ?? '🌍'
 }
 
-// ── Screen management ─────────────────────────────────────────────────────────
-
 function showScreen(id) {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'))
   document.getElementById(id).classList.add('active')
 }
 
-// ── Update UI from state ──────────────────────────────────────────────────────
-
 function updateUI(state) {
   const { running, config, stats } = state
 
-  // Auth check — if no userId, show auth screen
   if (!config.userId) {
     showScreen('auth-screen')
     return
@@ -34,7 +26,6 @@ function updateUI(state) {
 
   showScreen('main-screen')
 
-  // Status card
   const dot = document.getElementById('status-dot')
   const label = document.getElementById('status-label')
   const country = document.getElementById('status-country')
@@ -57,18 +48,14 @@ function updateUI(state) {
     card.className = 'status-card'
   }
 
-  // Toggle
   const toggle = document.getElementById('share-toggle')
   toggle.className = 'toggle' + (running ? ' on' : '')
+  document.getElementById('toggle-desc').textContent = running
+    ? 'Sharing active — earning credits'
+    : 'Help others browse. Stay free.'
 
-  const desc = document.getElementById('toggle-desc')
-  desc.textContent = running ? 'Sharing active — earning credits' : 'Help others browse. Stay free.'
-
-  // Stats
   document.getElementById('stat-requests').textContent = String(stats.requestsHandled)
   document.getElementById('stat-bytes').textContent = formatBytes(stats.bytesServed)
-
-  // User label
   document.getElementById('user-label').textContent = config.userId ? `ID: ${config.userId}` : ''
 }
 
@@ -78,46 +65,51 @@ async function pollState() {
   try {
     const state = await window.peermesh.getState()
     updateUI(state)
+    return state
   } catch {}
 }
 
 setInterval(pollState, 2000)
 pollState()
 
-// ── Auth polling — check website for login every 2s ──────────────────────────
+// ── Poll website auth via main process (no CORS) ──────────────────────────────
 
-async function checkWebsiteAuth() {
-  try {
-    const res = await fetch(`${API_BASE}/api/extension-auth`, {
-      credentials: 'include',
-      headers: { 'Accept': 'application/json' },
-    })
-    if (!res.ok) return
-    const data = await res.json()
-    if (data.user?.token) {
-      await window.peermesh.signIn({
-        token: data.user.token,
-        userId: data.user.id,
-        country: data.user.country || 'RW',
-        trust: data.user.trustScore || 50,
-      })
-      await pollState()
-    }
-  } catch {}
+let authPollInterval = null
+
+function startAuthPoll() {
+  if (authPollInterval) return
+  authPollInterval = setInterval(async () => {
+    try {
+      const state = await window.peermesh.getState()
+      if (!state || state.config.userId) {
+        clearInterval(authPollInterval)
+        authPollInterval = null
+        return
+      }
+      const user = await window.peermesh.checkWebsiteAuth()
+      if (user?.token) {
+        await window.peermesh.signIn({
+          token: user.token,
+          userId: user.id,
+          country: user.country || 'RW',
+          trust: user.trustScore || 50,
+        })
+        clearInterval(authPollInterval)
+        authPollInterval = null
+        await pollState()
+      }
+    } catch {}
+  }, 500)
 }
 
-// Poll for auth while on auth screen
-setInterval(async () => {
-  const state = await window.peermesh.getState().catch(() => null)
-  if (state && !state.config.userId) {
-    checkWebsiteAuth()
-  }
-}, 2000)
+// Start polling immediately and restart whenever auth screen is shown
+startAuthPoll()
 
 // ── Event listeners ───────────────────────────────────────────────────────────
 
 document.getElementById('btn-open-browser').addEventListener('click', async () => {
-  await window.peermesh.openDashboard()
+  await window.peermesh.openAuth()
+  startAuthPoll()
 })
 
 document.getElementById('share-toggle').addEventListener('click', async () => {

@@ -17,9 +17,26 @@ export default function AuthForm() {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
+  const extId = searchParams.get('ext_id')
+
   useEffect(() => {
     setMode((searchParams.get('mode') as 'login' | 'signup') || 'login')
   }, [searchParams])
+
+  // If already signed in and ext_id present, write token and wait for desktop to pick it up
+  useEffect(() => {
+    if (!extId) return
+    supabase.auth.getSession().then(async ({ data: { session } }) => {
+      if (!session) return
+      await fetch('/api/extension-auth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ext_id: extId }),
+      })
+      // Give the desktop app 6s to poll and pick up the token before redirecting
+      setTimeout(() => router.push('/dashboard'), 6000)
+    })
+  }, [extId])
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -59,6 +76,14 @@ export default function AuthForm() {
 
         if (!profile?.phone_number) return router.push('/verify/phone')
         if (!profile?.is_verified) return router.push('/verify/payment')
+
+        if (extId) {
+          await fetch('/api/extension-auth', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ext_id: extId }),
+          })
+        }
         router.push('/dashboard')
       }
     } catch (err: unknown) {

@@ -22,6 +22,7 @@ drop function if exists reset_monthly_bandwidth() cascade;
 
 drop view if exists peer_availability cascade;
 
+drop table if exists extension_auth_tokens cascade;
 drop table if exists abuse_reports cascade;
 drop table if exists session_accountability cascade;
 drop table if exists sessions cascade;
@@ -97,6 +98,20 @@ create table abuse_reports (
   reviewed boolean default false,
   created_at timestamptz default now()
 );
+
+-- Extension auth tokens (one-time bypass tokens for extension sign-in)
+create table extension_auth_tokens (
+  id uuid primary key default gen_random_uuid(),
+  ext_id text not null unique,        -- stable UUID from the extension
+  user_id uuid references profiles(id) on delete cascade not null,
+  token text not null,                -- Supabase access_token
+  used boolean default false,
+  expires_at timestamptz not null default (now() + interval '5 minutes'),
+  created_at timestamptz default now()
+);
+
+-- Auto-delete used/expired tokens
+create index on extension_auth_tokens (ext_id) where used = false;
 
 -- Peer availability view
 create view peer_availability as
@@ -221,4 +236,10 @@ create policy "Authenticated users can report"
 alter table session_accountability enable row level security;
 create policy "Service role only"
   on session_accountability for all
+  using (false);
+
+-- Extension auth tokens: service role only
+alter table extension_auth_tokens enable row level security;
+create policy "Service role only ext tokens"
+  on extension_auth_tokens for all
   using (false);

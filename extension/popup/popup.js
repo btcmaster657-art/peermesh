@@ -25,12 +25,19 @@ let state = {
   peerCounts: {},
   loading: true,
   error: null,
+  extId: null,
 }
 
 // ── Init ─────────────────────────────────────────────────────────────────────
 
 async function init() {
-  const stored = await chrome.storage.local.get(['user', 'session', 'isSharing', 'selectedCountry'])
+  const stored = await chrome.storage.local.get(['user', 'session', 'isSharing', 'selectedCountry', 'extId'])
+
+  // Generate a stable extension UUID if not yet created
+  if (!stored.extId) {
+    stored.extId = crypto.randomUUID()
+    await chrome.storage.local.set({ extId: stored.extId })
+  }
   state = { ...state, ...stored }
 
   // Load peer counts
@@ -43,7 +50,7 @@ async function init() {
   state.loading = false
   render()
 
-  // If not logged in, poll the website for auth every 2 seconds
+  // If not logged in, poll for token using ext_id
   if (!state.user) startAuthPolling()
 }
 
@@ -55,7 +62,7 @@ function startAuthPolling() {
   if (authPollInterval) return
   authPollInterval = setInterval(async () => {
     try {
-      const res = await fetch(`${API}/api/extension-auth`, { credentials: 'include' })
+      const res = await fetch(`${API}/api/extension-auth?ext_id=${state.extId}`)
       if (!res.ok) return
       const data = await res.json()
       if (data.user) {
@@ -105,7 +112,7 @@ function renderAuth(app) {
     </div>`
 
   document.getElementById('openDashboard').onclick = () => {
-    chrome.tabs.create({ url: `${API}/auth?mode=login&source=extension` })
+    chrome.tabs.create({ url: `${API}/auth?mode=login&source=extension&ext_id=${state.extId}` })
   }
 }
 

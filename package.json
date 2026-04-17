@@ -6,7 +6,10 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "desktop": "node build-save-desktop.js",
+    "desktop:minor": "node build-save-desktop.js minor",
+    "desktop:major": "node build-save-desktop.js major"
   },
   "dependencies": {
     "@supabase/ssr": "^0.10.2",

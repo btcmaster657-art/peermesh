@@ -242,6 +242,25 @@ chrome.runtime.onStartup.addListener(async () => {
   await chrome.storage.local.set({ session: null })
 })
 
+// ── Fresh install: wipe everything so new ext_id is generated ─────────────────
+
+chrome.runtime.onInstalled.addListener(async ({ reason }) => {
+  if (reason === 'install') {
+    clearProxy()
+    await chrome.storage.local.clear()
+  }
+})
+
+// ── Uninstall: hit cleanup endpoint to invalidate token in DB ─────────────────
+
+chrome.storage.local.get(['extId'], ({ extId }) => {
+  if (extId) {
+    chrome.runtime.setUninstallURL(
+      `https://peermesh-beta.vercel.app/api/extension-auth/revoke?ext_id=${extId}`
+    )
+  }
+})
+
 // ── Listen for auth from website ──────────────────────────────────────────────
 
 chrome.runtime.onMessageExternal.addListener((msg) => {
