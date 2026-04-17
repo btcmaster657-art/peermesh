@@ -42,6 +42,9 @@ let running = false
 let reconnectTimer = null
 let reconnectDelay = 2000
 let stats = { bytesServed: 0, requestsHandled: 0, connectedAt: null, peerId: null }
+let heartbeatTimer = null
+
+const DEVICE_ID = 'agent_' + Math.random().toString(36).slice(2, 10)
 
 const activeTunnels = new Map()
 
@@ -159,6 +162,7 @@ async function handleMessage(msg) {
     case 'registered':
       stats.connectedAt = new Date().toISOString()
       log(`Registered as provider - country=${config.country}`)
+      sendHeartbeat()
       break
 
     case 'session_request':
@@ -220,6 +224,25 @@ async function handleMessage(msg) {
   }
 }
 
+function sendHeartbeat() {
+  if (!config.token || !config.userId || !config.country) return
+  fetch(`${config.apiBase}/api/user/sharing`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
+    body: JSON.stringify({ device_id: DEVICE_ID, country: config.country }),
+  }).catch(err => log(`Heartbeat failed: ${err.message}`))
+}
+
+function stopHeartbeat() {
+  if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null }
+  if (!config.token || !config.userId) return
+  fetch(`${config.apiBase}/api/user/sharing`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
+    body: JSON.stringify({ device_id: DEVICE_ID }),
+  }).catch(() => {})
+}
+
 function connectRelay() {
   if (!config.token || !config.userId) {
     log('Not configured - waiting for dashboard to set token and userId')
@@ -232,6 +255,7 @@ function connectRelay() {
   ws.on('open', () => {
     running = true
     reconnectDelay = 2000
+    heartbeatTimer = setInterval(sendHeartbeat, 30_000)
   })
   ws.on('ping', () => { try { ws.pong() } catch {} })
   ws.on('message', (data) => {
@@ -253,6 +277,8 @@ function connectRelay() {
 }
 
 function stopRelay() {
+  if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null }
+  stopHeartbeat()
   if (reconnectTimer) {
     clearTimeout(reconnectTimer)
     reconnectTimer = null

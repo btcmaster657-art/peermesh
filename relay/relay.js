@@ -16,6 +16,11 @@ function log(tag, msg, extra = '') {
   console.log(`[${ts}] [${tag}] ${msg}${extra ? ' | ' + extra : ''}`)
 }
 
+function logErr(tag, msg, err) {
+  const ts = new Date().toISOString().slice(11, 23)
+  console.error(`[${ts}] [${tag}] ERROR ${msg} | ${err?.message ?? err}`)
+}
+
 function peersSnapshot() {
   const all = [...peers.values()]
   const providers = all.filter(p => p.role === 'provider')
@@ -59,19 +64,28 @@ proxyWss.on('connection', (ws, req) => {
   const sessionId = url.searchParams.get('session')
   const clientIp = req.headers['x-forwarded-for'] ?? req.socket.remoteAddress
 
-  if (!sessionId) { ws.close(1008, 'Missing session'); return }
+  if (!sessionId) {
+    log('PROXY', `REJECTED no session param from ${clientIp}`)
+    ws.close(1008, 'Missing session')
+    return
+  }
 
   const session = sessions.get(sessionId)
-  if (!session) { ws.close(1008, 'Invalid session'); return }
+  if (!session) {
+    log('PROXY', `REJECTED unknown session=${sessionId.slice(0,8)} from ${clientIp}`)
+    ws.close(1008, 'Invalid session')
+    return
+  }
 
   const provider = peers.get(session.providerId)
   if (!provider || provider.readyState !== WebSocket.OPEN) {
+    log('PROXY', `REJECTED provider unavailable session=${sessionId.slice(0,8)} providerState=${provider?.readyState ?? 'gone'}`)
     ws.close(1008, 'Provider not available')
     return
   }
 
   const tunnelId = randomUUID()
-  log('PROXY', `open session=${sessionId.slice(0,8)} tunnelId=${tunnelId.slice(0,8)} from ${clientIp}`)
+  log('PROXY', `WS_OPEN session=${sessionId.slice(0,8)} tunnelId=${tunnelId.slice(0,8)} provider=${session.providerId.slice(0,8)} from ${clientIp}`)
   proxyClients.set(tunnelId, ws)
 
   let tunnelOpen = false
@@ -79,35 +93,37 @@ proxyWss.on('connection', (ws, req) => {
 
   ws.on('message', (data) => {
     if (!tunnelOpen) {
-      // First frame: parse CONNECT header to get hostname:port
       const text = Buffer.isBuffer(data) ? data.toString() : data
       const match = text.match(/^CONNECT ([^\s]+) HTTP/)
       if (match) {
         const [hostname, portStr] = match[1].split(':')
         const port = parseInt(portStr) || 443
         tunnelOpen = true
+        log('PROXY', `CONNECT ${hostname}:${port} tunnelId=${tunnelId.slice(0,8)} → sending open_tunnel to provider`)
         send(provider, { type: 'open_tunnel', tunnelId, sessionId, hostname, port })
-        // Don't forward the CONNECT header itself — provider will send tunnel_ready
         return
       }
-      // Not a CONNECT header — buffer until tunnel is ready
       pendingFrames.push(data)
       return
     }
-    // Forward raw data to provider
     if (provider.readyState === WebSocket.OPEN) {
       const b64 = Buffer.isBuffer(data) ? data.toString('base64') : Buffer.from(data).toString('base64')
       send(provider, { type: 'tunnel_data', tunnelId, data: b64 })
+    } else {
+      log('PROXY', `WARN tunnel_data dropped — provider gone tunnelId=${tunnelId.slice(0,8)}`)
     }
   })
 
-  ws.on('close', () => {
+  ws.on('close', (code, reason) => {
     proxyClients.delete(tunnelId)
     send(provider, { type: 'tunnel_close', tunnelId })
-    log('PROXY', `closed tunnelId=${tunnelId.slice(0,8)}`)
+    log('PROXY', `WS_CLOSE tunnelId=${tunnelId.slice(0,8)} code=${code} reason=${reason?.toString() || 'none'}`)
   })
 
-  ws.on('error', () => proxyClients.delete(tunnelId))
+  ws.on('error', (err) => {
+    logErr('PROXY', `tunnelId=${tunnelId.slice(0,8)}`, err)
+    proxyClients.delete(tunnelId)
+  })
 })
 
 // ── Main signalling connection handler ────────────────────────────────────────
@@ -148,6 +164,16 @@ wss.on('connection', (ws, req) => {
     log(peerId.slice(0,8), `DISCONNECTED code=${code} reason=${reason?.toString() || 'none'} role=${ws.role} userId=${ws.userId?.slice(0,8)}`)
     peers.delete(peerId)
     cleanupSession(ws)
+    // Remove provider device from DB on disconnect
+    if (ws.role === 'provider' && ws.userId && API_BASE) {
+      fetch(`${API_BASE}/api/user/sharing`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json', 'x-relay-secret': RELAY_SECRET },
+        body: JSON.stringify({ device_id: `relay_${peerId.slice(0,8)}`, user_id: ws.userId }),
+      })
+        .then(r => log(peerId.slice(0,8), `HEARTBEAT_DELETE status=${r.status}`))
+        .catch(err => logErr(peerId.slice(0,8), 'HEARTBEAT_DELETE failed', err))
+    }
     log(peerId.slice(0,8), `PEERS AFTER DISCONNECT`, peersSnapshot())
   })
 
@@ -158,6 +184,7 @@ function handleMessage(ws, msg) {
   switch (msg.type) {
 
     case 'register_provider': {
+      log(ws.peerId.slice(0,8), `REGISTER_PROVIDER userId=${msg.userId?.slice(0,8)} country=${msg.country} kind=${msg.providerKind ?? 'unknown'} tunnel=${msg.supportsTunnel}`)
       for (const [id, peer] of peers) {
         if (peer.userId === msg.userId && peer.role === 'provider' && id !== ws.peerId) {
           log(id.slice(0,8), `EVICTING duplicate provider userId=${msg.userId?.slice(0,8)}`)
@@ -186,18 +213,27 @@ function handleMessage(ws, msg) {
       send(ws, { type: 'registered', peerId: ws.peerId })
       log(ws.peerId.slice(0,8), `REGISTERED_PROVIDER country=${ws.country} userId=${ws.userId?.slice(0,8)} trust=${ws.trustScore} agent=${ws.agentMode}`, `kind=${ws.providerKind} http=${ws.supportsHttp} tunnel=${ws.supportsTunnel}`)
       log(ws.peerId.slice(0,8), `PEERS AFTER REGISTER`, peersSnapshot())
+      if (msg.userId && API_BASE) {
+        fetch(`${API_BASE}/api/user/sharing`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', 'x-relay-secret': RELAY_SECRET },
+          body: JSON.stringify({ device_id: `relay_${ws.peerId.slice(0,8)}`, country: msg.country, user_id: msg.userId }),
+        })
+          .then(r => log(ws.peerId.slice(0,8), `HEARTBEAT_UPSERT status=${r.status}`))
+          .catch(err => logErr(ws.peerId.slice(0,8), 'HEARTBEAT_UPSERT failed', err))
+      }
       break
     }
 
     case 'request_session': {
       const requireTunnel = !!msg.requireTunnel
-      log(ws.peerId.slice(0,8), `REQUEST_SESSION country=${msg.country} userId=${msg.userId?.slice(0,8)}`, `requireTunnel=${requireTunnel}`)
+      log(ws.peerId.slice(0,8), `REQUEST_SESSION country=${msg.country} userId=${msg.userId?.slice(0,8)} requireTunnel=${requireTunnel}`)
       log(ws.peerId.slice(0,8), `PEERS AT REQUEST TIME`, peersSnapshot())
 
       const provider = findProvider(msg.country, ws.peerId, msg.userId, { requireTunnel })
 
       if (!provider) {
-        log(ws.peerId.slice(0,8), `NO_PROVIDER_FOUND for country=${msg.country}`)
+        log(ws.peerId.slice(0,8), `NO_PROVIDER_FOUND country=${msg.country} totalProviders=${[...peers.values()].filter(p=>p.role==='provider').length}`)
         for (const [, peer] of peers) {
           if (peer.role === 'provider') {
             const reasons = []
@@ -209,12 +245,13 @@ function handleMessage(ws, msg) {
             if (peer.userId === msg.userId) reasons.push('same_user')
             if (peer.supportsHttp === false) reasons.push('no_http')
             if (requireTunnel && !peer.supportsTunnel) reasons.push('no_tunnel')
-            log(ws.peerId.slice(0,8), `  PROVIDER_REJECTED ${peer.peerId.slice(0,8)} userId=${peer.userId?.slice(0,8)}`, reasons.join(', '))
+            log(ws.peerId.slice(0,8), `  PROVIDER_REJECTED ${peer.peerId.slice(0,8)} userId=${peer.userId?.slice(0,8)} | ${reasons.join(', ')}`)
           }
         }
         send(ws, { type: 'error', message: `No peers available in ${msg.country}` })
         return
       }
+      log(ws.peerId.slice(0,8), `PROVIDER_MATCHED ${provider.peerId.slice(0,8)} userId=${provider.userId?.slice(0,8)} country=${provider.country}`)
 
       const sessionId = randomUUID()
       ws.role = 'requester'
@@ -238,67 +275,81 @@ function handleMessage(ws, msg) {
 
     case 'agent_ready': {
       const agentSession = sessions.get(msg.sessionId)
-      if (agentSession) {
-        const requester = peers.get(agentSession.requesterId)
-        if (requester) send(requester, { type: 'agent_session_ready', sessionId: msg.sessionId })
-        agentSession.providerUserId = ws.userId
-        log(ws.peerId.slice(0,8), `AGENT_READY session=${msg.sessionId.slice(0,8)} providerUserId=${ws.userId?.slice(0,8)}`)
-        if (ws.userId && API_BASE) {
-          fetch(`${API_BASE}/api/session/end`, {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json', 'x-relay-secret': RELAY_SECRET },
-            body: JSON.stringify({ sessionId: msg.sessionId, providerUserId: ws.userId }),
-          }).catch(() => {})
-        }
+      if (!agentSession) {
+        log(ws.peerId.slice(0,8), `AGENT_READY unknown session=${msg.sessionId?.slice(0,8)}`)
+        break
+      }
+      const requester = peers.get(agentSession.requesterId)
+      if (requester) {
+        send(requester, { type: 'agent_session_ready', sessionId: msg.sessionId })
+        log(ws.peerId.slice(0,8), `AGENT_READY session=${msg.sessionId.slice(0,8)} providerUserId=${ws.userId?.slice(0,8)} → notified requester=${agentSession.requesterId.slice(0,8)}`)
+      } else {
+        log(ws.peerId.slice(0,8), `AGENT_READY session=${msg.sessionId.slice(0,8)} WARN requester gone`)
+      }
+      agentSession.providerUserId = ws.userId
+      if (ws.userId && API_BASE) {
+        fetch(`${API_BASE}/api/session/end`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json', 'x-relay-secret': RELAY_SECRET },
+          body: JSON.stringify({ sessionId: msg.sessionId, providerUserId: ws.userId }),
+        })
+          .then(r => log(ws.peerId.slice(0,8), `SESSION_PATCH status=${r.status}`))
+          .catch(err => logErr(ws.peerId.slice(0,8), 'SESSION_PATCH failed', err))
       }
       break
     }
 
     case 'proxy_request': {
-      // Requester → provider: HTTP fetch request
       const proxySession = sessions.get(msg.sessionId)
-      if (!proxySession) return
+      if (!proxySession) { log(ws.peerId.slice(0,8), `PROXY_REQUEST unknown session=${msg.sessionId?.slice(0,8)}`); return }
       const provider = peers.get(proxySession.providerId)
-      if (provider?.agentMode) send(provider, { type: 'proxy_request', sessionId: msg.sessionId, request: msg.request })
+      if (!provider) { log(ws.peerId.slice(0,8), `PROXY_REQUEST provider gone session=${msg.sessionId?.slice(0,8)}`); return }
+      if (!provider.agentMode) { log(ws.peerId.slice(0,8), `PROXY_REQUEST provider not agentMode session=${msg.sessionId?.slice(0,8)}`); return }
+      log(ws.peerId.slice(0,8), `PROXY_REQUEST → provider=${provider.peerId.slice(0,8)} url=${msg.request?.url?.slice(0,60)}`)
+      send(provider, { type: 'proxy_request', sessionId: msg.sessionId, request: msg.request })
       break
     }
 
     case 'proxy_response': {
-      // Provider → requester: HTTP fetch response
       const respSession = sessions.get(msg.sessionId)
-      if (respSession) {
-        const requester = peers.get(respSession.requesterId)
-        if (requester) send(requester, { type: 'proxy_response', sessionId: msg.sessionId, response: msg.response })
-      }
+      if (!respSession) { log(ws.peerId.slice(0,8), `PROXY_RESPONSE unknown session=${msg.sessionId?.slice(0,8)}`); return }
+      const requester = peers.get(respSession.requesterId)
+      if (!requester) { log(ws.peerId.slice(0,8), `PROXY_RESPONSE requester gone session=${msg.sessionId?.slice(0,8)}`); return }
+      log(ws.peerId.slice(0,8), `PROXY_RESPONSE → requester=${requester.peerId.slice(0,8)} status=${msg.response?.status}`)
+      send(requester, { type: 'proxy_response', sessionId: msg.sessionId, response: msg.response })
       break
     }
 
     case 'tunnel_ready': {
-      // Provider connected to target — tell the proxy WS client to send 200
       const proxyClient = proxyClients.get(msg.tunnelId)
       if (proxyClient?.readyState === WebSocket.OPEN) {
+        log(ws.peerId.slice(0,8), `TUNNEL_READY tunnelId=${msg.tunnelId?.slice(0,8)} → sending 200 to desktop`)
         proxyClient.send('HTTP/1.1 200 Connection Established\r\n\r\n')
+      } else {
+        log(ws.peerId.slice(0,8), `TUNNEL_READY tunnelId=${msg.tunnelId?.slice(0,8)} WARN proxyClient gone state=${proxyClient?.readyState ?? 'missing'}`)
       }
       break
     }
 
     case 'tunnel_data': {
-      // Provider → requester: forward data back through proxy WS
       const proxyClient = proxyClients.get(msg.tunnelId)
-      if (proxyClient?.readyState === WebSocket.OPEN) {
-        proxyClient.send(Buffer.from(msg.data, 'base64'))
-      }
+      if (!proxyClient || proxyClient.readyState !== WebSocket.OPEN) return
+      proxyClient.send(Buffer.from(msg.data, 'base64'))
       break
     }
 
     case 'tunnel_close': {
       const proxyClient = proxyClients.get(msg.tunnelId)
-      if (proxyClient) { proxyClient.close(); proxyClients.delete(msg.tunnelId) }
+      if (proxyClient) {
+        log(ws.peerId.slice(0,8), `TUNNEL_CLOSE tunnelId=${msg.tunnelId?.slice(0,8)}`)
+        proxyClient.close()
+        proxyClients.delete(msg.tunnelId)
+      }
       break
     }
 
     case 'end_session': {
-      log(ws.peerId.slice(0,8), `END_SESSION role=${ws.role}`)
+      log(ws.peerId.slice(0,8), `END_SESSION role=${ws.role} sessionId=${ws.sessionId?.slice(0,8)}`)
       cleanupSession(ws)
       break
     }

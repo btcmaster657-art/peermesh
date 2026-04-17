@@ -3,6 +3,30 @@ import { createClient } from '@/lib/supabase/server'
 import { adminClient } from '@/lib/supabase/admin'
 import { verifyDesktopToken } from '@/lib/desktop-token'
 
+const RELAY_SECRET = process.env.RELAY_SECRET ?? ''
+
+async function resolveUserId(req: Request, bodyUserId?: string): Promise<string | null> {
+  // Relay-secret path (server-to-server, no user token needed)
+  const relaySecret = req.headers.get('x-relay-secret') ?? ''
+  if (RELAY_SECRET && relaySecret === RELAY_SECRET) return bodyUserId ?? null
+
+  // Cookie session (web dashboard)
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (user) return user.id
+
+  // Bearer token (desktop app)
+  const auth = req.headers.get('authorization') ?? ''
+  const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
+  if (!token) return null
+
+  const fromDesktop = verifyDesktopToken(token)
+  if (fromDesktop) return fromDesktop
+
+  const { data } = await adminClient.auth.getUser(token)
+  return data.user?.id ?? null
+}
+
 export async function POST(req: Request) {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
@@ -13,83 +37,41 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'isSharing must be boolean' }, { status: 400 })
   }
 
-  await adminClient
-    .from('profiles')
-    .update({ is_sharing: isSharing })
-    .eq('id', user.id)
-
+  await adminClient.from('profiles').update({ is_sharing: isSharing }).eq('id', user.id)
   return NextResponse.json({ success: true, isSharing })
 }
 
-// ── PUT: desktop heartbeat ────────────────────────────────────────────────────
+// ── PUT: provider heartbeat ───────────────────────────────────────────────────
+// Accepts x-relay-secret (relay → DB) or Authorization: Bearer <token> (desktop)
 export async function PUT(req: Request) {
   const body = await req.json().catch(() => ({}))
-  const { device_id, country } = body
+  const { device_id, country, user_id } = body
 
   if (!device_id || !country) {
     return NextResponse.json({ error: 'device_id and country required' }, { status: 400 })
   }
 
-  let userId: string | null = null
-
-  const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (user) {
-    userId = user.id
-  } else {
-    const auth = req.headers.get('authorization') ?? ''
-    const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
-    if (token) {
-      // Try desktop token first (fast, no network)
-      const desktopUserId = verifyDesktopToken(token)
-      if (desktopUserId) {
-        userId = desktopUserId
-      } else {
-        // Fall back to supabase token
-        const { data } = await adminClient.auth.getUser(token)
-        userId = data.user?.id ?? null
-      }
-    }
-  }
-
+  const userId = await resolveUserId(req, user_id)
   if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  await adminClient.rpc('upsert_provider_heartbeat', {
+  const { error: rpcError } = await adminClient.rpc('upsert_provider_heartbeat', {
     p_user_id: userId,
     p_device_id: device_id,
     p_country: country,
   })
 
+  if (rpcError) return NextResponse.json({ error: rpcError.message }, { status: 500 })
   return NextResponse.json({ ok: true })
 }
 
 // ── DELETE: device stopped sharing ───────────────────────────────────────────
 export async function DELETE(req: Request) {
   const body = await req.json().catch(() => ({}))
-  const { device_id } = body
+  const { device_id, user_id } = body
 
   if (!device_id) return NextResponse.json({ error: 'device_id required' }, { status: 400 })
 
-  let userId: string | null = null
-
-  const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (user) {
-    userId = user.id
-  } else {
-    const auth = req.headers.get('authorization') ?? ''
-    const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
-    if (token) {
-      const desktopUserId = verifyDesktopToken(token)
-      if (desktopUserId) {
-        userId = desktopUserId
-      } else {
-        const { data } = await adminClient.auth.getUser(token)
-        userId = data.user?.id ?? null
-      }
-    }
-  }
-
+  const userId = await resolveUserId(req, user_id)
   if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   await adminClient.rpc('remove_provider_device', {

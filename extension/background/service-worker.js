@@ -150,7 +150,9 @@ function sendExtensionHeartbeat() {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
       body: JSON.stringify({ device_id: `ext_${extId}`, country: sharingCountry }),
-    }).catch(() => {})
+    })
+      .then(r => { if (!r.ok) r.json().then(b => log('warn', `[HEARTBEAT] PUT failed status=${r.status} body=${JSON.stringify(b)}`)) })
+      .catch(e => log('error', `[HEARTBEAT] PUT error: ${e.message}`))
   })
 }
 
@@ -270,7 +272,7 @@ async function connectToRelay(opts, attempt = 0) {
 async function connectOnce({ relayEndpoint, country, userId }) {
   return new Promise((resolve, reject) => {
     const wsUrl = relayEndpoint || RELAY_WS
-    log('info', 'WS connecting to ' + wsUrl + ' country=' + country)
+    log('info', `[CONNECT] WS connecting to ${wsUrl} country=${country} userId=${userId?.slice(0,8)}`)
     const ws = new WebSocket(wsUrl)
     let keepaliveTimer = null
     let settled = false
@@ -283,7 +285,7 @@ async function connectOnce({ relayEndpoint, country, userId }) {
     }
 
     ws.onopen = () => {
-      log('info', 'WS open — sending request_session country=' + country)
+      log('info', `[CONNECT] WS open → sending request_session country=${country}`)
       ws.send(JSON.stringify({ type: 'request_session', country, userId, requireTunnel: false }))
       keepaliveTimer = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' }))
@@ -292,28 +294,36 @@ async function connectOnce({ relayEndpoint, country, userId }) {
 
     ws.onmessage = async (event) => {
       const msg = JSON.parse(event.data)
-      if (msg.type !== 'pong') log('info', 'WS msg: ' + msg.type + (msg.sessionId ? ' session=' + msg.sessionId.slice(0,8) : '') + (msg.message ? ' → ' + msg.message : ''))
+      if (msg.type !== 'pong') log('info', `[CONNECT] msg=${msg.type}${msg.sessionId ? ' session=' + msg.sessionId.slice(0,8) : ''}${msg.message ? ' → ' + msg.message : ''}`)
 
       if (msg.type === 'session_created') {
         agentSessionId = msg.sessionId
+        log('info', `[CONNECT] session_created sessionId=${msg.sessionId.slice(0,8)}`)
       }
 
       if (msg.type === 'agent_session_ready') {
         relayWs = ws
         agentSessionId = msg.sessionId || agentSessionId
         currentSession = { ws, sessionId: agentSessionId, country, relayEndpoint }
-        log('info', 'agent_session_ready sessionId=' + agentSessionId?.slice(0,8))
+        log('info', `[CONNECT] agent_session_ready sessionId=${agentSessionId?.slice(0,8)} → checking desktop`)
 
         const desktopStatus = await getDesktopHelperStatusHttp()
-        log('info', 'desktop available=' + !!desktopStatus?.available + ' — choosing proxy mode')
+        log('info', `[CONNECT] desktop available=${!!desktopStatus?.available} running=${desktopStatus?.running} → choosing proxy mode`)
+
         if (desktopStatus?.available) {
-          fetch(`http://127.0.0.1:${CONTROL_PORT}/proxy-session`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ sessionId: agentSessionId, relayEndpoint: relayEndpoint || RELAY_WS, country }),
-          }).then(() => log('info', 'proxy-session sent to desktop')).catch(e => log('warn', 'proxy-session failed: ' + e.message))
+          try {
+            await fetch(`http://127.0.0.1:${CONTROL_PORT}/proxy-session`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ sessionId: agentSessionId, relayEndpoint: relayEndpoint || RELAY_WS, country }),
+            })
+            log('info', '[CONNECT] proxy-session sent to desktop ✓')
+          } catch (e) {
+            log('error', `[CONNECT] proxy-session failed: ${e.message}`)
+          }
           setProxyDesktop(agentSessionId)
         } else {
+          log('warn', '[CONNECT] desktop not available → falling back to PAC relay proxy')
           setProxyRelay(relayEndpoint || RELAY_WS, agentSessionId)
         }
 
@@ -326,18 +336,21 @@ async function connectOnce({ relayEndpoint, country, userId }) {
         if (pending) {
           clearTimeout(pending.timer)
           pendingRequests.delete(requestId)
+          log('info', `[PROXY] response requestId=${requestId?.slice(0,8)} status=${msg.response?.status}`)
           pending.resolve({ ok: true, status: msg.response.status, headers: msg.response.headers, body: msg.response.body, finalUrl: msg.response.finalUrl })
+        } else {
+          log('warn', `[PROXY] response for unknown requestId=${requestId?.slice(0,8)}`)
         }
       }
 
       if (msg.type === 'error') {
-        log('error', 'relay error: ' + msg.message)
+        log('error', `[CONNECT] relay error: ${msg.message}`)
         ws.close(1000)
         settle(reject, new Error(msg.message))
       }
 
       if (msg.type === 'session_ended') {
-        log('info', 'session_ended — clearing proxy')
+        log('info', '[CONNECT] session_ended → clearing proxy')
         clearProxy()
         currentSession = null
         relayWs = null
@@ -346,12 +359,16 @@ async function connectOnce({ relayEndpoint, country, userId }) {
       }
     }
 
-    ws.onerror = (e) => { log('error', 'WS error: ' + (e.message || 'unknown')); settle(reject, new Error('WebSocket connection failed')) }
+    ws.onerror = (e) => {
+      log('error', `[CONNECT] WS error: ${e.message || 'unknown'}`)
+      settle(reject, new Error('WebSocket connection failed'))
+    }
 
     ws.onclose = (e) => {
-      log('warn', 'WS closed code=' + e.code + ' reason=' + (e.reason || 'none') + ' wasClean=' + e.wasClean)
+      log('warn', `[CONNECT] WS closed code=${e.code} reason=${e.reason || 'none'} wasClean=${e.wasClean}`)
       clearInterval(keepaliveTimer)
       if (currentSession) {
+        log('warn', '[CONNECT] WS closed with active session → clearing proxy')
         clearProxy()
         currentSession = null
         relayWs = null
@@ -363,7 +380,7 @@ async function connectOnce({ relayEndpoint, country, userId }) {
 
     setTimeout(() => {
       if (!settled) {
-        log('warn', 'session timeout — no peer in ' + country)
+        log('warn', `[CONNECT] timeout — no peer found in ${country} after 25s`)
         ws.close(1000)
         settle(reject, new Error('No peer available in ' + country + ' — try again shortly'))
       }
@@ -387,9 +404,9 @@ function setProxyDesktop(sessionId) {
     },
     () => {
       if (chrome.runtime.lastError) {
-        log('error', 'proxy fixed_servers error: ' + chrome.runtime.lastError.message)
+        log('error', `[PROXY] fixed_servers error: ${chrome.runtime.lastError.message}`)
       } else {
-        log('info', 'proxy set → fixed_servers 127.0.0.1:7655')
+        log('info', '[PROXY] mode=fixed_servers 127.0.0.1:7655 ✓')
       }
     }
   )
@@ -401,8 +418,7 @@ function setProxyDesktop(sessionId) {
 function setProxyRelay(relayEndpoint, sessionId) {
   const relayUrl = (relayEndpoint || RELAY_WS).replace('wss://', 'https://').replace('ws://', 'http://')
   const relayHost = new URL(relayUrl).hostname
-  log('info', 'proxy set → PAC relay ' + relayHost + ':8081')
-
+  log('info', `[PROXY] mode=PAC relay ${relayHost}:8081`)
   const pacScript = `
     function FindProxyForURL(url, host) {
       if (host === 'localhost' || host === '127.0.0.1' || isPlainHostName(host)) return 'DIRECT';
@@ -412,8 +428,8 @@ function setProxyRelay(relayEndpoint, sessionId) {
   chrome.proxy.settings.set(
     { value: { mode: 'pac_script', pacScript: { data: pacScript } }, scope: 'regular' },
     () => {
-      if (chrome.runtime.lastError) log('error', 'proxy pac_script error: ' + chrome.runtime.lastError.message)
-      else log('info', 'proxy PAC active → ' + relayHost + ':8081')
+      if (chrome.runtime.lastError) log('error', `[PROXY] PAC error: ${chrome.runtime.lastError.message}`)
+      else log('info', `[PROXY] PAC active → ${relayHost}:8081 ✓`)
     }
   )
   chrome.storage.session.set({ proxySessionId: sessionId, proxyHost: relayHost, proxyPort: 8081 })

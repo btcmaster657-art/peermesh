@@ -1,6 +1,6 @@
 import { createHmac } from 'crypto'
 
-const TOKEN_SECRET = process.env.DESKTOP_TOKEN_SECRET ?? process.env.SUPABASE_SERVICE_ROLE_KEY ?? 'changeme'
+const TOKEN_SECRET = process.env.SUPABASE_SERVICE_ROLE!
 const TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000 // 30 days
 
 export function issueDesktopToken(userId: string): string {

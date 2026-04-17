@@ -359,7 +359,9 @@ function sendHeartbeat() {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
     body: JSON.stringify({ device_id: config.extId, country: config.country }),
-  }).catch(() => {})
+  })
+    .then(r => { if (!r.ok) r.json().then(b => log('[HEARTBEAT] PUT failed status=' + r.status, b)) })
+    .catch(e => log('[HEARTBEAT] PUT error:', e.message))
 }
 
 function connectRelay() {
@@ -566,24 +568,26 @@ function getProxyRelayWs() {
 }
 
 const localProxyServer = http.createServer((req, res) => {
-  // Plain HTTP — forward via relay WebSocket
   const wsConn = getProxyRelayWs()
   if (!wsConn || !proxySession) {
+    log('[LOCAL-PROXY] HTTP rejected — no session')
     res.writeHead(503); res.end('No PeerMesh session'); return
   }
   const requestId = require('crypto').randomUUID()
+  const targetUrl = req.url.startsWith('http') ? req.url : `http://${req.headers.host}${req.url}`
+  log('[LOCAL-PROXY] HTTP', req.method, targetUrl.slice(0, 80))
   const chunks = []
   req.on('data', c => chunks.push(c))
   req.on('end', () => {
-    const targetUrl = req.url.startsWith('http') ? req.url : `http://${req.headers.host}${req.url}`
     proxyPending.set(requestId, {
       resolve: (data) => {
+        log('[LOCAL-PROXY] HTTP response status=' + data.status + ' url=' + targetUrl.slice(0, 60))
         const hdrs = { ...data.headers }
         delete hdrs['content-encoding']; delete hdrs['transfer-encoding']
         res.writeHead(data.status || 200, hdrs)
         res.end(data.body || '')
       },
-      reject: () => { res.writeHead(502); res.end('Bad Gateway') },
+      reject: () => { log('[LOCAL-PROXY] HTTP 502 for', targetUrl.slice(0,60)); res.writeHead(502); res.end('Bad Gateway') },
     })
     wsConn.send(JSON.stringify({
       type: 'proxy_request',
@@ -591,7 +595,10 @@ const localProxyServer = http.createServer((req, res) => {
       request: { requestId, url: targetUrl, method: req.method, headers: req.headers, body: Buffer.concat(chunks).toString() || null },
     }))
     setTimeout(() => {
-      if (proxyPending.has(requestId)) { proxyPending.delete(requestId); res.writeHead(504); res.end('Timeout') }
+      if (proxyPending.has(requestId)) {
+        log('[LOCAL-PROXY] HTTP timeout for', targetUrl.slice(0,60))
+        proxyPending.delete(requestId); res.writeHead(504); res.end('Timeout')
+      }
     }, 30000)
   })
 })
@@ -599,53 +606,59 @@ const localProxyServer = http.createServer((req, res) => {
 localProxyServer.on('connect', (req, clientSocket, head) => {
   const [hostname, portStr] = (req.url || '').split(':')
   const port = parseInt(portStr) || 443
-  log('local-proxy CONNECT', hostname + ':' + port, '| sessionId:', proxySession?.sessionId?.slice(0,8) || 'NONE')
+  log('[LOCAL-PROXY] CONNECT', hostname + ':' + port, '| sessionId:', proxySession?.sessionId?.slice(0,8) || 'NONE')
 
   if (!proxySession?.sessionId) {
-    log('local-proxy CONNECT rejected — no proxySession')
+    log('[LOCAL-PROXY] CONNECT rejected — no proxySession')
     clientSocket.write('HTTP/1.1 503 No PeerMesh Session\r\n\r\n')
     clientSocket.destroy()
     return
   }
 
-  const relayBase = (proxySession.relayEndpoint || RELAY_WS)
-    .replace(/\/[^/]*$/, '')
+  const relayBase = (proxySession.relayEndpoint || RELAY_WS).replace(/\/[^/]*$/, '')
   const proxyUrl = `${relayBase}/proxy?session=${encodeURIComponent(proxySession.sessionId)}`
-  log('local-proxy opening tunnel WS:', proxyUrl.slice(0, 60))
+  log('[LOCAL-PROXY] opening tunnel WS:', proxyUrl.slice(0, 80))
 
   const tunnelWs = new WebSocket(proxyUrl)
   let opened = false
 
   tunnelWs.on('open', () => {
     opened = true
-    log('local-proxy tunnel WS open for', hostname + ':' + port)
-    clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n')
-    if (head?.length) tunnelWs.send(head)
-    clientSocket.on('data', (chunk) => {
-      if (tunnelWs.readyState === WebSocket.OPEN) tunnelWs.send(chunk)
-    })
-    clientSocket.on('end', () => tunnelWs.close())
-    clientSocket.on('error', () => tunnelWs.close())
+    log('[LOCAL-PROXY] tunnel WS open → sending CONNECT header for', hostname + ':' + port)
+    tunnelWs.send(`CONNECT ${hostname}:${port} HTTP/1.1\r\nHost: ${hostname}:${port}\r\n\r\n`)
   })
 
   tunnelWs.on('message', (data) => {
+    const text = Buffer.isBuffer(data) ? data.toString() : data
+    if (!clientSocket._connectSent && text.startsWith('HTTP/1.1 200')) {
+      clientSocket._connectSent = true
+      log('[LOCAL-PROXY] tunnel ready → 200 sent to Chrome for', hostname + ':' + port)
+      clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n')
+      if (head?.length) tunnelWs.send(head)
+      clientSocket.on('data', (chunk) => {
+        if (tunnelWs.readyState === WebSocket.OPEN) tunnelWs.send(chunk)
+      })
+      clientSocket.on('end', () => tunnelWs.close())
+      clientSocket.on('error', (e) => { log('[LOCAL-PROXY] clientSocket error', e.message); tunnelWs.close() })
+      return
+    }
     if (!clientSocket.destroyed) clientSocket.write(Buffer.isBuffer(data) ? data : Buffer.from(data))
   })
 
   tunnelWs.on('close', (code, reason) => {
-    log('local-proxy tunnel WS closed', hostname + ':' + port, 'code=' + code, reason?.toString() || '')
+    log('[LOCAL-PROXY] tunnel WS closed', hostname + ':' + port, 'code=' + code, reason?.toString() || '')
     if (!clientSocket.destroyed) clientSocket.destroy()
   })
 
   tunnelWs.on('error', (e) => {
-    log('local-proxy tunnel WS error', hostname + ':' + port, e.message)
+    log('[LOCAL-PROXY] tunnel WS error', hostname + ':' + port, e.message)
     if (!opened) clientSocket.write('HTTP/1.1 502 Bad Gateway\r\n\r\n')
     if (!clientSocket.destroyed) clientSocket.destroy()
   })
 
   setTimeout(() => {
     if (!opened) {
-      log('local-proxy tunnel timeout for', hostname + ':' + port)
+      log('[LOCAL-PROXY] tunnel timeout for', hostname + ':' + port)
       tunnelWs.terminate()
       clientSocket.write('HTTP/1.1 504 Tunnel Timeout\r\n\r\n')
       clientSocket.destroy()
