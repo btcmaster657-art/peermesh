@@ -876,7 +876,8 @@ ipcMain.handle('poll-device-code', async (_, { device_code }) => {
 })
 
 ipcMain.handle('open-auth', (_, url) => {
-  shell.openExternal(url || `${API_BASE}/extension?activate=1`)
+  const safeUrl = url && !url.startsWith('http://localhost') ? url : `${API_BASE}/extension?activate=1`
+  shell.openExternal(safeUrl)
 })
 
 ipcMain.handle('get-state', () => ({

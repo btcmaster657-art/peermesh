@@ -3,7 +3,7 @@
 function setVersion(v) {
   if (!v) return
   document.getElementById('version-tag').textContent = `v${v}`
-  document.getElementById('welcome-heading').textContent = `WELCOME TO PEERMESH ${v}`
+  document.getElementById('welcome-heading').textContent = 'WELCOME TO PEERMESH'
 }
 
 setVersion(window.peermesh.version)
