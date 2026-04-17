@@ -91,6 +91,7 @@ export default function ExtensionPageClient() {
   const urlExtId = searchParams.get('ext_id') ?? ''
 
   const [step, setStep] = useState<'idle' | 'downloading' | 'guide' | 'done'>('idle')
+  const [desktopDownloading, setDesktopDownloading] = useState(false)
   const [copied, setCopied] = useState(false)
   const [toast, setToast] = useState('')
   const [authed, setAuthed] = useState(false)
@@ -118,7 +119,6 @@ export default function ExtensionPageClient() {
   // Auto sign-in if ext_id is in URL and user is already authenticated
   useEffect(() => {
     if (!urlExtId || isActivate) return
-    setStep('done')
     sendAuthToExtension()
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [urlExtId])
@@ -168,7 +168,6 @@ export default function ExtensionPageClient() {
   async function sendAuthToExtension() {
     setSending(true)
     try {
-      // Prefer ext_id from URL param (set by extension popup), fall back to DOM marker
       const extId = urlExtId || document.querySelector<HTMLElement>('[data-peermesh-extension]')?.dataset.extId
       if (!extId) throw new Error('Extension not detected — open this page from the PeerMesh extension popup')
       const res = await fetch('/api/extension-auth', {
@@ -176,6 +175,10 @@ export default function ExtensionPageClient() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ext_id: extId }),
       })
+      if (res.status === 401) {
+        window.location.href = `/auth?mode=login&source=extension&ext_id=${extId}`
+        return
+      }
       const data = await res.json()
       if (!res.ok) throw new Error(data.error ?? 'Something went wrong')
       setAuthed(true)
@@ -271,20 +274,12 @@ export default function ExtensionPageClient() {
               </button>
             </div>
 
-            <div style={{ display: 'flex', gap: '10px' }}>
-              <button
-                onClick={() => setStep('done')}
-                style={{ flex: 1, padding: '12px', background: 'var(--accent)', color: '#000', border: 'none', borderRadius: '8px', fontFamily: mono, fontSize: '11px', fontWeight: 700, cursor: 'pointer', letterSpacing: '0.5px' }}
-              >
-                I INSTALLED IT ✓
-              </button>
-              <button
-                onClick={handleDownload}
-                style={{ padding: '12px 14px', background: 'transparent', border: '1px solid var(--border)', color: 'var(--muted)', borderRadius: '8px', fontFamily: mono, fontSize: '11px', cursor: 'pointer' }}
-              >
-                RE-DOWNLOAD
-              </button>
-            </div>
+            <button
+              onClick={handleDownload}
+              style={{ width: '100%', padding: '12px 14px', background: 'transparent', border: '1px solid var(--border)', color: 'var(--muted)', borderRadius: '8px', fontFamily: mono, fontSize: '11px', cursor: 'pointer' }}
+            >
+              RE-DOWNLOAD
+            </button>
           </div>
         )}
 
@@ -306,12 +301,24 @@ export default function ExtensionPageClient() {
               <p style={{ color: 'var(--muted)', fontSize: '12px', lineHeight: 1.7, marginBottom: '12px' }}>
                 The extension is the control surface. The desktop helper is required when you want to share your own connection for full-browser traffic.
               </p>
-              <a
-                href="/api/desktop-download"
-                style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: '10px 14px', background: 'transparent', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: '8px', textDecoration: 'none', fontFamily: mono, fontSize: '11px', letterSpacing: '0.5px' }}
+              <button
+                onClick={async () => {
+                  setDesktopDownloading(true)
+                  const a = document.createElement('a')
+                  a.href = '/api/desktop-download'
+                  a.download = ''
+                  document.body.appendChild(a)
+                  a.click()
+                  document.body.removeChild(a)
+                  setTimeout(() => setDesktopDownloading(false), 2000)
+                }}
+                disabled={desktopDownloading}
+                style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '8px', padding: '10px 14px', background: 'transparent', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: '8px', fontFamily: mono, fontSize: '11px', letterSpacing: '0.5px', cursor: desktopDownloading ? 'not-allowed' : 'pointer' }}
               >
-                DOWNLOAD DESKTOP HELPER
-              </a>
+                {desktopDownloading ? (
+                  <><span style={{ display: 'inline-block', width: '10px', height: '10px', border: '2px solid var(--border)', borderTopColor: 'var(--accent)', borderRadius: '50%', animation: 'spin 0.7s linear infinite' }} />DOWNLOADING...</>
+                ) : 'DOWNLOAD DESKTOP HELPER'}
+              </button>
             </div>
 
             <a

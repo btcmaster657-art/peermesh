@@ -65,6 +65,7 @@ async function init() {
 let authPollInterval = null
 let peerPollInterval = null
 let statusPollInterval = null
+let authBrowserOpened = false // prevent opening browser multiple times
 
 async function refreshRuntimeStatus() {
   try {
@@ -161,22 +162,24 @@ function renderAuth(app) {
     </div>
     <div class="auth-screen">
       <h2>Welcome</h2>
-      <p>Sign in on the PeerMesh website, then this popup will update automatically.</p>
-      <button class="btn-primary" id="openDashboard">OPEN WEBSITE TO SIGN IN</button>
-      <button class="btn-primary" id="openExtensionPage" style="margin-top:8px;background:transparent;border:1px solid #00ff88;color:#00ff88">SIGN IN TO EXTENSION</button>
-      <div style="margin-top:16px;display:flex;align-items:center;justify-content:center;gap:8px;color:#666680;font-size:11px;font-family:'Courier New',monospace">
+      <p>Opening your browser to sign in...</p>
+      <div style="margin:20px 0;display:flex;align-items:center;justify-content:center;gap:8px;color:#666680;font-size:11px;font-family:'Courier New',monospace">
         <span style="display:inline-block;width:8px;height:8px;border:2px solid #1e1e2a;border-top-color:#00ff88;border-radius:50%;animation:spin 0.8s linear infinite"></span>
         WAITING FOR SIGN IN...
       </div>
+      <button class="btn-primary" id="openDashboard" style="margin-top:4px">OPEN BROWSER AGAIN</button>
       <style>@keyframes spin{to{transform:rotate(360deg)}}</style>
     </div>`
 
-  document.getElementById('openDashboard').onclick = () => {
-    chrome.tabs.create({ url: `${API}/auth?mode=login&source=extension&ext_id=${state.extId}` })
-  }
-  document.getElementById('openExtensionPage')?.addEventListener('click', () => {
+  // Auto-open browser only once per popup session
+  if (!authBrowserOpened) {
+    authBrowserOpened = true
     chrome.tabs.create({ url: `${API}/extension?ext_id=${state.extId}` })
-  })
+  }
+
+  document.getElementById('openDashboard').onclick = () => {
+    chrome.tabs.create({ url: `${API}/extension?ext_id=${state.extId}` })
+  }
 }
 
 function renderDashboard(app) {
@@ -326,7 +329,7 @@ async function connectSession() {
       relayEndpoint: data.relayEndpoint,
       country: state.selectedCountry,
       userId: state.user.id,
-      token: state.user.token,
+      token: state.supabaseToken || state.user.token,
     })
 
     if (!response?.success) throw new Error(response?.error || 'Connection failed')
@@ -405,7 +408,7 @@ async function toggleSharing(on) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${state.user?.token}`,
+        'Authorization': `Bearer ${state.supabaseToken || state.user?.token}`,
       },
       body: JSON.stringify({ isSharing: on }),
     })
@@ -421,6 +424,7 @@ async function signOut() {
   state.session = null
   state.isSharing = false
   state.helper = null
+  authBrowserOpened = false
   await chrome.storage.local.clear()
   render()
 }

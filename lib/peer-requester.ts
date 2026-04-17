@@ -38,7 +38,7 @@ export class PeerRequester {
 
       this.ws.onopen = () => {
         console.log('[requester] relay connected, requesting session')
-        this.ws!.send(JSON.stringify({ type: 'request_session', country, userId }))
+        this.ws!.send(JSON.stringify({ type: 'request_session', country, userId, requireTunnel: false }))
       }
 
       this.ws.onmessage = async (event) => {
@@ -100,6 +100,13 @@ export class PeerRequester {
         console.log('[requester] relay disconnected')
         if (this.sessionInfo) this.onDisconnect?.()
       }
+      // Timeout if no agent_session_ready within 20s
+      setTimeout(() => {
+        if (!this.agentMode && !this.channel) {
+          this.ws?.close()
+          reject(new Error('No peer available in ' + country + ' — try another country'))
+        }
+      }, 20_000)
     })
   }
 

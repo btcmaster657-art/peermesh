@@ -233,6 +233,7 @@ function connectRelay() {
     running = true
     reconnectDelay = 2000
   })
+  ws.on('ping', () => { try { ws.pong() } catch {} })
   ws.on('message', (data) => {
     try {
       handleMessage(JSON.parse(data.toString()))

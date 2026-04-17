@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { adminClient } from '@/lib/supabase/admin'
+import { verifyDesktopToken } from '@/lib/desktop-token'
 
 export async function POST(req: Request) {
   const supabase = await createClient()
@@ -21,8 +22,6 @@ export async function POST(req: Request) {
 }
 
 // ── PUT: desktop heartbeat ────────────────────────────────────────────────────
-// Body: { device_id, country }
-// Called every 30s by desktop while sharing. Also accepts Bearer token.
 export async function PUT(req: Request) {
   const body = await req.json().catch(() => ({}))
   const { device_id, country } = body
@@ -33,7 +32,6 @@ export async function PUT(req: Request) {
 
   let userId: string | null = null
 
-  // Try cookie session (dashboard), then Bearer token (desktop)
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
   if (user) {
@@ -42,8 +40,15 @@ export async function PUT(req: Request) {
     const auth = req.headers.get('authorization') ?? ''
     const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
     if (token) {
-      const { data } = await adminClient.auth.getUser(token)
-      userId = data.user?.id ?? null
+      // Try desktop token first (fast, no network)
+      const desktopUserId = verifyDesktopToken(token)
+      if (desktopUserId) {
+        userId = desktopUserId
+      } else {
+        // Fall back to supabase token
+        const { data } = await adminClient.auth.getUser(token)
+        userId = data.user?.id ?? null
+      }
     }
   }
 
@@ -59,7 +64,6 @@ export async function PUT(req: Request) {
 }
 
 // ── DELETE: device stopped sharing ───────────────────────────────────────────
-// Body: { device_id }
 export async function DELETE(req: Request) {
   const body = await req.json().catch(() => ({}))
   const { device_id } = body
@@ -76,8 +80,13 @@ export async function DELETE(req: Request) {
     const auth = req.headers.get('authorization') ?? ''
     const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
     if (token) {
-      const { data } = await adminClient.auth.getUser(token)
-      userId = data.user?.id ?? null
+      const desktopUserId = verifyDesktopToken(token)
+      if (desktopUserId) {
+        userId = desktopUserId
+      } else {
+        const { data } = await adminClient.auth.getUser(token)
+        userId = data.user?.id ?? null
+      }
     }
   }
 

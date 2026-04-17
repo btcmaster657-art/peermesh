@@ -6,7 +6,6 @@ const net = require('net')
 const fs = require('fs')
 const os = require('os')
 const { spawn, spawnSync } = require('child_process')
-const { chromium } = require('playwright-core')
 
 // ── Logger ────────────────────────────────────────────────────────────────────
 
@@ -292,42 +291,7 @@ function isAllowed(hostname) {
   return !BLOCKED.some(p => p.test(hostname)) && !PRIVATE.some(p => p.test(hostname))
 }
 
-// ── Playwright browser pool ───────────────────────────────────────────────────
-
-let browser = null
-// Cookie jar per origin so repeat visits look like a returning user
-const contextCache = new Map() // origin → BrowserContext
-
-async function getBrowser() {
-  if (browser && browser.isConnected()) return browser
-  // Use the Electron-bundled Chromium so no extra download is needed
-  const execPath = chromium.executablePath() ||
-    (process.platform === 'win32'
-      ? path.join(process.resourcesPath ?? __dirname, 'chromium', 'chrome.exe')
-      : undefined)
-  browser = await chromium.launch({
-    executablePath: execPath,
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled'],
-  })
-  browser.on('disconnected', () => { browser = null; contextCache.clear() })
-  return browser
-}
-
-async function getContext(origin) {
-  if (contextCache.has(origin)) return contextCache.get(origin)
-  const b = await getBrowser()
-  const ctx = await b.newContext({
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    locale: 'en-US',
-    timezoneId: 'America/New_York',
-    viewport: { width: 1280, height: 800 },
-  })
-  contextCache.set(origin, ctx)
-  return ctx
-}
-
-// ── Fetch handler — real Chrome TLS fingerprint ───────────────────────────────
+// ── Fetch handler — plain Node fetch (no Playwright dependency) ──────────────
 
 async function handleFetch(request) {
   const { requestId, url, method = 'GET', headers = {}, body = null } = request
@@ -336,57 +300,33 @@ async function handleFetch(request) {
     if (!isAllowed(parsed.hostname)) {
       return { requestId, status: 403, headers: {}, body: '', error: 'URL not allowed' }
     }
-    const origin = parsed.origin
-    const ctx = await getContext(origin)
-    const page = await ctx.newPage()
-    try {
-      // Set extra headers from requester (forwarded browser headers)
-      const extraHeaders = {}
-      for (const [k, v] of Object.entries(headers)) {
-        if (!['host', 'content-length'].includes(k.toLowerCase())) extraHeaders[k] = v
+    log(`  -> ${method} ${url}`)
+    const res = await fetch(url, {
+      method,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Cache-Control': 'no-cache',
+        ...headers,
+      },
+      body: body ?? undefined,
+      redirect: 'follow',
+      signal: AbortSignal.timeout(20000),
+    })
+    const responseBody = await res.text()
+    const responseHeaders = {}
+    res.headers.forEach((v, k) => {
+      if (!['content-encoding', 'transfer-encoding', 'connection', 'keep-alive'].includes(k)) {
+        responseHeaders[k] = v
       }
-      if (Object.keys(extraHeaders).length) await page.setExtraHTTPHeaders(extraHeaders)
-
-      let responseStatus = 200
-      let responseHeaders = {}
-      let responseBody = ''
-
-      page.on('response', async (res) => {
-        if (res.url() === url || res.url().startsWith(origin)) {
-          responseStatus = res.status()
-          responseHeaders = await res.allHeaders()
-        }
-      })
-
-      if (method !== 'GET' && method !== 'HEAD') {
-        // For POST/PUT use fetch API inside the page context (same Chrome TLS)
-        const result = await page.evaluate(async ({ url, method, headers, body }) => {
-          const res = await fetch(url, { method, headers, body })
-          const text = await res.text()
-          const hdrs = {}
-          res.headers.forEach((v, k) => { hdrs[k] = v })
-          return { status: res.status, headers: hdrs, body: text, finalUrl: res.url }
-        }, { url, method, headers, body })
-        await page.close()
-        stats.bytesServed += result.body.length
-        stats.requestsHandled++
-        return { requestId, ...result }
-      }
-
-      const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 })
-      responseBody = await page.content()
-      responseStatus = response?.status() ?? 200
-      responseHeaders = await response?.allHeaders() ?? {}
-
-      await page.close()
-      stats.bytesServed += responseBody.length
-      stats.requestsHandled++
-      return { requestId, status: responseStatus, headers: responseHeaders, body: responseBody, finalUrl: url }
-    } catch (err) {
-      await page.close().catch(() => {})
-      throw err
-    }
+    })
+    stats.bytesServed += responseBody.length
+    stats.requestsHandled++
+    log(`  <- ${res.status} ${url} (${responseBody.length}b)`)
+    return { requestId, status: res.status, headers: responseHeaders, body: responseBody, finalUrl: res.url }
   } catch (err) {
+    log(`  x ${url}: ${err.message}`)
     return { requestId, status: 502, headers: {}, body: '', error: err.message }
   }
 }
@@ -446,9 +386,12 @@ function connectRelay() {
       supportsHttp: true,
       supportsTunnel: true,
     }))
-    startHeartbeat() // heartbeat sets is_sharing=true via upsert_provider_heartbeat
+    startHeartbeat()
     updateTray()
   })
+
+  // Respond to relay WebSocket ping frames to prevent heartbeat timeout
+  ws.on('ping', () => { try { ws.pong() } catch {} })
 
   ws.on('message', async (data) => {
     try {
@@ -457,6 +400,33 @@ function connectRelay() {
         stats.connectedAt = new Date().toISOString()
         showNotification('PeerMesh Active', `Sharing your ${config.country} connection`)
         updateTray()
+      } else if (msg.type === 'error') {
+        log('relay error message:', msg.message)
+        // If replaced by a newer connection, stop reconnecting
+        if (msg.message?.includes('Replaced')) {
+          ws.removeAllListeners('close')
+          ws.close(1000)
+          running = false
+          updateTray()
+        }
+      } else if (msg.type === 'proxy_ws_open') {
+        // Extension opened a proxy WS tunnel — we are the provider endpoint
+        // All subsequent proxy_ws_data frames are raw TCP data to/from the target
+        // The extension handles the HTTP CONNECT handshake itself before sending data
+        log('proxy_ws_open for session', msg.sessionId?.slice(0,8))
+        // Nothing to do here — data arrives via proxy_ws_data
+      } else if (msg.type === 'proxy_ws_data') {
+        // Raw TCP data from extension → write to the target socket for this session
+        const tunnel = activeTunnels.get(`ws_${msg.sessionId}`)
+        if (tunnel?.socket && !tunnel.socket.destroyed) {
+          tunnel.socket.write(Buffer.from(msg.data, 'base64'))
+        }
+      } else if (msg.type === 'proxy_ws_close') {
+        const tunnel = activeTunnels.get(`ws_${msg.sessionId}`)
+        if (tunnel) {
+          if (!tunnel.socket.destroyed) tunnel.socket.destroy()
+          activeTunnels.delete(`ws_${msg.sessionId}`)
+        }
       } else if (msg.type === 'session_request') {
         ws.send(JSON.stringify({ type: 'agent_ready', sessionId: msg.sessionId }))
       } else if (msg.type === 'proxy_request') {
@@ -515,10 +485,6 @@ function stopRelay() {
   stats = { bytesServed: 0, requestsHandled: 0, connectedAt: null }
   stopHeartbeat()
   persistSharingState(false)
-  // Close browser contexts to free memory when not sharing
-  for (const ctx of contextCache.values()) ctx.close().catch(() => {})
-  contextCache.clear()
-  if (browser) { browser.close().catch(() => {}); browser = null }
   updateTray()
 }
 
@@ -531,8 +497,19 @@ let proxyRelayWs = null
 const proxyPending = new Map() // requestId → { resolve, reject }
 
 function getProxyRelayWs() {
+  // Reuse the existing relay WS connection that already has an active session
+  // Only fall back to creating a new connection if no session exists
   if (proxyRelayWs && proxyRelayWs.readyState === WebSocket.OPEN) return proxyRelayWs
   if (!proxySession) return null
+
+  // If the session was set from an existing extension connection (ws field),
+  // reuse that WebSocket directly
+  if (proxySession.ws && proxySession.ws.readyState === WebSocket.OPEN) {
+    proxyRelayWs = proxySession.ws
+    return proxyRelayWs
+  }
+
+  // Otherwise open a fresh connection to the relay
   proxyRelayWs = new WebSocket(proxySession.relayEndpoint || RELAY_WS)
   proxyRelayWs.on('message', (data) => {
     try {
@@ -542,7 +519,26 @@ function getProxyRelayWs() {
         if (cb) { cb.resolve(msg.response); proxyPending.delete(msg.response.requestId) }
       }
       if (msg.type === 'agent_session_ready') {
-        console.log('[local-proxy] relay session ready')
+        log('[local-proxy] relay session ready, sessionId:', msg.sessionId)
+        if (proxySession) proxySession.sessionId = msg.sessionId
+      }
+      if (msg.type === 'tunnel_ready') {
+        const pending = proxyPending.get(`tunnel_${msg.tunnelId}`)
+        if (pending?.resolve) {
+          pending.resolve()
+          proxyPending.set(`tunnel_${msg.tunnelId}`, { ...pending, ready: true })
+        }
+      }
+      if (msg.type === 'tunnel_data') {
+        const pending = proxyPending.get(`tunnel_${msg.tunnelId}`)
+        if (pending?.clientSocket && !pending.clientSocket.destroyed) {
+          pending.clientSocket.write(Buffer.from(msg.data, 'base64'))
+        }
+      }
+      if (msg.type === 'tunnel_close') {
+        const pending = proxyPending.get(`tunnel_${msg.tunnelId}`)
+        if (pending?.clientSocket && !pending.clientSocket.destroyed) pending.clientSocket.destroy()
+        proxyPending.delete(`tunnel_${msg.tunnelId}`)
       }
     } catch {}
   })
@@ -551,6 +547,7 @@ function getProxyRelayWs() {
       type: 'request_session',
       country: proxySession.country,
       userId: config.userId,
+      requireTunnel: false,
     }))
   })
   proxyRelayWs.on('close', () => { proxyRelayWs = null })
@@ -590,24 +587,66 @@ const localProxyServer = http.createServer((req, res) => {
 })
 
 localProxyServer.on('connect', (req, clientSocket, head) => {
-  // HTTPS CONNECT — open direct TCP connection to target (traffic is already E2E encrypted)
+  // HTTPS CONNECT — open a WebSocket to relay /proxy?session=<id>
+  // and pipe raw TCP through it to the provider
   const [hostname, portStr] = (req.url || '').split(':')
   const port = parseInt(portStr) || 443
-  const targetSocket = net.connect(port, hostname, () => {
+
+  if (!proxySession?.sessionId) {
+    clientSocket.write('HTTP/1.1 503 No PeerMesh Session\r\n\r\n')
+    clientSocket.destroy()
+    return
+  }
+
+  const relayBase = (proxySession.relayEndpoint || RELAY_WS)
+    .replace('wss://', 'wss://')
+    .replace('ws://', 'ws://')
+    .replace(/\/[^/]*$/, '') // strip path
+  const proxyUrl = `${relayBase}/proxy?session=${encodeURIComponent(proxySession.sessionId)}`
+
+  const tunnelWs = new WebSocket(proxyUrl)
+  let opened = false
+
+  tunnelWs.on('open', () => {
+    opened = true
     clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n')
-    if (head?.length) targetSocket.write(head)
-    targetSocket.pipe(clientSocket)
-    clientSocket.pipe(targetSocket)
+    if (head?.length) tunnelWs.send(head)
+    clientSocket.on('data', (chunk) => {
+      if (tunnelWs.readyState === WebSocket.OPEN) tunnelWs.send(chunk)
+    })
+    clientSocket.on('end', () => tunnelWs.close())
+    clientSocket.on('error', () => tunnelWs.close())
   })
-  targetSocket.on('error', () => { clientSocket.destroy() })
-  clientSocket.on('error', () => { targetSocket.destroy() })
+
+  tunnelWs.on('message', (data) => {
+    if (!clientSocket.destroyed) clientSocket.write(Buffer.isBuffer(data) ? data : Buffer.from(data))
+  })
+
+  tunnelWs.on('close', () => {
+    if (!clientSocket.destroyed) clientSocket.destroy()
+  })
+
+  tunnelWs.on('error', () => {
+    if (!opened) {
+      clientSocket.write('HTTP/1.1 502 Bad Gateway\r\n\r\n')
+    }
+    if (!clientSocket.destroyed) clientSocket.destroy()
+  })
+
+  setTimeout(() => {
+    if (!opened) {
+      tunnelWs.terminate()
+      clientSocket.write('HTTP/1.1 504 Tunnel Timeout\r\n\r\n')
+      clientSocket.destroy()
+    }
+  }, 15000)
 })
 
 // ── Control server ────────────────────────────────────────────────────────────
 
 const controlServer = http.createServer((req, res) => {
   const origin = req.headers.origin || ''
-  res.setHeader('Access-Control-Allow-Origin', origin.includes('peermesh') || origin.includes('localhost') ? origin : '')
+  res.setHeader('Access-Control-Allow-Origin', origin.includes('peermesh') || origin.includes('localhost') || origin.startsWith('chrome-extension://') ? origin : '')
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return }
@@ -781,7 +820,13 @@ const controlServer = http.createServer((req, res) => {
     req.on('data', d => body += d)
     req.on('end', () => {
       try {
-        proxySession = JSON.parse(body)
+        const data = JSON.parse(body)
+        proxySession = data
+        // If the desktop is already connected to the relay as a provider,
+        // reuse that WS connection for the proxy (avoids opening a second session)
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          proxySession.ws = ws
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ success: true }))
       } catch (e) { res.writeHead(400); res.end() }
@@ -1007,9 +1052,6 @@ if (IS_NATIVE_HOST_MODE) {
 app.on('before-quit', () => {
   stopRelay()
   closeAllTunnels(false)
-  if (browser) { browser.close().catch(() => {}); browser = null }
-  for (const ctx of contextCache.values()) ctx.close().catch(() => {})
-  contextCache.clear()
   controlServer.close()
   localProxyServer.close()
 })

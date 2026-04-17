@@ -25,6 +25,8 @@ export default function Dashboard() {
   const [connecting, setConnecting] = useState(false)
   const [loading, setLoading] = useState(true)
   const [shareError, setShareError] = useState<string | null>(null)
+  const [latestDesktopVersion, setLatestDesktopVersion] = useState<string | null>(null)
+  const [latestExtVersion, setLatestExtVersion] = useState<string | null>(null)
 
   // ── Load profile ────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -37,6 +39,12 @@ export default function Dashboard() {
 
       setProfile(data)
       setLoading(false)
+
+      // Check for updates
+      fetch('/api/version').then(r => r.json()).then(v => {
+        setLatestDesktopVersion(v.desktop ?? null)
+        setLatestExtVersion(v.extension ?? null)
+      }).catch(() => {})
 
       // Check desktop helper
       const dt = await checkDesktop()
@@ -201,6 +209,7 @@ export default function Dashboard() {
 
   const bandwidthPct = Math.min(100, Math.round((profile.bandwidth_used_month / profile.bandwidth_limit) * 100))
   const desktopAvailable = desktop?.available ?? false
+  const desktopUpdateAvailable = !!(latestDesktopVersion && desktop?.version && latestDesktopVersion !== desktop.version)
 
   return (
     <main style={{ maxWidth: '680px', margin: '0 auto', width: '100%', padding: '24px 20px' }}>
@@ -221,6 +230,24 @@ export default function Dashboard() {
           <button onClick={handleSignOut} style={{ background: 'none', border: '1px solid var(--border)', color: 'var(--muted)', padding: '6px 12px', borderRadius: '6px', fontSize: '11px', cursor: 'pointer', fontFamily: 'var(--font-geist-mono)' }}>OUT</button>
         </div>
       </div>
+
+      {/* Desktop update banner */}
+      {desktopChecked && desktopAvailable && desktopUpdateAvailable && (
+        <a
+          href="/api/desktop-download"
+          download
+          style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', background: 'rgba(0,255,136,0.05)', border: '1px solid rgba(0,255,136,0.3)', borderRadius: '12px', padding: '12px 16px', marginBottom: '16px', textDecoration: 'none' }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <span style={{ fontSize: '18px' }}>⬆️</span>
+            <div>
+              <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--accent)', letterSpacing: '0.5px', marginBottom: '2px' }}>DESKTOP UPDATE AVAILABLE — v{latestDesktopVersion}</div>
+              <div style={{ fontSize: '12px', color: 'var(--muted)' }}>You have v{desktop?.version}. Download the latest for best performance.</div>
+            </div>
+          </div>
+          <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '11px', color: 'var(--accent)', whiteSpace: 'nowrap', flexShrink: 0 }}>↓ UPDATE</div>
+        </a>
+      )}
 
       {/* Desktop required banner */}
       {desktopChecked && !desktopAvailable && (
@@ -249,11 +276,15 @@ export default function Dashboard() {
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
             <span style={{ fontSize: '18px' }}>🧩</span>
             <div>
-              <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--accent)', letterSpacing: '0.5px', marginBottom: '2px' }}>CHROME EXTENSION — RECOMMENDED</div>
+              <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--accent)', letterSpacing: '0.5px', marginBottom: '2px' }}>
+                {latestExtVersion ? `CHROME EXTENSION — v${latestExtVersion} AVAILABLE` : 'CHROME EXTENSION — RECOMMENDED'}
+              </div>
               <div style={{ fontSize: '12px', color: 'var(--muted)' }}>Routes your entire browser — YouTube, Google, Netflix all work</div>
             </div>
           </div>
-          <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '11px', color: 'var(--accent)', whiteSpace: 'nowrap', flexShrink: 0 }}>GET IT →</div>
+          <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '11px', color: 'var(--accent)', whiteSpace: 'nowrap', flexShrink: 0 }}>
+            {latestExtVersion ? '↑ UPDATE →' : 'GET IT →'}
+          </div>
         </a>
       )}
 
@@ -307,41 +338,43 @@ export default function Dashboard() {
       </div>
 
       {/* Connect buttons */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '16px' }}>
-        <a
-          href="/extension"
-          style={{
-            display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '6px',
-            padding: '14px 10px', background: selectedCountry ? 'var(--accent)' : 'var(--surface)',
-            color: selectedCountry ? '#000' : 'var(--muted)',
-            border: `1px solid ${selectedCountry ? 'var(--accent)' : 'var(--border)'}`,
-            borderRadius: '10px', textDecoration: 'none', textAlign: 'center', transition: 'all 0.2s',
-          }}
-        >
-          <span style={{ fontSize: '18px' }}>🧩</span>
-          <span style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', fontWeight: 700, letterSpacing: '0.5px' }}>EXTENSION</span>
-          <span style={{ fontSize: '10px', opacity: 0.7 }}>Full browser · YouTube works</span>
-        </a>
+      {selectedCountry && (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '16px' }}>
+          <a
+            href="/extension"
+            style={{
+              display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '6px',
+              padding: '14px 10px', background: 'var(--accent)',
+              color: '#000',
+              border: '1px solid var(--accent)',
+              borderRadius: '10px', textDecoration: 'none', textAlign: 'center', transition: 'all 0.2s',
+            }}
+          >
+            <span style={{ fontSize: '18px' }}>🧩</span>
+            <span style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', fontWeight: 700, letterSpacing: '0.5px' }}>EXTENSION</span>
+            <span style={{ fontSize: '10px', opacity: 0.8 }}>Full browser · YouTube works</span>
+          </a>
 
-        <button
-          onClick={handleConnect}
-          disabled={!selectedCountry || connecting}
-          style={{
-            display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '6px',
-            padding: '14px 10px', background: 'var(--surface)',
-            color: !selectedCountry || connecting ? 'var(--muted)' : 'var(--text)',
-            border: `1px solid ${!selectedCountry ? 'var(--border)' : 'rgba(0,255,136,0.4)'}`,
-            borderRadius: '10px', cursor: !selectedCountry || connecting ? 'not-allowed' : 'pointer',
-            textAlign: 'center', transition: 'all 0.2s',
-          }}
-        >
-          <span style={{ fontSize: '18px' }}>🌐</span>
-          <span style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', fontWeight: 700, letterSpacing: '0.5px' }}>
-            {connecting ? 'CONNECTING...' : 'WEB BROWSER'}
-          </span>
-          <span style={{ fontSize: '10px', opacity: 0.7 }}>In-page · Most sites</span>
-        </button>
-      </div>
+          <button
+            onClick={handleConnect}
+            disabled={connecting}
+            style={{
+              display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '6px',
+              padding: '14px 10px', background: 'var(--surface)',
+              color: connecting ? 'var(--muted)' : 'var(--text)',
+              border: '1px solid rgba(0,255,136,0.4)',
+              borderRadius: '10px', cursor: connecting ? 'not-allowed' : 'pointer',
+              textAlign: 'center', transition: 'all 0.2s',
+            }}
+          >
+            <span style={{ fontSize: '18px' }}>🌐</span>
+            <span style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', fontWeight: 700, letterSpacing: '0.5px' }}>
+              {connecting ? 'CONNECTING...' : 'WEB BROWSER'}
+            </span>
+            <span style={{ fontSize: '10px', opacity: 0.7 }}>Limited sites · No install</span>
+          </button>
+        </div>
+      )}
 
       {/* Share toggle */}
       <div style={{ background: 'var(--surface)', border: `1px solid ${isSharing ? 'rgba(0,255,136,0.3)' : shareError ? 'rgba(255,80,80,0.3)' : 'var(--border)'}`, borderRadius: '12px', padding: '16px', marginBottom: '16px' }}>
