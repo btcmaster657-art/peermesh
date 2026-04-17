@@ -68,9 +68,13 @@ async function connectToRelay(opts, attempt = 0) {
 async function _connectOnce({ relayEndpoint, country, userId }) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(relayEndpoint || RELAY_WS)
+    let keepaliveTimer = null
 
     ws.onopen = () => {
       ws.send(JSON.stringify({ type: 'request_session', country, userId }))
+      keepaliveTimer = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' }))
+      }, 20000)
     }
 
     ws.onmessage = (event) => {
@@ -110,8 +114,9 @@ async function _connectOnce({ relayEndpoint, country, userId }) {
       }
     }
 
-    ws.onerror = (e) => reject(new Error('WebSocket connection failed'))
+    ws.onerror = (e) => { clearInterval(keepaliveTimer); reject(new Error('WebSocket connection failed')) }
     ws.onclose = () => {
+      clearInterval(keepaliveTimer)
       if (currentSession) {
         clearProxy()
         currentSession = null
@@ -234,12 +239,13 @@ async function disconnect() {
 
 async function startSharing({ country, userId }, attempt = 0) {
   if (providerWs) {
-    providerWs.onclose = null  // prevent retry loop before closing
+    providerWs.onclose = null
     providerWs.close()
     providerWs = null
   }
 
   let stopped = false
+  let keepaliveTimer = null
 
   providerWs = new WebSocket(RELAY_WS)
   providerWs.onopen = () => {
@@ -251,7 +257,13 @@ async function startSharing({ country, userId }, attempt = 0) {
       agentMode: true,
     }))
     isSharing = true
-    attempt = 0  // reset backoff on successful connect
+    attempt = 0
+    // Ping every 20s to keep service worker alive (Chrome kills idle SWs at 30s)
+    keepaliveTimer = setInterval(() => {
+      if (providerWs?.readyState === WebSocket.OPEN) {
+        providerWs.send(JSON.stringify({ type: 'ping' }))
+      }
+    }, 20000)
   }
   providerWs.onmessage = async (event) => {
     const msg = JSON.parse(event.data)
@@ -263,13 +275,14 @@ async function startSharing({ country, userId }, attempt = 0) {
       providerWs.send(JSON.stringify({ type: 'proxy_response', sessionId: msg.sessionId, response }))
     }
     if (msg.type === 'error') {
-      // Evicted by relay (duplicate) — stop retrying, caller will re-register
       stopped = true
       isSharing = false
+      clearInterval(keepaliveTimer)
     }
   }
   providerWs.onclose = () => {
     isSharing = false
+    clearInterval(keepaliveTimer)
     if (!stopped && attempt < 4) {
       setTimeout(() => startSharing({ country, userId }, attempt + 1), 3000 * (attempt + 1))
     }

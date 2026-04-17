@@ -231,6 +231,9 @@ function handleMessage(ws, msg) {
       break
     }
 
+    case 'ping':
+      break // keepalive from extension service worker — ignore silently
+
     default:
       log(ws.peerId.slice(0,8), `UNKNOWN_MSG type=${msg.type}`)
   }
