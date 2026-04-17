@@ -75,7 +75,7 @@ export async function POST(req: Request) {
     token,
     supabase_token: session.access_token,
     used: false,
-    expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
   }, { onConflict: 'ext_id' })
 
   return NextResponse.json({ ok: true }, { headers: CORS })
@@ -222,7 +222,8 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: 'Account not verified' }, { status: 403, headers: CORS })
   }
 
-  await adminClient.from('extension_auth_tokens').update({ used: true }).eq('ext_id', ext_id)
+  // Don't mark as used — allow re-auth if popup is reopened
+  // await adminClient.from('extension_auth_tokens').update({ used: true }).eq('ext_id', ext_id)
 
   return NextResponse.json({
     user: {

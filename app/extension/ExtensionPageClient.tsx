@@ -88,6 +88,7 @@ function ActivateScreen() {
 export default function ExtensionPageClient() {
   const searchParams = useSearchParams()
   const isActivate = searchParams.get('activate') === '1' || !!searchParams.get('code')
+  const urlExtId = searchParams.get('ext_id') ?? ''
 
   const [step, setStep] = useState<'idle' | 'downloading' | 'guide' | 'done'>('idle')
   const [copied, setCopied] = useState(false)
@@ -113,6 +114,14 @@ export default function ExtensionPageClient() {
     }, 1000)
     return () => clearInterval(interval)
   }, [])
+
+  // Auto sign-in if ext_id is in URL and user is already authenticated
+  useEffect(() => {
+    if (!urlExtId || isActivate) return
+    setStep('done')
+    sendAuthToExtension()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlExtId])
 
   async function handleDownload() {
     setStep('downloading')
@@ -159,8 +168,9 @@ export default function ExtensionPageClient() {
   async function sendAuthToExtension() {
     setSending(true)
     try {
-      const extId = document.querySelector<HTMLElement>('[data-peermesh-extension]')?.dataset.extId
-      if (!extId) throw new Error('Extension not detected — make sure it is installed and enabled')
+      // Prefer ext_id from URL param (set by extension popup), fall back to DOM marker
+      const extId = urlExtId || document.querySelector<HTMLElement>('[data-peermesh-extension]')?.dataset.extId
+      if (!extId) throw new Error('Extension not detected — open this page from the PeerMesh extension popup')
       const res = await fetch('/api/extension-auth', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

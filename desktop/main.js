@@ -934,6 +934,7 @@ ipcMain.handle('sign-in', async (_, { token, userId, country, trust }) => {
   saveConfig()
   connectRelay()
   updateTray()
+  showWindow()
   log('sign-in success — userId:', userId)
   return { success: true }
 })
@@ -997,7 +998,8 @@ if (IS_NATIVE_HOST_MODE) {
 
   if (config.token && config.userId && config.shareEnabled) {
     connectRelay()
-  } else if (!IS_BACKGROUND_LAUNCH) {
+    if (!IS_BACKGROUND_LAUNCH) showWindow()
+  } else {
     showWindow()
   }
 })

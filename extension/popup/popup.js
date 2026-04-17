@@ -163,6 +163,7 @@ function renderAuth(app) {
       <h2>Welcome</h2>
       <p>Sign in on the PeerMesh website, then this popup will update automatically.</p>
       <button class="btn-primary" id="openDashboard">OPEN WEBSITE TO SIGN IN</button>
+      <button class="btn-primary" id="openExtensionPage" style="margin-top:8px;background:transparent;border:1px solid #00ff88;color:#00ff88">SIGN IN TO EXTENSION</button>
       <div style="margin-top:16px;display:flex;align-items:center;justify-content:center;gap:8px;color:#666680;font-size:11px;font-family:'Courier New',monospace">
         <span style="display:inline-block;width:8px;height:8px;border:2px solid #1e1e2a;border-top-color:#00ff88;border-radius:50%;animation:spin 0.8s linear infinite"></span>
         WAITING FOR SIGN IN...
@@ -173,6 +174,9 @@ function renderAuth(app) {
   document.getElementById('openDashboard').onclick = () => {
     chrome.tabs.create({ url: `${API}/auth?mode=login&source=extension&ext_id=${state.extId}` })
   }
+  document.getElementById('openExtensionPage')?.addEventListener('click', () => {
+    chrome.tabs.create({ url: `${API}/extension?ext_id=${state.extId}` })
+  })
 }
 
 function renderDashboard(app) {

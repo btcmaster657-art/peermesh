@@ -23,7 +23,7 @@ export default function AuthForm() {
     setMode((searchParams.get('mode') as 'login' | 'signup') || 'login')
   }, [searchParams])
 
-  // If already signed in and ext_id present, write token and wait for desktop to pick it up
+  // If already signed in and ext_id present, write token and redirect to extension page
   useEffect(() => {
     if (!extId) return
     supabase.auth.getSession().then(async ({ data: { session } }) => {
@@ -33,8 +33,7 @@ export default function AuthForm() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ext_id: extId }),
       })
-      // Give the desktop app 6s to poll and pick up the token before redirecting
-      setTimeout(() => router.push('/dashboard'), 6000)
+      router.push(`/extension?ext_id=${extId}`)
     })
   }, [extId])
 
@@ -83,8 +82,10 @@ export default function AuthForm() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ ext_id: extId }),
           })
+          router.push(`/extension?ext_id=${extId}`)
+        } else {
+          router.push('/dashboard')
         }
-        router.push('/dashboard')
       }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Something went wrong')
