@@ -38,7 +38,7 @@ export async function GET(req: Request) {
   // Allow override via ?platform=win|mac|linux
   const { searchParams } = new URL(req.url)
   const override = searchParams.get('platform') as Platform | null
-  const platform: Platform = (override && override in PLATFORM_MAP) ? override : detectPlatform(ua)
+  const platform: Platform = (override && override in PLATFORM_MIME) ? override : detectPlatform(ua)
 
   const mime = PLATFORM_MIME[platform]
   const ext = PLATFORM_EXT[platform]
