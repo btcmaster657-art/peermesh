@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { readdirSync } from 'fs'
+import { readdirSync, readFileSync } from 'fs'
 import { join } from 'path'
 
 function getLatestDesktopVersion(): string | null {
@@ -13,9 +13,16 @@ function getLatestDesktopVersion(): string | null {
   } catch { return null }
 }
 
+function getExtensionVersion(): string {
+  try {
+    const manifest = JSON.parse(readFileSync(join(process.cwd(), 'extension', 'manifest.json'), 'utf-8'))
+    return manifest.version ?? '1.0.0'
+  } catch { return '1.0.0' }
+}
+
 export async function GET() {
   return NextResponse.json({
     desktop: getLatestDesktopVersion(),
-    extension: '1.0.0',
+    extension: getExtensionVersion(),
   })
 }

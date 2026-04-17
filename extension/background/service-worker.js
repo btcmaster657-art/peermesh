@@ -6,34 +6,58 @@ const NATIVE_HOST = 'com.peermesh.desktop'
 const CONTROL_PORT = 7654
 
 let relayWs = null
-let currentSession = null   // { ws, sessionId, country, relayEndpoint }
+let currentSession = null
 let agentSessionId = null
 let supabaseToken = null
+let desktopToken = null
 let sharingUserId = null
 let sharingCountry = null
 let heartbeatInterval = null
 
-// Pending proxy requests: requestId → { resolve, reject, timer }
 const pendingRequests = new Map()
+
+// ── Logger ────────────────────────────────────────────────────────────────────
+
+const MAX_LOGS = 200
+const _logs = []
+
+function log(level, ...args) {
+  const ts = new Date().toISOString().slice(11, 23)
+  const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ')
+  const entry = { ts, level, msg }
+  _logs.push(entry)
+  if (_logs.length > MAX_LOGS) _logs.shift()
+  console[level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'log'](`[${ts}] [SW] ${msg}`)
+  // Broadcast to any open popup
+  chrome.runtime.sendMessage({ type: 'LOG', entry }).catch(() => {})
+}
+
+function getLogs() { return [..._logs] }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   ;(async () => {
     try {
       switch (msg.type) {
+        case 'GET_LOGS':
+          sendResponse({ logs: getLogs() })
+          break
         case 'CONNECT':
+          log('info', 'CONNECT country=' + msg.country + ' userId=' + msg.userId?.slice(0,8))
           await connectToRelay(msg)
           sendResponse({ success: true })
           break
         case 'DISCONNECT':
+          log('info', 'DISCONNECT requested')
           await disconnect()
           sendResponse({ success: true })
           break
         case 'START_SHARING': {
           if (msg.supabaseToken) {
             supabaseToken = msg.supabaseToken
+            desktopToken = msg.desktopToken || null
             sharingUserId = msg.userId
             sharingCountry = msg.country
-            await chrome.storage.local.set({ supabaseToken })
+            await chrome.storage.local.set({ supabaseToken, desktopToken, sharingCountry, sharingUserId })
           }
           const result = await startDesktopSharing(msg)
           if (result.success) startExtensionHeartbeat()
@@ -49,6 +73,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         case 'GET_STATUS': {
           const helper = await getDesktopHelperStatus()
           const isSharing = helper.available && (helper.running || helper.shareEnabled)
+          log('info', 'GET_STATUS helper.available=' + helper.available + ' running=' + helper.running + ' isSharing=' + isSharing)
           await chrome.storage.local.set({ isSharing, helper })
           sendResponse({ connected: !!currentSession, session: currentSession, isSharing, helper })
           break
@@ -104,24 +129,26 @@ function startExtensionHeartbeat() {
 
 function stopExtensionHeartbeat() {
   if (heartbeatInterval) { clearInterval(heartbeatInterval); heartbeatInterval = null }
-  if (!supabaseToken || !sharingUserId) return
+  const token = desktopToken || supabaseToken
+  if (!token || !sharingUserId) return
   chrome.storage.local.get(['extId'], ({ extId }) => {
     if (!extId) return
     fetch(`${APP_URL}/api/user/sharing`, {
       method: 'DELETE',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${supabaseToken}` },
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
       body: JSON.stringify({ device_id: extId }),
     }).catch(() => {})
   })
 }
 
 function sendExtensionHeartbeat() {
-  if (!supabaseToken || !sharingCountry) return
+  const token = desktopToken || supabaseToken
+  if (!token || !sharingCountry) return
   chrome.storage.local.get(['extId'], ({ extId }) => {
     if (!extId) return
     fetch(`${APP_URL}/api/user/sharing`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${supabaseToken}` },
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
       body: JSON.stringify({ device_id: `ext_${extId}`, country: sharingCountry }),
     }).catch(() => {})
   })
@@ -141,8 +168,9 @@ async function sendNativeMessage(message) {
 async function getDesktopHelperStatusHttp() {
   try {
     const res = await fetch(`http://127.0.0.1:${CONTROL_PORT}/native/state`, { signal: AbortSignal.timeout(1500) })
-    if (!res.ok) return null
+    if (!res.ok) { log('warn', 'desktop HTTP status not ok: ' + res.status); return null }
     const data = await res.json()
+    log('info', 'desktop HTTP state: running=' + data.running + ' shareEnabled=' + data.shareEnabled + ' v=' + data.version)
     return {
       available: true,
       running: !!data.running,
@@ -152,7 +180,7 @@ async function getDesktopHelperStatusHttp() {
       userId: data.userId ?? null,
       version: data.version ?? null,
     }
-  } catch { return null }
+  } catch (e) { log('warn', 'desktop HTTP unreachable: ' + e.message); return null }
 }
 
 async function getDesktopHelperStatus() {
@@ -241,7 +269,9 @@ async function connectToRelay(opts, attempt = 0) {
 
 async function connectOnce({ relayEndpoint, country, userId }) {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(relayEndpoint || RELAY_WS)
+    const wsUrl = relayEndpoint || RELAY_WS
+    log('info', 'WS connecting to ' + wsUrl + ' country=' + country)
+    const ws = new WebSocket(wsUrl)
     let keepaliveTimer = null
     let settled = false
 
@@ -253,6 +283,7 @@ async function connectOnce({ relayEndpoint, country, userId }) {
     }
 
     ws.onopen = () => {
+      log('info', 'WS open — sending request_session country=' + country)
       ws.send(JSON.stringify({ type: 'request_session', country, userId, requireTunnel: false }))
       keepaliveTimer = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' }))
@@ -261,6 +292,7 @@ async function connectOnce({ relayEndpoint, country, userId }) {
 
     ws.onmessage = async (event) => {
       const msg = JSON.parse(event.data)
+      if (msg.type !== 'pong') log('info', 'WS msg: ' + msg.type + (msg.sessionId ? ' session=' + msg.sessionId.slice(0,8) : '') + (msg.message ? ' → ' + msg.message : ''))
 
       if (msg.type === 'session_created') {
         agentSessionId = msg.sessionId
@@ -270,26 +302,25 @@ async function connectOnce({ relayEndpoint, country, userId }) {
         relayWs = ws
         agentSessionId = msg.sessionId || agentSessionId
         currentSession = { ws, sessionId: agentSessionId, country, relayEndpoint }
+        log('info', 'agent_session_ready sessionId=' + agentSessionId?.slice(0,8))
 
-        // Tell desktop about this session so its local proxy can use it too
         const desktopStatus = await getDesktopHelperStatusHttp()
+        log('info', 'desktop available=' + !!desktopStatus?.available + ' — choosing proxy mode')
         if (desktopStatus?.available) {
           fetch(`http://127.0.0.1:${CONTROL_PORT}/proxy-session`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ sessionId: agentSessionId, relayEndpoint: relayEndpoint || RELAY_WS, country }),
-          }).catch(() => {})
+          }).then(() => log('info', 'proxy-session sent to desktop')).catch(e => log('warn', 'proxy-session failed: ' + e.message))
+          setProxyDesktop(agentSessionId)
+        } else {
+          setProxyRelay(relayEndpoint || RELAY_WS, agentSessionId)
         }
 
-        // Set Chrome proxy to relay:8081 for full-browser routing
-        // This works because the relay's HTTP proxy server handles CONNECT tunnels
-        // through the provider agent — all traffic exits from the provider's IP
-        setProxy(relayEndpoint || RELAY_WS, agentSessionId)
         settle(resolve, undefined)
       }
 
       if (msg.type === 'proxy_response') {
-        // Response to a proxy_request we sent — resolve the pending promise
         const requestId = msg.response?.requestId
         const pending = pendingRequests.get(requestId)
         if (pending) {
@@ -300,11 +331,13 @@ async function connectOnce({ relayEndpoint, country, userId }) {
       }
 
       if (msg.type === 'error') {
+        log('error', 'relay error: ' + msg.message)
         ws.close(1000)
         settle(reject, new Error(msg.message))
       }
 
       if (msg.type === 'session_ended') {
+        log('info', 'session_ended — clearing proxy')
         clearProxy()
         currentSession = null
         relayWs = null
@@ -313,9 +346,10 @@ async function connectOnce({ relayEndpoint, country, userId }) {
       }
     }
 
-    ws.onerror = () => { settle(reject, new Error('WebSocket connection failed')) }
+    ws.onerror = (e) => { log('error', 'WS error: ' + (e.message || 'unknown')); settle(reject, new Error('WebSocket connection failed')) }
 
-    ws.onclose = () => {
+    ws.onclose = (e) => {
+      log('warn', 'WS closed code=' + e.code + ' reason=' + (e.reason || 'none') + ' wasClean=' + e.wasClean)
       clearInterval(keepaliveTimer)
       if (currentSession) {
         clearProxy()
@@ -329,6 +363,7 @@ async function connectOnce({ relayEndpoint, country, userId }) {
 
     setTimeout(() => {
       if (!settled) {
+        log('warn', 'session timeout — no peer in ' + country)
         ws.close(1000)
         settle(reject, new Error('No peer available in ' + country + ' — try again shortly'))
       }
@@ -336,68 +371,9 @@ async function connectOnce({ relayEndpoint, country, userId }) {
   })
 }
 
-// ── Proxy settings ────────────────────────────────────────────────────────────
-// Instead of an external HTTP proxy (port 8081, broken with shared IPv4),
-// we open a second WebSocket to wss://relay/proxy?session=<id>.
-// The relay pipes binary frames to/from the provider's TCP socket.
-// The extension implements a local HTTP proxy server using chrome.sockets.tcpServer
-// ... but that API isn't available in MV3 service workers.
-//
-// Simplest working approach: use chrome.proxy PAC pointing to the relay's
-// /proxy WebSocket endpoint wrapped as an HTTP proxy via a local port.
-// Since we can't open a TCP server in a service worker, we instead intercept
-// all requests using the existing relay WebSocket (proxy_request for HTTP,
-// proxy_ws_data for HTTPS tunnels opened by the desktop local proxy).
-//
-// For the Nigerian user WITHOUT desktop: proxy_request handles HTTP fetches.
-// For HTTPS: the desktop local proxy (127.0.0.1:7655) handles CONNECT tunnels
-// through the relay /proxy WebSocket.
-//
-// TL;DR: when desktop is available → use local proxy (7655) which tunnels via /proxy WS.
-//        when no desktop → proxy_request over relay WS (HTTP only, HTTPS limited).
+// ── Proxy settings ───────────────────────────────────────────────────────────
 
-let proxyWs = null  // WebSocket to relay /proxy endpoint
-
-function openProxyWs(relayEndpoint, sessionId) {
-  if (proxyWs && proxyWs.readyState === WebSocket.OPEN) return
-  const wsUrl = (relayEndpoint || RELAY_WS)
-    .replace('wss://', 'wss://')
-    .replace('ws://', 'ws://')
-    .replace(/\/$/, '')
-  const url = wsUrl.replace('wss://', 'wss://').replace('ws://', 'ws://')
-  // Connect to /proxy path with session ID
-  const proxyUrl = url.includes('localhost')
-    ? url.replace(/(\/[^?]*)?(\?.*)?$/, `/proxy?session=${sessionId}`)
-    : `wss://peermesh-relay.fly.dev/proxy?session=${encodeURIComponent(sessionId)}`
-
-  proxyWs = new WebSocket(proxyUrl)
-  proxyWs.onopen = () => console.log('[proxy-ws] connected')
-  proxyWs.onclose = () => { proxyWs = null }
-  proxyWs.onerror = () => { proxyWs = null }
-  // Binary data from provider comes back here — forwarded to desktop local proxy
-  proxyWs.onmessage = () => {}
-}
-
-function closeProxyWs() {
-  if (proxyWs) { proxyWs.close(); proxyWs = null }
-}
-
-function setProxy(relayEndpoint, sessionId) {
-  // Tell desktop to use the /proxy WS for tunneling
-  const desktopAvailable = true // checked before calling
-  // Desktop local proxy on 127.0.0.1:7655 handles CONNECT tunnels via /proxy WS
-  // Chrome proxy → 127.0.0.1:7655 → relay /proxy WS → provider TCP socket
-  // BUT Chrome blocks 127.0.0.1 as proxy in PAC scripts.
-  //
-  // Real fix: use the relay's /proxy WS directly from the desktop local proxy.
-  // The desktop already has localProxyServer on 7655 that handles CONNECT.
-  // We just need Chrome to use it. Chrome DOES allow 127.0.0.1 in fixed_servers mode.
-
-  const relayUrl = (relayEndpoint || RELAY_WS).replace('wss://', 'https://').replace('ws://', 'http://')
-  const relayHost = new URL(relayUrl).hostname
-
-  // Use fixed_servers proxy mode pointing to desktop local proxy
-  // Chrome allows 127.0.0.1 in fixed_servers (just not in PAC scripts)
+function setProxyDesktop(sessionId) {
   chrome.proxy.settings.set(
     {
       value: {
@@ -411,22 +387,22 @@ function setProxy(relayEndpoint, sessionId) {
     },
     () => {
       if (chrome.runtime.lastError) {
-        console.error('[proxy] fixed_servers error:', chrome.runtime.lastError.message)
-        // Fall back to PAC with relay host
-        setProxyFallback(relayHost, sessionId)
+        log('error', 'proxy fixed_servers error: ' + chrome.runtime.lastError.message)
       } else {
-        console.log('[proxy] set fixed_servers → 127.0.0.1:7655')
+        log('info', 'proxy set → fixed_servers 127.0.0.1:7655')
       }
     }
   )
-
   chrome.storage.session.set({ proxySessionId: sessionId, proxyHost: '127.0.0.1', proxyPort: 7655 })
   chrome.action.setBadgeText({ text: 'ON' })
   chrome.action.setBadgeBackgroundColor({ color: '#00ff88' })
 }
 
-function setProxyFallback(relayHost, sessionId) {
-  // Last resort: PAC script pointing to relay host (HTTP only, no HTTPS tunnels)
+function setProxyRelay(relayEndpoint, sessionId) {
+  const relayUrl = (relayEndpoint || RELAY_WS).replace('wss://', 'https://').replace('ws://', 'http://')
+  const relayHost = new URL(relayUrl).hostname
+  log('info', 'proxy set → PAC relay ' + relayHost + ':8081')
+
   const pacScript = `
     function FindProxyForURL(url, host) {
       if (host === 'localhost' || host === '127.0.0.1' || isPlainHostName(host)) return 'DIRECT';
@@ -435,12 +411,18 @@ function setProxyFallback(relayHost, sessionId) {
   `
   chrome.proxy.settings.set(
     { value: { mode: 'pac_script', pacScript: { data: pacScript } }, scope: 'regular' },
-    () => {}
+    () => {
+      if (chrome.runtime.lastError) log('error', 'proxy pac_script error: ' + chrome.runtime.lastError.message)
+      else log('info', 'proxy PAC active → ' + relayHost + ':8081')
+    }
   )
   chrome.storage.session.set({ proxySessionId: sessionId, proxyHost: relayHost, proxyPort: 8081 })
+  chrome.action.setBadgeText({ text: 'ON' })
+  chrome.action.setBadgeBackgroundColor({ color: '#00ff88' })
 }
 
 function clearProxy() {
+  log('info', 'proxy cleared')
   chrome.proxy.settings.clear({ scope: 'regular' })
   chrome.storage.session.remove(['proxySessionId', 'proxyHost', 'proxyPort'])
   chrome.action.setBadgeText({ text: '' })
@@ -482,8 +464,11 @@ async function disconnect() {
 chrome.runtime.onStartup.addListener(async () => {
   clearProxy()
   await chrome.storage.local.set({ session: null })
-  const stored = await chrome.storage.local.get(['supabaseToken', 'extId'])
+  const stored = await chrome.storage.local.get(['supabaseToken', 'desktopToken', 'extId', 'sharingCountry', 'sharingUserId'])
   if (stored.supabaseToken) supabaseToken = stored.supabaseToken
+  if (stored.desktopToken) desktopToken = stored.desktopToken
+  if (stored.sharingCountry) sharingCountry = stored.sharingCountry
+  if (stored.sharingUserId) sharingUserId = stored.sharingUserId
   const helper = await getDesktopHelperStatus()
   const isSharing = helper.available && (helper.running || helper.shareEnabled)
   await chrome.storage.local.set({ isSharing, helper })
@@ -513,10 +498,21 @@ chrome.runtime.onMessageExternal.addListener((msg) => {
 chrome.alarms.create('syncSharingState', { periodInMinutes: 0.17 })
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name !== 'syncSharingState') return
+
+  // Restore in-memory state if service worker was restarted
+  if (!supabaseToken || !sharingCountry) {
+    const stored = await chrome.storage.local.get(['supabaseToken', 'desktopToken', 'sharingCountry', 'sharingUserId'])
+    if (stored.supabaseToken) supabaseToken = stored.supabaseToken
+    if (stored.desktopToken) desktopToken = stored.desktopToken
+    if (stored.sharingCountry) sharingCountry = stored.sharingCountry
+    if (stored.sharingUserId) sharingUserId = stored.sharingUserId
+  }
+
   const helper = await getDesktopHelperStatus()
   const isSharing = helper.available && (helper.running || helper.shareEnabled)
   await chrome.storage.local.set({ isSharing, helper })
   if (isSharing) {
+    if (supabaseToken && sharingCountry && !heartbeatInterval) startExtensionHeartbeat()
     chrome.action.setBadgeText({ text: 'SHR' })
     chrome.action.setBadgeBackgroundColor({ color: '#00ff88' })
   } else if (!currentSession) {

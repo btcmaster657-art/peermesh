@@ -367,6 +367,11 @@ function connectRelay() {
     log('connectRelay skipped — no token/userId')
     return
   }
+  // Prevent duplicate connections
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+    log('connectRelay skipped — already connected/connecting')
+    return
+  }
   log('connectRelay — userId:', config.userId, 'country:', config.country)
   ws = new WebSocket(RELAY_WS)
 
@@ -402,8 +407,8 @@ function connectRelay() {
         updateTray()
       } else if (msg.type === 'error') {
         log('relay error message:', msg.message)
-        // If replaced by a newer connection, stop reconnecting
         if (msg.message?.includes('Replaced')) {
+          // We were evicted — a newer instance took over, stop this one cleanly
           ws.removeAllListeners('close')
           ws.close(1000)
           running = false
@@ -428,14 +433,18 @@ function connectRelay() {
           activeTunnels.delete(`ws_${msg.sessionId}`)
         }
       } else if (msg.type === 'session_request') {
+        log('session_request received sessionId:', msg.sessionId?.slice(0,8))
         ws.send(JSON.stringify({ type: 'agent_ready', sessionId: msg.sessionId }))
       } else if (msg.type === 'proxy_request') {
+        log('proxy_request url:', msg.request?.url?.slice(0,80))
         const response = await handleFetch(msg.request)
         ws.send(JSON.stringify({ type: 'proxy_response', sessionId: msg.sessionId, response }))
       } else if (msg.type === 'open_tunnel') {
+        log('open_tunnel', msg.hostname + ':' + msg.port, 'tunnelId:', msg.tunnelId?.slice(0,8))
         const socket = net.connect(msg.port, msg.hostname)
         activeTunnels.set(msg.tunnelId, { socket, closed: false, sessionId: msg.sessionId ?? null })
         socket.on('connect', () => {
+          log('open_tunnel connected', msg.hostname + ':' + msg.port)
           sendRelayMessage({ type: 'tunnel_ready', tunnelId: msg.tunnelId })
         })
         socket.on('data', (chunk) => {
@@ -445,7 +454,7 @@ function connectRelay() {
         })
         socket.on('end', () => closeTunnel(msg.tunnelId, true))
         socket.on('close', () => activeTunnels.delete(msg.tunnelId))
-        socket.on('error', () => closeTunnel(msg.tunnelId, true))
+        socket.on('error', (e) => { log('open_tunnel error', msg.hostname, e.message); closeTunnel(msg.tunnelId, true) })
       } else if (msg.type === 'tunnel_data') {
         const tunnel = activeTunnels.get(msg.tunnelId)
         if (tunnel?.socket && !tunnel.socket.destroyed) {
@@ -465,6 +474,7 @@ function connectRelay() {
     running = false
     stats.connectedAt = null
     closeAllTunnels(false)
+    ws = null
     updateTray()
     if (code !== 1000) {
       reconnectTimer = setTimeout(connectRelay, reconnectDelay)
@@ -587,28 +597,28 @@ const localProxyServer = http.createServer((req, res) => {
 })
 
 localProxyServer.on('connect', (req, clientSocket, head) => {
-  // HTTPS CONNECT — open a WebSocket to relay /proxy?session=<id>
-  // and pipe raw TCP through it to the provider
   const [hostname, portStr] = (req.url || '').split(':')
   const port = parseInt(portStr) || 443
+  log('local-proxy CONNECT', hostname + ':' + port, '| sessionId:', proxySession?.sessionId?.slice(0,8) || 'NONE')
 
   if (!proxySession?.sessionId) {
+    log('local-proxy CONNECT rejected — no proxySession')
     clientSocket.write('HTTP/1.1 503 No PeerMesh Session\r\n\r\n')
     clientSocket.destroy()
     return
   }
 
   const relayBase = (proxySession.relayEndpoint || RELAY_WS)
-    .replace('wss://', 'wss://')
-    .replace('ws://', 'ws://')
-    .replace(/\/[^/]*$/, '') // strip path
+    .replace(/\/[^/]*$/, '')
   const proxyUrl = `${relayBase}/proxy?session=${encodeURIComponent(proxySession.sessionId)}`
+  log('local-proxy opening tunnel WS:', proxyUrl.slice(0, 60))
 
   const tunnelWs = new WebSocket(proxyUrl)
   let opened = false
 
   tunnelWs.on('open', () => {
     opened = true
+    log('local-proxy tunnel WS open for', hostname + ':' + port)
     clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n')
     if (head?.length) tunnelWs.send(head)
     clientSocket.on('data', (chunk) => {
@@ -622,19 +632,20 @@ localProxyServer.on('connect', (req, clientSocket, head) => {
     if (!clientSocket.destroyed) clientSocket.write(Buffer.isBuffer(data) ? data : Buffer.from(data))
   })
 
-  tunnelWs.on('close', () => {
+  tunnelWs.on('close', (code, reason) => {
+    log('local-proxy tunnel WS closed', hostname + ':' + port, 'code=' + code, reason?.toString() || '')
     if (!clientSocket.destroyed) clientSocket.destroy()
   })
 
-  tunnelWs.on('error', () => {
-    if (!opened) {
-      clientSocket.write('HTTP/1.1 502 Bad Gateway\r\n\r\n')
-    }
+  tunnelWs.on('error', (e) => {
+    log('local-proxy tunnel WS error', hostname + ':' + port, e.message)
+    if (!opened) clientSocket.write('HTTP/1.1 502 Bad Gateway\r\n\r\n')
     if (!clientSocket.destroyed) clientSocket.destroy()
   })
 
   setTimeout(() => {
     if (!opened) {
+      log('local-proxy tunnel timeout for', hostname + ':' + port)
       tunnelWs.terminate()
       clientSocket.write('HTTP/1.1 504 Tunnel Timeout\r\n\r\n')
       clientSocket.destroy()
@@ -822,10 +833,10 @@ const controlServer = http.createServer((req, res) => {
       try {
         const data = JSON.parse(body)
         proxySession = data
-        // If the desktop is already connected to the relay as a provider,
-        // reuse that WS connection for the proxy (avoids opening a second session)
+        log('proxy-session set sessionId:', data.sessionId?.slice(0,8), 'relay:', data.relayEndpoint)
         if (ws && ws.readyState === WebSocket.OPEN) {
           proxySession.ws = ws
+          log('proxy-session reusing existing relay WS')
         }
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ success: true }))
@@ -1015,6 +1026,17 @@ if (IS_NATIVE_HOST_MODE) {
   registerNativeMessagingHost()
   runNativeHostMode()
 } else app.whenReady().then(() => {
+  // Enforce single instance
+  if (!app.requestSingleInstanceLock()) {
+    log('Another instance is already running — quitting')
+    app.quit()
+    return
+  }
+  app.on('second-instance', () => {
+    // A second instance tried to launch — just focus the existing window
+    if (settingsWindow) { settingsWindow.show(); settingsWindow.focus() }
+  })
+
   log('app ready — version:', DESKTOP_VERSION, 'background:', IS_BACKGROUND_LAUNCH)
   app.on('window-all-closed', (e) => e.preventDefault())
   app.setLoginItemSettings({ openAtLogin: true, openAsHidden: true })

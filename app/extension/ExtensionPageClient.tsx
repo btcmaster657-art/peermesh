@@ -242,6 +242,12 @@ export default function ExtensionPageClient() {
         {/* ── Guide ── */}
         {step === 'guide' && (
           <div>
+            <button
+              onClick={() => setStep('idle')}
+              style={{ background: 'none', border: 'none', color: 'var(--muted)', fontFamily: mono, fontSize: '11px', cursor: 'pointer', padding: '0 0 20px 0', letterSpacing: '0.5px' }}
+            >
+              ← BACK
+            </button>
             <h2 style={{ fontSize: '20px', fontWeight: 700, marginBottom: '8px' }}>3 steps to finish</h2>
             <p style={{ color: 'var(--muted)', fontSize: '13px', marginBottom: '20px', lineHeight: 1.6 }}>
               ZIP downloaded to your Downloads folder. Now:

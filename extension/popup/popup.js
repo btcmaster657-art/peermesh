@@ -56,6 +56,8 @@ async function init() {
 
   state.loading = false
   render()
+  renderLogPanel()
+  await initLogPanel()
 
   if (!state.user) startAuthPolling()
 }
@@ -127,7 +129,7 @@ function startAuthPolling() {
         state.user = data.user
         state.supabaseToken = data.user.supabaseToken ?? null
         state.loading = false
-        await chrome.storage.local.set({ user: data.user, supabaseToken: state.supabaseToken })
+        await chrome.storage.local.set({ user: data.user, supabaseToken: state.supabaseToken, desktopToken: data.user.token })
         await refreshRuntimeStatus()
         render()
         startPeerPolling()
@@ -380,6 +382,7 @@ async function toggleSharing(on) {
     userId: state.user?.id,
     token: state.user?.token,
     supabaseToken: state.supabaseToken,
+    desktopToken: state.user?.token,
     trust: state.user?.trustScore || 50,
   })
 
@@ -434,14 +437,83 @@ function formatBytes(bytes) {
   return `${(bytes / 1024 / 1024 / 1024).toFixed(2)}GB`
 }
 
-// ── Listen for auth from website ──────────────────────────────────────────────
+// ── Debug log panel ──────────────────────────────────────────────────────────
 
+const logEntries = []
+
+function appendLog(entry) {
+  logEntries.push(entry)
+  if (logEntries.length > 200) logEntries.shift()
+  const panel = document.getElementById('pm-log-body')
+  if (!panel) return
+  const line = document.createElement('div')
+  line.style.cssText = `color:${entry.level === 'error' ? '#ff6060' : entry.level === 'warn' ? '#ffaa00' : '#aaa'};margin:1px 0;word-break:break-all`
+  line.textContent = `${entry.ts} ${entry.msg}`
+  panel.appendChild(line)
+  panel.scrollTop = panel.scrollHeight
+}
+
+async function initLogPanel() {
+  // Load existing logs from SW
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'GET_LOGS' })
+    if (res?.logs) res.logs.forEach(appendLog)
+  } catch {}
+}
+
+// Listen for live log entries from SW
 chrome.runtime.onMessage.addListener((msg) => {
+  if (msg.type === 'LOG') appendLog(msg.entry)
   if (msg.type === 'AUTH_SUCCESS') {
     state.user = msg.user
     chrome.storage.local.set({ user: msg.user })
     render()
   }
 })
+
+function renderLogPanel() {
+  const existing = document.getElementById('pm-log-panel')
+  if (existing) return
+  const panel = document.createElement('div')
+  panel.id = 'pm-log-panel'
+  panel.innerHTML = `
+    <div id="pm-log-toggle" style="padding:6px 16px;font-size:10px;color:#444;cursor:pointer;font-family:'Courier New',monospace;display:flex;justify-content:space-between;border-top:1px solid #1a1a2a">
+      <span>DEBUG LOGS</span><span id="pm-log-arrow">▼</span>
+    </div>
+    <div id="pm-log-body" style="display:none;max-height:160px;overflow-y:auto;padding:4px 16px 8px;font-size:10px;font-family:'Courier New',monospace;background:#050508"></div>
+    <div style="padding:2px 16px 8px;display:flex;gap:6px">
+      <button id="pm-log-copy" style="background:none;border:1px solid #222;color:#555;font-size:9px;font-family:'Courier New',monospace;cursor:pointer;padding:2px 8px;border-radius:3px">COPY</button>
+      <button id="pm-log-clear" style="background:none;border:1px solid #222;color:#555;font-size:9px;font-family:'Courier New',monospace;cursor:pointer;padding:2px 8px;border-radius:3px">CLEAR</button>
+    </div>`
+  document.body.appendChild(panel)
+
+  // Populate existing entries
+  logEntries.forEach(e => {
+    const line = document.createElement('div')
+    line.style.cssText = `color:${e.level === 'error' ? '#ff6060' : e.level === 'warn' ? '#ffaa00' : '#aaa'};margin:1px 0;word-break:break-all`
+    line.textContent = `${e.ts} ${e.msg}`
+    document.getElementById('pm-log-body').appendChild(line)
+  })
+
+  let open = false
+  document.getElementById('pm-log-toggle').onclick = () => {
+    open = !open
+    document.getElementById('pm-log-body').style.display = open ? 'block' : 'none'
+    document.getElementById('pm-log-arrow').textContent = open ? '▲' : '▼'
+    if (open) document.getElementById('pm-log-body').scrollTop = document.getElementById('pm-log-body').scrollHeight
+  }
+  document.getElementById('pm-log-copy').onclick = () => {
+    const text = logEntries.map(e => `${e.ts} [${e.level}] ${e.msg}`).join('\n')
+    navigator.clipboard.writeText(text).catch(() => {})
+  }
+  document.getElementById('pm-log-clear').onclick = () => {
+    logEntries.length = 0
+    document.getElementById('pm-log-body').innerHTML = ''
+  }
+}
+
+// ── Listen for auth from website ──────────────────────────────────────────────
+
+// (moved above into onMessage listener)
 
 init()

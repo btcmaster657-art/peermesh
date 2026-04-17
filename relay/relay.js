@@ -51,6 +51,9 @@ server.on('upgrade', (req, socket, head) => {
 })
 
 // ── /proxy connection handler ─────────────────────────────────────────────────
+// Desktop local proxy (127.0.0.1:7655) opens this WebSocket after receiving
+// a CONNECT request from Chrome. We parse the CONNECT target from the first
+// frame, send open_tunnel to the provider, then pipe raw TCP both ways.
 proxyWss.on('connection', (ws, req) => {
   const url = new URL(req.url, 'http://localhost')
   const sessionId = url.searchParams.get('session')
@@ -67,27 +70,44 @@ proxyWss.on('connection', (ws, req) => {
     return
   }
 
-  log('PROXY', `open session=${sessionId.slice(0,8)} from ${clientIp}`)
-  proxyClients.set(sessionId, ws)
+  const tunnelId = randomUUID()
+  log('PROXY', `open session=${sessionId.slice(0,8)} tunnelId=${tunnelId.slice(0,8)} from ${clientIp}`)
+  proxyClients.set(tunnelId, ws)
 
-  // Extension → provider: forward binary frames as base64 JSON
+  let tunnelOpen = false
+  let pendingFrames = []
+
   ws.on('message', (data) => {
+    if (!tunnelOpen) {
+      // First frame: parse CONNECT header to get hostname:port
+      const text = Buffer.isBuffer(data) ? data.toString() : data
+      const match = text.match(/^CONNECT ([^\s]+) HTTP/)
+      if (match) {
+        const [hostname, portStr] = match[1].split(':')
+        const port = parseInt(portStr) || 443
+        tunnelOpen = true
+        send(provider, { type: 'open_tunnel', tunnelId, sessionId, hostname, port })
+        // Don't forward the CONNECT header itself — provider will send tunnel_ready
+        return
+      }
+      // Not a CONNECT header — buffer until tunnel is ready
+      pendingFrames.push(data)
+      return
+    }
+    // Forward raw data to provider
     if (provider.readyState === WebSocket.OPEN) {
       const b64 = Buffer.isBuffer(data) ? data.toString('base64') : Buffer.from(data).toString('base64')
-      send(provider, { type: 'proxy_ws_data', sessionId, data: b64 })
+      send(provider, { type: 'tunnel_data', tunnelId, data: b64 })
     }
   })
 
   ws.on('close', () => {
-    proxyClients.delete(sessionId)
-    send(provider, { type: 'proxy_ws_close', sessionId })
-    log('PROXY', `closed session=${sessionId.slice(0,8)}`)
+    proxyClients.delete(tunnelId)
+    send(provider, { type: 'tunnel_close', tunnelId })
+    log('PROXY', `closed tunnelId=${tunnelId.slice(0,8)}`)
   })
 
-  ws.on('error', () => proxyClients.delete(sessionId))
-
-  // Notify provider that a proxy client connected
-  send(provider, { type: 'proxy_ws_open', sessionId })
+  ws.on('error', () => proxyClients.delete(tunnelId))
 })
 
 // ── Main signalling connection handler ────────────────────────────────────────
@@ -117,7 +137,7 @@ wss.on('connection', (ws, req) => {
         return
       }
       const msg = JSON.parse(data.toString())
-      log(peerId.slice(0,8), `MSG_IN type=${msg.type}`, msg.userId ? `userId=${msg.userId.slice(0,8)}` : '')
+      if (msg.type !== 'ping') log(peerId.slice(0,8), `MSG_IN type=${msg.type}`, msg.userId ? `userId=${msg.userId.slice(0,8)}` : '')
       handleMessage(ws, msg)
     } catch (e) {
       log(peerId.slice(0,8), `PARSE_ERROR ${e.message}`)
@@ -253,18 +273,27 @@ function handleMessage(ws, msg) {
       break
     }
 
-    case 'proxy_ws_data': {
-      // Provider → extension proxy WS: binary tunnel data
-      const proxyClient = proxyClients.get(msg.sessionId)
+    case 'tunnel_ready': {
+      // Provider connected to target — tell the proxy WS client to send 200
+      const proxyClient = proxyClients.get(msg.tunnelId)
+      if (proxyClient?.readyState === WebSocket.OPEN) {
+        proxyClient.send('HTTP/1.1 200 Connection Established\r\n\r\n')
+      }
+      break
+    }
+
+    case 'tunnel_data': {
+      // Provider → requester: forward data back through proxy WS
+      const proxyClient = proxyClients.get(msg.tunnelId)
       if (proxyClient?.readyState === WebSocket.OPEN) {
         proxyClient.send(Buffer.from(msg.data, 'base64'))
       }
       break
     }
 
-    case 'proxy_ws_close': {
-      const proxyClient = proxyClients.get(msg.sessionId)
-      if (proxyClient) { proxyClient.close(); proxyClients.delete(msg.sessionId) }
+    case 'tunnel_close': {
+      const proxyClient = proxyClients.get(msg.tunnelId)
+      if (proxyClient) { proxyClient.close(); proxyClients.delete(msg.tunnelId) }
       break
     }
 
@@ -275,6 +304,7 @@ function handleMessage(ws, msg) {
     }
 
     case 'ping':
+      ws.isAlive = true  // treat JSON ping as keepalive too
       break
 
     default:
