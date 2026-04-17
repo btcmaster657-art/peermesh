@@ -1,6 +1,12 @@
 // renderer/app.js
 
-document.getElementById('version-tag').textContent = `v${window.peermesh.version}`
+function setVersion(v) {
+  if (!v) return
+  document.getElementById('version-tag').textContent = `v${v}`
+  document.getElementById('welcome-heading').textContent = `WELCOME TO PEERMESH ${v}`
+}
+
+setVersion(window.peermesh.version)
 
 function formatBytes(bytes) {
   if (bytes < 1024) return `${bytes}B`
@@ -58,7 +64,7 @@ function updateUI(state) {
 
   document.getElementById('stat-requests').textContent = String(stats.requestsHandled)
   document.getElementById('stat-bytes').textContent = formatBytes(stats.bytesServed)
-  document.getElementById('user-label').textContent = config.userId ? `ID: ${config.userId}` : ''
+  document.getElementById('user-label').textContent = config.userId ? `ID: ${config.userId.slice(0, 8)}` : ''
 }
 
 // ── Poll state every 2s ───────────────────────────────────────────────────────
@@ -66,6 +72,7 @@ function updateUI(state) {
 async function pollState() {
   try {
     const state = await window.peermesh.getState()
+    if (state.version) setVersion(state.version)
     updateUI(state)
     return state
   } catch {}
@@ -76,25 +83,48 @@ setInterval(pollState, 2000)
 // ── Device flow auth ──────────────────────────────────────────────────────────
 
 let devicePollInterval = null
+let deviceFlowActive = false
 
 function stopDevicePoll() {
   if (devicePollInterval) { clearInterval(devicePollInterval); devicePollInterval = null }
+  deviceFlowActive = false
 }
 
-async function startDeviceFlow() {
+function resetAuthUI() {
   const statusEl = document.getElementById('auth-status')
   const codeEl = document.getElementById('device-code-display')
   const errEl = document.getElementById('auth-error')
+  const btn = document.getElementById('btn-open-browser')
+  codeEl.textContent = ''
+  errEl.style.display = 'none'
+  statusEl.textContent = ''
+  btn.disabled = false
+  btn.textContent = 'SIGN IN WITH BROWSER'
+}
+
+async function startDeviceFlow() {
+  if (deviceFlowActive) return
+  deviceFlowActive = true
+
+  const statusEl = document.getElementById('auth-status')
+  const codeEl = document.getElementById('device-code-display')
+  const errEl = document.getElementById('auth-error')
+  const btn = document.getElementById('btn-open-browser')
 
   errEl.style.display = 'none'
   codeEl.textContent = ''
   statusEl.textContent = 'Requesting code...'
+  btn.disabled = true
+  btn.textContent = 'OPENING BROWSER...'
 
   const result = await window.peermesh.requestDeviceCode()
   if (result.error) {
     errEl.textContent = result.error
     errEl.style.display = 'block'
     statusEl.textContent = 'Could not connect to server.'
+    btn.disabled = false
+    btn.textContent = 'TRY AGAIN'
+    deviceFlowActive = false
     return
   }
 
@@ -102,22 +132,33 @@ async function startDeviceFlow() {
 
   codeEl.textContent = user_code
   statusEl.textContent = 'Enter this code on the website:'
+  btn.disabled = false
+  btn.textContent = 'OPEN BROWSER AGAIN'
 
   // Open browser to activation page with code pre-filled
-  await window.peermesh.openAuth(`${verification_uri}?code=${encodeURIComponent(user_code)}`)
+  await window.peermesh.openAuth(`${verification_uri}?activate=1&code=${encodeURIComponent(user_code)}`)
 
   stopDevicePoll()
+  deviceFlowActive = true // keep active while polling
   devicePollInterval = setInterval(async () => {
     const poll = await window.peermesh.pollDeviceCode(device_code)
 
     if (poll.status === 'approved' && poll.user) {
       stopDevicePoll()
-      await window.peermesh.signIn({
+      resetAuthUI()
+      const res = await window.peermesh.signIn({
         token: poll.user.token,
         userId: poll.user.id,
         country: poll.user.country || 'RW',
         trust: poll.user.trustScore || 50,
       })
+      if (res && res.success === false) {
+        document.getElementById('auth-error').textContent = res.error || 'Sign-in failed.'
+        document.getElementById('auth-error').style.display = 'block'
+        document.getElementById('btn-open-browser').disabled = false
+        document.getElementById('btn-open-browser').textContent = 'SIGN IN WITH BROWSER'
+        return
+      }
       await pollState()
     } else if (poll.status === 'denied') {
       stopDevicePoll()
@@ -125,19 +166,26 @@ async function startDeviceFlow() {
       statusEl.textContent = ''
       errEl.textContent = 'Sign-in was denied.'
       errEl.style.display = 'block'
+      btn.disabled = false
+      btn.textContent = 'SIGN IN WITH BROWSER'
     } else if (poll.status === 'expired') {
       stopDevicePoll()
       codeEl.textContent = ''
       statusEl.textContent = ''
       errEl.textContent = 'Code expired. Click the button to try again.'
       errEl.style.display = 'block'
+      btn.disabled = false
+      btn.textContent = 'SIGN IN WITH BROWSER'
     }
   }, interval * 1000)
 }
 
 // ── Event listeners ───────────────────────────────────────────────────────────
 
-document.getElementById('btn-open-browser').addEventListener('click', startDeviceFlow)
+document.getElementById('btn-open-browser').addEventListener('click', () => {
+  stopDevicePoll()
+  startDeviceFlow()
+})
 
 document.getElementById('share-toggle').addEventListener('click', async () => {
   await window.peermesh.toggleSharing()
@@ -150,11 +198,14 @@ document.getElementById('btn-dashboard').addEventListener('click', async () => {
 
 document.getElementById('btn-signout').addEventListener('click', async () => {
   stopDevicePoll()
+  resetAuthUI()
   await window.peermesh.signOut()
   await pollState()
 })
 
-// Auto-start device flow on load if not signed in
+// On load: check state first, only start device flow if not signed in
 pollState().then(state => {
-  if (state && !state.config.userId) startDeviceFlow()
+  if (state && !state.config.userId) {
+    startDeviceFlow()
+  }
 })

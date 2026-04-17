@@ -1,8 +1,10 @@
 const { contextBridge, ipcRenderer } = require('electron')
-const { version } = require('./package.json')
+
+let _version = ''
+try { _version = require('./package.json').version } catch {}
 
 contextBridge.exposeInMainWorld('peermesh', {
-  version,
+  version: _version,
   getState: () => ipcRenderer.invoke('get-state'),
   getExtId: () => ipcRenderer.invoke('get-ext-id'),
   checkWebsiteAuth: () => ipcRenderer.invoke('check-website-auth'),

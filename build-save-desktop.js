@@ -13,7 +13,7 @@
  */
 
 import { execSync } from 'child_process'
-import { readFileSync, writeFileSync, copyFileSync, readdirSync } from 'fs'
+import { readFileSync, writeFileSync, copyFileSync, readdirSync, rmSync } from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
 
@@ -39,6 +39,14 @@ const defaultPlatform = process.platform === 'darwin' ? 'mac'
 
 const platforms = requestedPlatforms.length > 0 ? requestedPlatforms : [defaultPlatform]
 
+// ── Clear dist cache ────────────────────────────────────────────────────────
+
+const distDir = join(DESKTOP_DIR, 'dist')
+try {
+  rmSync(distDir, { recursive: true, force: true })
+  console.log('\n  ✓ Cleared desktop/dist cache')
+} catch {}
+
 // ── Version bump ──────────────────────────────────────────────────────────────
 
 const pkg = JSON.parse(readFileSync(PKG_PATH, 'utf-8'))
@@ -63,7 +71,7 @@ if (!noBump) {
 const PLATFORM_CONFIG = {
   win: {
     script: 'build-win',
-    find: f => f.endsWith('.exe') && !f.endsWith('.blockmap'),
+    find: f => f.startsWith('PeerMesh-Setup-') && f.endsWith('.exe') && !f.endsWith('.blockmap'),
     dest: `PeerMesh-Setup_${newVersion}.exe`,
   },
   mac: {
@@ -79,8 +87,6 @@ const PLATFORM_CONFIG = {
 }
 
 // ── Build each platform ───────────────────────────────────────────────────────
-
-const distDir = join(DESKTOP_DIR, 'dist')
 
 for (const platform of platforms) {
   const { script, find, dest } = PLATFORM_CONFIG[platform]

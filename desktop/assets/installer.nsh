@@ -1,8 +1,9 @@
 ; Kill running PeerMesh processes before install or uninstall
 !macro customInstall
-  nsExec::ExecToLog 'taskkill /F /IM "PeerMesh.exe" /T'
-  nsExec::ExecToLog 'taskkill /F /IM "electron.exe" /T'
-  Sleep 1000
+  nsExec::ExecToLog '$SYSDIR\taskkill.exe /F /IM "PeerMesh.exe" /T'
+  nsExec::ExecToLog '$SYSDIR\taskkill.exe /F /IM "node.exe" /T'
+  nsExec::ExecToLog '$SYSDIR\taskkill.exe /F /IM "electron.exe" /T'
+  Sleep 2000
 
   ; Uninstall previous version if it exists
   ReadRegStr $R0 HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\PeerMesh" "UninstallString"
@@ -13,7 +14,8 @@
 !macroend
 
 !macro customUnInstall
-  nsExec::ExecToLog 'taskkill /F /IM "PeerMesh.exe" /T'
-  nsExec::ExecToLog 'taskkill /F /IM "electron.exe" /T'
-  Sleep 1000
+  nsExec::ExecToLog '$SYSDIR\taskkill.exe /F /IM "PeerMesh.exe" /T'
+  nsExec::ExecToLog '$SYSDIR\taskkill.exe /F /IM "node.exe" /T'
+  nsExec::ExecToLog '$SYSDIR\taskkill.exe /F /IM "electron.exe" /T'
+  Sleep 2000
 !macroend

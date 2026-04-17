@@ -1,6 +1,6 @@
 {
   "name": "peermesh-desktop",
-  "version": "1.0.10",
+  "version": "1.0.12",
   "description": "PeerMesh Desktop — Share your connection from the system tray",
   "author": "PeerMesh",
   "main": "main.js",
@@ -15,7 +15,8 @@
     "appId": "com.peermesh.desktop",
     "productName": "PeerMesh",
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "artifactName": "PeerMesh-Setup-${version}.exe"
     },
     "mac": {
       "target": "dmg",
@@ -28,7 +29,8 @@
       "category": "Network"
     },
     "nsis": {
-      "oneClick": true,
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": false,
       "perMachine": false,
       "runAfterFinish": true,
       "createDesktopShortcut": false,

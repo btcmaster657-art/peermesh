@@ -902,6 +902,7 @@ ipcMain.handle('sign-in', async (_, { token, userId, country, trust }) => {
   config = { ...config, token, userId, country, trust, shareEnabled: true }
   saveConfig()
   connectRelay()
+  updateTray()
   log('sign-in success — userId:', userId)
   return { success: true }
 })
@@ -978,8 +979,4 @@ app.on('before-quit', () => {
   contextCache.clear()
   controlServer.close()
   localProxyServer.close()
-  // Kill child processes spawned by this app (detached background instances)
-  if (process.platform === 'win32') {
-    try { spawnSync('taskkill', ['/F', '/PID', String(process.pid), '/T'], { stdio: 'ignore' }) } catch {}
-  }
 })

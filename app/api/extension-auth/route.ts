@@ -53,7 +53,7 @@ export async function POST(req: Request) {
     return NextResponse.json({
       device_code,
       user_code,
-      verification_uri: `${APP_URL}/activate`,
+      verification_uri: `${APP_URL}/extension`,
       expires_in: 600,
       interval: 3,
     }, { headers: CORS })

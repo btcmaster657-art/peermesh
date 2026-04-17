@@ -46,7 +46,7 @@
     .screen.active { display: flex; }
 
     /* ── Auth screen ── */
-    #auth-screen h2 { font-size: 18px; font-weight: 600; margin-bottom: 8px; text-align: center; }
+    #auth-screen h2 { font-size: 16px; font-weight: 700; margin-bottom: 8px; text-align: center; font-family: 'Courier New', monospace; letter-spacing: 1px; color: var(--text); }
     #auth-screen p { color: var(--muted); font-size: 12px; text-align: center; line-height: 1.6; margin-bottom: 24px; }
 
     .btn {
@@ -161,7 +161,7 @@
   <!-- Auth Screen -->
   <div id="auth-screen" class="screen active">
     <div style="flex:1;display:flex;flex-direction:column;justify-content:center">
-      <h2>Welcome to PeerMesh</h2>
+      <h2 id="welcome-heading">WELCOME TO PEERMESH</h2>
       <p>Share your connection from the system tray.<br>Sign in to get started.</p>
       <div id="auth-error" class="error" style="display:none"></div>
       <button class="btn btn-primary" id="btn-open-browser">SIGN IN WITH BROWSER</button>
