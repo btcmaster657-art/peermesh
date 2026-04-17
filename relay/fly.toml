@@ -7,6 +7,9 @@ primary_region = 'jnb'
 [env]
   PORT = '8080'
   PROXY_PORT = '8081'
+  API_BASE = 'https://peermesh-beta.vercel.app'
+  # RELAY_SECRET must be set via: fly secrets set RELAY_SECRET=<value>
+  # Same value must be set in Vercel env as RELAY_SECRET
 
 # WebSocket + health endpoint (port 80/443 via Fly HTTP layer)
 [[services]]

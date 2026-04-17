@@ -27,12 +27,13 @@ let state = {
   loading: true,
   error: null,
   extId: null,
+  supabaseToken: null,
 }
 
 // ── Init ─────────────────────────────────────────────────────────────────────
 
 async function init() {
-  const stored = await chrome.storage.local.get(['user', 'session', 'isSharing', 'helper', 'selectedCountry', 'extId'])
+  const stored = await chrome.storage.local.get(['user', 'session', 'isSharing', 'helper', 'selectedCountry', 'extId', 'supabaseToken'])
 
   // Generate a stable extension UUID if not yet created
   if (!stored.extId) {
@@ -50,13 +51,13 @@ async function init() {
 
   if (state.user) {
     await refreshRuntimeStatus()
+    startPeerPolling()
   }
 
   state.loading = false
   render()
 
   if (!state.user) startAuthPolling()
-  else startPeerPolling()
 }
 
 // ── Auth polling — checks if user signed in on website ────────────────────────
@@ -70,8 +71,9 @@ async function refreshRuntimeStatus() {
     const status = await chrome.runtime.sendMessage({ type: 'GET_STATUS' })
     if (!status) return
     state.session = status.session || null
-    state.isSharing = !!status.isSharing
     state.helper = status.helper || null
+    // Desktop is source of truth for sharing state
+    state.isSharing = !!(state.helper?.available && (state.helper?.running || state.helper?.shareEnabled))
     await chrome.storage.local.set({
       session: state.session,
       isSharing: state.isSharing,
@@ -101,8 +103,14 @@ function startPeerPolling() {
   if (!statusPollInterval) {
     statusPollInterval = setInterval(async () => {
       await refreshRuntimeStatus()
+      // Desktop is source of truth — sync isSharing from it
+      const desktopSharing = !!(state.helper?.available && (state.helper?.running || state.helper?.shareEnabled))
+      if (state.isSharing !== desktopSharing) {
+        state.isSharing = desktopSharing
+        await chrome.storage.local.set({ isSharing: desktopSharing })
+      }
       render()
-    }, 5000)
+    }, 3000)
   }
 }
 
@@ -117,8 +125,9 @@ function startAuthPolling() {
         clearInterval(authPollInterval)
         authPollInterval = null
         state.user = data.user
+        state.supabaseToken = data.user.supabaseToken ?? null
         state.loading = false
-        await chrome.storage.local.set({ user: data.user })
+        await chrome.storage.local.set({ user: data.user, supabaseToken: state.supabaseToken })
         await refreshRuntimeStatus()
         render()
         startPeerPolling()
@@ -299,7 +308,7 @@ async function connectSession() {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${state.user.token}`,
+        'Authorization': `Bearer ${state.supabaseToken || state.user.token}`,
       },
       body: JSON.stringify({ country: state.selectedCountry }),
     })
@@ -341,7 +350,7 @@ async function disconnectSession() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${state.user?.token}`,
+          'Authorization': `Bearer ${state.supabaseToken || state.user?.token}`,
         },
         body: JSON.stringify({ sessionId: state.session.id }),
       })
@@ -370,6 +379,7 @@ async function toggleSharing(on) {
     country: state.user?.country,
     userId: state.user?.id,
     token: state.user?.token,
+    supabaseToken: state.supabaseToken,
     trust: state.user?.trustScore || 50,
   })
 

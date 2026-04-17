@@ -3,8 +3,6 @@ import { createClient } from '@/lib/supabase/server'
 import { adminClient } from '@/lib/supabase/admin'
 import { issueDesktopToken, verifyDesktopToken } from '@/lib/desktop-token'
 
-export { verifyDesktopToken } // re-export for desktop/main.js verify call
-
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, PATCH, OPTIONS',
@@ -75,6 +73,7 @@ export async function POST(req: Request) {
     ext_id,
     user_id: session.user.id,
     token,
+    supabase_token: session.access_token,
     used: false,
     expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
   }, { onConflict: 'ext_id' })
@@ -96,14 +95,19 @@ export async function PATCH(req: Request) {
     return NextResponse.json({ error: 'Invalid request' }, { status: 400, headers: CORS })
   }
 
-  const { data: row } = await adminClient
+  // Normalize: accept both "XXXXyyyy" and "XXXX-YYYY"
+  const normalized = (user_code as string).toUpperCase().trim().replace(/[^A-Z0-9]/g, '')
+  const formatted = normalized.length === 8 ? `${normalized.slice(0, 4)}-${normalized.slice(4)}` : normalized
+
+  const { data: row, error: rowError } = await adminClient
     .from('device_codes')
     .select('*')
-    .eq('user_code', (user_code as string).toUpperCase().trim())
+    .eq('user_code', formatted)
     .eq('status', 'pending')
     .gt('expires_at', new Date().toISOString())
-    .single()
+    .maybeSingle()
 
+  if (rowError) return NextResponse.json({ error: 'Database error' }, { status: 500, headers: CORS })
   if (!row) return NextResponse.json({ error: 'Invalid or expired code' }, { status: 404, headers: CORS })
 
   if (action === 'deny') {
@@ -224,6 +228,7 @@ export async function GET(req: Request) {
     user: {
       id: row.user_id,
       token: row.token,
+      supabaseToken: row.supabase_token,
       username: profile.username,
       country: profile.country_code,
       trustScore: profile.trust_score,

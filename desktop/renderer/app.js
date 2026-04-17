@@ -73,6 +73,7 @@ async function pollState() {
   try {
     const state = await window.peermesh.getState()
     if (state.version) setVersion(state.version)
+    // Desktop IPC is always authoritative
     updateUI(state)
     return state
   } catch {}
@@ -95,7 +96,9 @@ function resetAuthUI() {
   const codeEl = document.getElementById('device-code-display')
   const errEl = document.getElementById('auth-error')
   const btn = document.getElementById('btn-open-browser')
+  const copyBtn = document.getElementById('btn-copy-code')
   codeEl.textContent = ''
+  copyBtn.style.display = 'none'
   errEl.style.display = 'none'
   statusEl.textContent = ''
   btn.disabled = false
@@ -131,6 +134,16 @@ async function startDeviceFlow() {
   const { device_code, user_code, verification_uri, interval = 3 } = result
 
   codeEl.textContent = user_code
+  const copyBtn = document.getElementById('btn-copy-code')
+  copyBtn.style.display = 'inline-block'
+  copyBtn.onclick = () => {
+    navigator.clipboard.writeText(user_code).then(() => {
+      copyBtn.textContent = 'COPIED!'
+      copyBtn.style.color = 'var(--accent)'
+      copyBtn.style.borderColor = 'var(--accent)'
+      setTimeout(() => { copyBtn.textContent = 'COPY'; copyBtn.style.color = ''; copyBtn.style.borderColor = '' }, 2000)
+    })
+  }
   statusEl.textContent = 'Enter this code on the website:'
   btn.disabled = false
   btn.textContent = 'OPEN BROWSER AGAIN'

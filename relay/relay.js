@@ -5,6 +5,8 @@ import { randomUUID } from 'crypto'
 
 const PORT = parseInt(process.env.PORT ?? '8080')
 const PROXY_PORT = parseInt(process.env.PROXY_PORT ?? '8081')
+const API_BASE = process.env.API_BASE ?? 'https://peermesh-beta.vercel.app'
+const RELAY_SECRET = process.env.RELAY_SECRET ?? ''
 
 const peers = new Map()
 const sessions = new Map()
@@ -216,7 +218,17 @@ function handleMessage(ws, msg) {
       if (agentSession) {
         const requester = peers.get(agentSession.requesterId)
         if (requester) send(requester, { type: 'agent_session_ready', sessionId: msg.sessionId })
-        log(ws.peerId.slice(0,8), `AGENT_READY session=${msg.sessionId.slice(0,8)}`)
+        // Record provider userId on the session for DB write-back
+        agentSession.providerUserId = ws.userId
+        log(ws.peerId.slice(0,8), `AGENT_READY session=${msg.sessionId.slice(0,8)} providerUserId=${ws.userId?.slice(0,8)}`)
+        // Write provider_id back to DB so bytes can be credited on session end
+        if (ws.userId && API_BASE) {
+          fetch(`${API_BASE}/api/session/end`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json', 'x-relay-secret': RELAY_SECRET },
+            body: JSON.stringify({ sessionId: msg.sessionId, providerUserId: ws.userId }),
+          }).catch(() => {})
+        }
       }
       break
     }

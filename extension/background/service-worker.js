@@ -7,6 +7,10 @@ const NATIVE_HOST = 'com.peermesh.desktop'
 let relayWs = null
 let currentSession = null
 let agentSessionId = null
+let supabaseToken = null
+let sharingUserId = null
+let sharingCountry = null
+let heartbeatInterval = null
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   ;(async () => {
@@ -21,11 +25,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           sendResponse({ success: true })
           break
         case 'START_SHARING': {
+          // Store supabase token for heartbeat use
+          if (msg.supabaseToken) {
+            supabaseToken = msg.supabaseToken
+            sharingUserId = msg.userId
+            sharingCountry = msg.country
+            await chrome.storage.local.set({ supabaseToken })
+          }
           const result = await startDesktopSharing(msg)
+          if (result.success) startExtensionHeartbeat()
           sendResponse(result)
           break
         }
         case 'STOP_SHARING': {
+          stopExtensionHeartbeat()
           const result = await stopDesktopSharing()
           sendResponse(result)
           break
@@ -46,6 +59,42 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   })()
   return true
 })
+
+// ── Extension heartbeat ──────────────────────────────────────────────────────
+// Sends PUT /api/user/sharing every 30s while sharing, using Supabase token.
+// This keeps the provider_devices row alive in the DB.
+
+function startExtensionHeartbeat() {
+  stopExtensionHeartbeat()
+  sendExtensionHeartbeat()
+  heartbeatInterval = setInterval(sendExtensionHeartbeat, 30_000)
+}
+
+function stopExtensionHeartbeat() {
+  if (heartbeatInterval) { clearInterval(heartbeatInterval); heartbeatInterval = null }
+  if (!supabaseToken || !sharingUserId) return
+  // Fire-and-forget DELETE to remove device row immediately
+  chrome.storage.local.get(['extId'], ({ extId }) => {
+    if (!extId) return
+    fetch(`${APP_URL}/api/user/sharing`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${supabaseToken}` },
+      body: JSON.stringify({ device_id: extId }),
+    }).catch(() => {})
+  })
+}
+
+function sendExtensionHeartbeat() {
+  if (!supabaseToken || !sharingCountry) return
+  chrome.storage.local.get(['extId'], ({ extId }) => {
+    if (!extId) return
+    fetch(`${APP_URL}/api/user/sharing`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${supabaseToken}` },
+      body: JSON.stringify({ device_id: `ext_${extId}`, country: sharingCountry }),
+    }).catch(() => {})
+  })
+}
 
 // ── Native messaging ──────────────────────────────────────────────────────────
 
@@ -286,10 +335,13 @@ async function disconnect() {
 chrome.runtime.onStartup.addListener(async () => {
   clearProxy()
   await chrome.storage.local.set({ session: null })
-  // Re-check desktop state on browser start to sync isSharing
+  // Restore supabase token and re-check desktop state
+  const stored = await chrome.storage.local.get(['supabaseToken', 'extId'])
+  if (stored.supabaseToken) supabaseToken = stored.supabaseToken
   const helper = await getDesktopHelperStatus()
   const isSharing = helper.available && (helper.running || helper.shareEnabled)
   await chrome.storage.local.set({ isSharing, helper })
+  if (isSharing && supabaseToken) startExtensionHeartbeat()
 })
 
 chrome.runtime.onInstalled.addListener(async ({ reason }) => {
@@ -315,8 +367,8 @@ chrome.runtime.onMessageExternal.addListener((msg) => {
   }
 })
 
-// Periodic sharing state sync (every 30s) to keep badge and storage consistent
-chrome.alarms.create('syncSharingState', { periodInMinutes: 0.5 })
+// Periodic sharing state sync (every 10s) to keep badge and storage consistent
+chrome.alarms.create('syncSharingState', { periodInMinutes: 0.17 })
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name !== 'syncSharingState') return
   const helper = await getDesktopHelperStatus()

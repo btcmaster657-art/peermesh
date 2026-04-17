@@ -19,3 +19,74 @@ export async function POST(req: Request) {
 
   return NextResponse.json({ success: true, isSharing })
 }
+
+// ── PUT: desktop heartbeat ────────────────────────────────────────────────────
+// Body: { device_id, country }
+// Called every 30s by desktop while sharing. Also accepts Bearer token.
+export async function PUT(req: Request) {
+  const body = await req.json().catch(() => ({}))
+  const { device_id, country } = body
+
+  if (!device_id || !country) {
+    return NextResponse.json({ error: 'device_id and country required' }, { status: 400 })
+  }
+
+  let userId: string | null = null
+
+  // Try cookie session (dashboard), then Bearer token (desktop)
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (user) {
+    userId = user.id
+  } else {
+    const auth = req.headers.get('authorization') ?? ''
+    const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
+    if (token) {
+      const { data } = await adminClient.auth.getUser(token)
+      userId = data.user?.id ?? null
+    }
+  }
+
+  if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  await adminClient.rpc('upsert_provider_heartbeat', {
+    p_user_id: userId,
+    p_device_id: device_id,
+    p_country: country,
+  })
+
+  return NextResponse.json({ ok: true })
+}
+
+// ── DELETE: device stopped sharing ───────────────────────────────────────────
+// Body: { device_id }
+export async function DELETE(req: Request) {
+  const body = await req.json().catch(() => ({}))
+  const { device_id } = body
+
+  if (!device_id) return NextResponse.json({ error: 'device_id required' }, { status: 400 })
+
+  let userId: string | null = null
+
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (user) {
+    userId = user.id
+  } else {
+    const auth = req.headers.get('authorization') ?? ''
+    const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
+    if (token) {
+      const { data } = await adminClient.auth.getUser(token)
+      userId = data.user?.id ?? null
+    }
+  }
+
+  if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  await adminClient.rpc('remove_provider_device', {
+    p_user_id: userId,
+    p_device_id: device_id,
+  })
+
+  return NextResponse.json({ ok: true })
+}

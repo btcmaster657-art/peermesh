@@ -43,6 +43,9 @@ export default function Dashboard() {
       setDesktop(dt)
       setDesktopChecked(true)
 
+      // Always start polling — desktop is source of truth for sharing state
+      startPolling()
+
       if (dt.available) {
         // Sync auth to desktop so it has fresh token
         const { data: { session } } = await supabase.auth.getSession()
@@ -54,11 +57,11 @@ export default function Dashboard() {
             trust: data.trust_score,
           })
         }
-        if (dt.running || dt.shareEnabled) {
-          setIsSharing(true)
-          if (dt.stats) setSharingStats({ bytesServed: dt.stats.bytesServed, requestsHandled: dt.stats.requestsHandled })
-          startPolling()
-        }
+        // Always read sharing state from desktop as source of truth
+        const desktopSharing = dt.running || dt.shareEnabled
+        setIsSharing(desktopSharing)
+        if (dt.stats) setSharingStats({ bytesServed: dt.stats.bytesServed, requestsHandled: dt.stats.requestsHandled })
+        startPolling()
       } else if (data.is_sharing) {
         // Desktop not available but DB says sharing — clear it
         await fetch('/api/user/sharing', {
@@ -90,18 +93,21 @@ export default function Dashboard() {
     pollRef.current = setInterval(async () => {
       const dt = await checkDesktop()
       setDesktop(dt)
-      if (dt.available && (dt.running || dt.shareEnabled)) {
+      if (dt.available) {
+        const desktopSharing = dt.running || dt.shareEnabled
+        setIsSharing(desktopSharing)
         if (dt.stats) setSharingStats({ bytesServed: dt.stats.bytesServed, requestsHandled: dt.stats.requestsHandled })
-      } else if (isSharing) {
+        if (!desktopSharing) {
+          await fetch('/api/user/sharing', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ isSharing: false }),
+          }).catch(() => {})
+        }
+      } else {
         setIsSharing(false)
-        stopPolling()
-        await fetch('/api/user/sharing', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ isSharing: false }),
-        })
       }
-    }, 5000)
+    }, 3000)
   }
 
   function stopPolling() {
@@ -115,7 +121,6 @@ export default function Dashboard() {
 
     if (isSharing) {
       setIsSharing(false)
-      stopPolling()
       await stopDesktopSharing()
       await fetch('/api/user/sharing', {
         method: 'POST',
@@ -150,7 +155,6 @@ export default function Dashboard() {
     }
 
     setIsSharing(true)
-    startPolling()
     await fetch('/api/user/sharing', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

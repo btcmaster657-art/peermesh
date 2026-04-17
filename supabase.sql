@@ -19,6 +19,10 @@ drop function if exists update_trust_score(uuid, integer) cascade;
 drop function if exists increment_bandwidth(uuid, bigint) cascade;
 drop function if exists increment_bytes_shared(uuid, bigint) cascade;
 drop function if exists reset_monthly_bandwidth() cascade;
+drop function if exists upsert_provider_heartbeat(uuid, text, text) cascade;
+drop function if exists remove_provider_device(uuid, text) cascade;
+drop function if exists cleanup_stale_providers() cascade;
+drop function if exists cleanup_stale_sessions() cascade;
 
 drop view if exists peer_availability cascade;
 
@@ -26,6 +30,8 @@ drop table if exists extension_auth_tokens cascade;
 drop table if exists abuse_reports cascade;
 drop table if exists session_accountability cascade;
 drop table if exists sessions cascade;
+drop table if exists provider_devices cascade;
+drop table if exists device_codes cascade;
 drop table if exists profiles cascade;
 
 -- ================================
@@ -102,13 +108,28 @@ create table abuse_reports (
 -- Extension auth tokens (one-time bypass tokens for extension sign-in)
 create table extension_auth_tokens (
   id uuid primary key default gen_random_uuid(),
-  ext_id text not null unique,        -- stable UUID from the extension
+  ext_id text not null unique,
   user_id uuid references profiles(id) on delete cascade not null,
-  token text not null,                -- Supabase access_token
+  token text not null,
+  supabase_token text,                -- Supabase access_token for API calls
   used boolean default false,
   expires_at timestamptz not null default (now() + interval '5 minutes'),
   created_at timestamptz default now()
 );
+
+-- Active provider devices (one row per sharing device, heartbeat-based)
+create table provider_devices (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid references profiles(id) on delete cascade not null,
+  device_id text not null,             -- stable per-install UUID
+  country_code text not null,
+  last_heartbeat timestamptz not null default now(),
+  created_at timestamptz default now(),
+  unique (user_id, device_id)
+);
+
+create index on provider_devices (last_heartbeat);
+create index on provider_devices (user_id);
 
 -- Device authorization codes (OAuth 2.0 Device Flow for desktop app)
 create table device_codes (
@@ -127,15 +148,16 @@ create index on extension_auth_tokens (ext_id) where used = false;
 create index on device_codes (device_code) where status = 'pending';
 create index on device_codes (user_code) where status = 'pending';
 
--- Peer availability view
+-- Peer availability view — based on live heartbeats, not stale boolean
 create view peer_availability as
   select
-    country_code as country,
-    count(*)::int as count
-  from profiles
-  where is_sharing = true
-    and is_verified = true
-  group by country_code;
+    pd.country_code as country,
+    count(distinct pd.user_id)::int as count
+  from provider_devices pd
+  join profiles p on p.id = pd.user_id
+  where pd.last_heartbeat > now() - interval '45 seconds'
+    and p.is_verified = true
+  group by pd.country_code;
 
 -- Trust score function
 create or replace function update_trust_score(
@@ -169,6 +191,71 @@ create or replace function increment_bytes_shared(
   set total_bytes_shared = total_bytes_shared + p_bytes,
       updated_at = now()
   where id = p_user_id;
+$$ language sql security definer;
+
+-- Upsert provider heartbeat and sync is_sharing
+create or replace function upsert_provider_heartbeat(
+  p_user_id uuid,
+  p_device_id text,
+  p_country text
+) returns void as $$
+begin
+  insert into provider_devices (user_id, device_id, country_code, last_heartbeat)
+  values (p_user_id, p_device_id, p_country, now())
+  on conflict (user_id, device_id)
+  do update set last_heartbeat = now(), country_code = p_country;
+
+  update profiles set is_sharing = true, updated_at = now() where id = p_user_id;
+end;
+$$ language plpgsql security definer;
+
+-- Remove a specific device and update is_sharing if no devices remain
+create or replace function remove_provider_device(
+  p_user_id uuid,
+  p_device_id text
+) returns void as $$
+begin
+  delete from provider_devices where user_id = p_user_id and device_id = p_device_id;
+
+  update profiles
+  set is_sharing = exists(
+    select 1 from provider_devices
+    where user_id = p_user_id
+      and last_heartbeat > now() - interval '45 seconds'
+  ),
+  updated_at = now()
+  where id = p_user_id;
+end;
+$$ language plpgsql security definer;
+
+-- Purge stale devices (heartbeat older than 45s) and fix is_sharing
+create or replace function cleanup_stale_providers()
+returns void as $$
+begin
+  -- Find affected users before deleting
+  update profiles
+  set is_sharing = exists(
+    select 1 from provider_devices pd
+    where pd.user_id = profiles.id
+      and pd.last_heartbeat > now() - interval '45 seconds'
+  ),
+  updated_at = now()
+  where id in (
+    select distinct user_id from provider_devices
+    where last_heartbeat <= now() - interval '45 seconds'
+  );
+
+  delete from provider_devices where last_heartbeat <= now() - interval '45 seconds';
+end;
+$$ language plpgsql security definer;
+
+-- Auto-end sessions stuck in active for more than 2 hours
+create or replace function cleanup_stale_sessions()
+returns void as $$
+  update sessions
+  set status = 'ended', ended_at = now()
+  where status = 'active'
+    and started_at < now() - interval '2 hours';
 $$ language sql security definer;
 
 -- Reset monthly bandwidth (call via cron or scheduled function)
@@ -256,6 +343,12 @@ create policy "Service role only"
 alter table extension_auth_tokens enable row level security;
 create policy "Service role only ext tokens"
   on extension_auth_tokens for all
+  using (false);
+
+-- Provider devices: service role only
+alter table provider_devices enable row level security;
+create policy "Service role only provider devices"
+  on provider_devices for all
   using (false);
 
 -- Device codes: service role only

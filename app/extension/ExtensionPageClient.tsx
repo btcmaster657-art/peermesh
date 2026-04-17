@@ -9,7 +9,16 @@ const mono = "'Courier New', monospace"
 // ── Device Activation Screen ──────────────────────────────────────────────────
 function ActivateScreen() {
   const searchParams = useSearchParams()
-  const [code, setCode] = useState((searchParams.get('code') ?? '').toUpperCase())
+  const [code, setCode] = useState(() => {
+    const raw = (searchParams.get('code') ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '')
+    return raw.length >= 4 ? `${raw.slice(0, 4)}-${raw.slice(4, 8)}` : raw
+  })
+
+  function handleCodeChange(val: string) {
+    const clean = val.toUpperCase().replace(/[^A-Z0-9]/g, '')
+    if (clean.length <= 4) setCode(clean)
+    else setCode(`${clean.slice(0, 4)}-${clean.slice(4, 8)}`)
+  }
   const [status, setStatus] = useState<'idle' | 'loading' | 'approved' | 'denied' | 'error'>('idle')
   const [error, setError] = useState('')
 
@@ -56,7 +65,7 @@ function ActivateScreen() {
       <div style={{ fontSize: '13px', color: 'var(--muted)', marginBottom: '24px', textAlign: 'center' }}>Enter the code shown in the PeerMesh desktop app</div>
       <input
         value={code}
-        onChange={e => setCode(e.target.value.toUpperCase())}
+        onChange={e => handleCodeChange(e.target.value)}
         placeholder="XXXX-XXXX"
         maxLength={9}
         style={{ width: '100%', padding: '12px 16px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text)', fontFamily: mono, fontSize: '20px', letterSpacing: '4px', textAlign: 'center', marginBottom: '16px', boxSizing: 'border-box' }}

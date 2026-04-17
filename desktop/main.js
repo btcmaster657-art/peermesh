@@ -393,6 +393,35 @@ async function handleFetch(request) {
 
 // ── Relay ─────────────────────────────────────────────────────────────────────
 
+let heartbeatTimer = null
+
+function startHeartbeat() {
+  // Always clear existing timer before starting — handles reconnect after crash
+  if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null }
+  sendHeartbeat()
+  heartbeatTimer = setInterval(sendHeartbeat, 30_000)
+}
+
+function stopHeartbeat() {
+  if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null }
+  if (!config.token || !config.userId) return
+  // Tell server this device stopped sharing
+  fetch(`${API_BASE}/api/user/sharing`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
+    body: JSON.stringify({ device_id: config.extId }),
+  }).catch(() => {})
+}
+
+function sendHeartbeat() {
+  if (!config.token || !config.userId || !config.extId) return
+  fetch(`${API_BASE}/api/user/sharing`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
+    body: JSON.stringify({ device_id: config.extId, country: config.country }),
+  }).catch(() => {})
+}
+
 function connectRelay() {
   if (!config.token || !config.userId) {
     log('connectRelay skipped — no token/userId')
@@ -417,7 +446,7 @@ function connectRelay() {
       supportsHttp: true,
       supportsTunnel: true,
     }))
-    persistSharingState(true)
+    startHeartbeat() // heartbeat sets is_sharing=true via upsert_provider_heartbeat
     updateTray()
   })
 
@@ -484,6 +513,7 @@ function stopRelay() {
   saveConfig()
   closeAllTunnels(false)
   stats = { bytesServed: 0, requestsHandled: 0, connectedAt: null }
+  stopHeartbeat()
   persistSharingState(false)
   // Close browser contexts to free memory when not sharing
   for (const ctx of contextCache.values()) ctx.close().catch(() => {})

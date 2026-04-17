@@ -26,7 +26,14 @@ function issueAccountabilityReceipt(payload: {
 
 export async function POST(req: Request) {
   const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
+  let user = (await supabase.auth.getUser()).data.user
+
+  // Also accept Bearer token (extension has no cookie session)
+  if (!user) {
+    const auth = req.headers.get('authorization') ?? ''
+    const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
+    if (token) user = (await adminClient.auth.getUser(token)).data.user ?? null
+  }
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const { country } = await req.json()
@@ -51,6 +58,9 @@ export async function POST(req: Request) {
 
   const relay = pickRelay()
 
+  // Opportunistically clean up sessions stuck in active > 2h
+  try { await adminClient.rpc('cleanup_stale_sessions') } catch {}
+
   // Create session row
   const { data: session, error: sessionError } = await adminClient
     .from('sessions')
@@ -58,7 +68,7 @@ export async function POST(req: Request) {
       user_id: user.id,
       target_country: country,
       relay_endpoint: relay,
-      status: 'pending',
+      status: 'active',
     })
     .select('id')
     .single()

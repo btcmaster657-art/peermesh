@@ -169,7 +169,10 @@
         A code will appear below. Enter it on the website to authorize this app.
       </p>
       <!-- Device code display -->
-      <div id="device-code-display" style="font-family:'Courier New',monospace;font-size:26px;letter-spacing:6px;color:var(--accent);text-align:center;margin:16px 0;min-height:36px"></div>
+      <div style="display:flex;align-items:center;justify-content:center;gap:10px;margin:16px 0;min-height:36px">
+        <div id="device-code-display" style="font-family:'Courier New',monospace;font-size:26px;letter-spacing:6px;color:var(--accent)"></div>
+        <button id="btn-copy-code" style="display:none;background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:4px 10px;font-family:'Courier New',monospace;font-size:10px;cursor:pointer;transition:all 0.2s">COPY</button>
+      </div>
     </div>
     <div class="mt-auto center" style="padding-bottom:8px">
       <div id="auth-status" style="font-size:10px;color:var(--muted);display:flex;align-items:center;justify-content:center;gap:6px">
