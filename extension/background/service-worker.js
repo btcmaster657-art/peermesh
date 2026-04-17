@@ -233,7 +233,13 @@ async function disconnect() {
 // ── Share as provider ─────────────────────────────────────────────────────────
 
 async function startSharing({ country, userId }, attempt = 0) {
-  if (providerWs) { providerWs.close(); providerWs = null }
+  if (providerWs) {
+    providerWs.onclose = null  // prevent retry loop before closing
+    providerWs.close()
+    providerWs = null
+  }
+
+  let stopped = false
 
   providerWs = new WebSocket(RELAY_WS)
   providerWs.onopen = () => {
@@ -242,9 +248,10 @@ async function startSharing({ country, userId }, attempt = 0) {
       userId,
       country,
       trustScore: 50,
-      agentMode: true,  // extension can serve proxy_request messages directly
+      agentMode: true,
     }))
     isSharing = true
+    attempt = 0  // reset backoff on successful connect
   }
   providerWs.onmessage = async (event) => {
     const msg = JSON.parse(event.data)
@@ -255,10 +262,15 @@ async function startSharing({ country, userId }, attempt = 0) {
       const response = await handleExtensionProxyRequest(msg.request)
       providerWs.send(JSON.stringify({ type: 'proxy_response', sessionId: msg.sessionId, response }))
     }
+    if (msg.type === 'error') {
+      // Evicted by relay (duplicate) — stop retrying, caller will re-register
+      stopped = true
+      isSharing = false
+    }
   }
   providerWs.onclose = () => {
     isSharing = false
-    if (attempt < 4) {
+    if (!stopped && attempt < 4) {
       setTimeout(() => startSharing({ country, userId }, attempt + 1), 3000 * (attempt + 1))
     }
   }
@@ -291,8 +303,11 @@ async function handleExtensionProxyRequest({ requestId, url, method = 'GET', hea
 }
 
 function stopSharing() {
-  providerWs?.close()
-  providerWs = null
+  if (providerWs) {
+    providerWs.onclose = null
+    providerWs.close()
+    providerWs = null
+  }
   isSharing = false
 }
 
