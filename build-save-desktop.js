@@ -64,17 +64,17 @@ const PLATFORM_CONFIG = {
   win: {
     script: 'build-win',
     find: f => f.endsWith('.exe') && !f.endsWith('.blockmap'),
-    dest: 'PeerMesh-Setup.exe',
+    dest: `PeerMesh-Setup_${newVersion}.exe`,
   },
   mac: {
     script: 'build-mac',
     find: f => f.endsWith('.dmg'),
-    dest: 'PeerMesh-Setup.dmg',
+    dest: `PeerMesh-Setup_${newVersion}.dmg`,
   },
   linux: {
     script: 'build-linux',
     find: f => f.endsWith('.AppImage'),
-    dest: 'PeerMesh-Setup.AppImage',
+    dest: `PeerMesh-Setup_${newVersion}.AppImage`,
   },
 }
 

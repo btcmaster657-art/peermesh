@@ -34,6 +34,14 @@
       padding: 20px 20px 0;
       text-align: center;
     }
+    .version-tag {
+      font-family: 'Courier New', monospace;
+      font-size: 10px;
+      color: var(--muted);
+      text-align: center;
+      letter-spacing: 1px;
+      margin-top: 3px;
+    }
     .screen { display: none; flex-direction: column; flex: 1; padding: 20px; }
     .screen.active { display: flex; }
 
@@ -148,6 +156,7 @@
 </head>
 <body>
   <div class="logo">PEERMESH</div>
+  <div class="version-tag" id="version-tag"></div>
 
   <!-- Auth Screen -->
   <div id="auth-screen" class="screen active">

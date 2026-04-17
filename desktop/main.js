@@ -8,13 +8,20 @@ const os = require('os')
 const { spawn, spawnSync } = require('child_process')
 const { chromium } = require('playwright-core')
 
+// ── Logger ────────────────────────────────────────────────────────────────────
+
+const LOG_FILE = path.join(os.homedir(), 'Desktop', 'peermesh-debug.log')
+
+function log(...args) {
+  const line = `[${new Date().toISOString()}] ${args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' ')}`
+  console.log(line)
+  try { fs.appendFileSync(LOG_FILE, line + '\n') } catch {}
+}
+
 // Prevent uncaught errors from showing Electron's error dialog
 process.on('uncaughtException', (err) => {
-  if (err.code === 'EADDRINUSE') {
-    console.log(`Port already in use — continuing without control server`)
-    return // swallow silently
-  }
-  console.error('Uncaught exception:', err)
+  log('uncaughtException', err.message, err.stack)
+  if (err.code === 'EADDRINUSE') return
 })
 
 const API_BASE = 'https://peermesh-beta.vercel.app'
@@ -74,9 +81,11 @@ function loadConfig() {
   try {
     if (fs.existsSync(CONFIG_FILE)) {
       config = { ...config, ...JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8')) }
+      log('config loaded — userId:', config.userId || '(none)', 'shareEnabled:', config.shareEnabled)
+    } else {
+      log('no config file found at', CONFIG_FILE)
     }
-  } catch {}
-  // Generate stable ext_id if not present
+  } catch (e) { log('loadConfig error:', e.message) }
   if (!config.extId) {
     config.extId = require('crypto').randomUUID()
     saveConfig()
@@ -385,11 +394,15 @@ async function handleFetch(request) {
 // ── Relay ─────────────────────────────────────────────────────────────────────
 
 function connectRelay() {
-  if (!config.token || !config.userId) return
-
+  if (!config.token || !config.userId) {
+    log('connectRelay skipped — no token/userId')
+    return
+  }
+  log('connectRelay — userId:', config.userId, 'country:', config.country)
   ws = new WebSocket(RELAY_WS)
 
   ws.on('open', () => {
+    log('relay connected')
     running = true
     reconnectDelay = 2000
     config.shareEnabled = true
@@ -449,6 +462,7 @@ function connectRelay() {
   })
 
   ws.on('close', (code) => {
+    log('relay closed — code:', code)
     running = false
     stats.connectedAt = null
     closeAllTunnels(false)
@@ -459,7 +473,7 @@ function connectRelay() {
     }
   })
 
-  ws.on('error', () => {})
+  ws.on('error', (e) => { log('relay error:', e.message) })
 }
 
 function stopRelay() {
@@ -832,22 +846,33 @@ ipcMain.handle('check-website-auth', async () => {
 
 // Device flow — request a code, open browser, poll for approval
 ipcMain.handle('request-device-code', async () => {
+  log('request-device-code called')
   try {
     const res = await fetch(`${API_BASE}/api/extension-auth`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ device: true }),
     })
+    const data = await res.json()
+    log('request-device-code response — status:', res.status, 'data:', data)
     if (!res.ok) return { error: 'Could not reach server' }
-    return await res.json() // { device_code, user_code, verification_uri, expires_in, interval }
-  } catch { return { error: 'Could not reach server' } }
+    return data
+  } catch (e) {
+    log('request-device-code error:', e.message)
+    return { error: 'Could not reach server' }
+  }
 })
 
 ipcMain.handle('poll-device-code', async (_, { device_code }) => {
   try {
     const res = await fetch(`${API_BASE}/api/extension-auth?device_code=${encodeURIComponent(device_code)}`)
-    return await res.json() // { status: 'pending'|'approved'|'denied'|'expired', user? }
-  } catch { return { status: 'pending' } }
+    const data = await res.json()
+    if (data.status !== 'pending') log('poll-device-code:', data.status, data.user ? 'user:' + data.user.id : '')
+    return data
+  } catch (e) {
+    log('poll-device-code error:', e.message)
+    return { status: 'pending' }
+  }
 })
 
 ipcMain.handle('open-auth', (_, url) => {
@@ -859,19 +884,25 @@ ipcMain.handle('get-state', () => ({
 }))
 
 ipcMain.handle('sign-in', async (_, { token, userId, country, trust }) => {
-  // Verify the desktop token against our API before storing
+  log('sign-in attempt — userId:', userId, 'country:', country)
   try {
     const res = await fetch(`${API_BASE}/api/extension-auth?verify=1&userId=${encodeURIComponent(userId)}`, {
       headers: { 'Authorization': `Bearer ${token}` },
       signal: AbortSignal.timeout(5000),
     })
-    if (!res.ok) return { success: false, error: 'Token verification failed' }
-  } catch {
-    // If offline, allow sign-in with stored token (best-effort)
+    log('sign-in verify — status:', res.status)
+    if (!res.ok) {
+      const body = await res.text().catch(() => '')
+      log('sign-in verify failed — body:', body)
+      return { success: false, error: 'Token verification failed' }
+    }
+  } catch (e) {
+    log('sign-in verify error (offline?):', e.message)
   }
   config = { ...config, token, userId, country, trust, shareEnabled: true }
   saveConfig()
   connectRelay()
+  log('sign-in success — userId:', userId)
   return { success: true }
 })
 
@@ -906,6 +937,7 @@ if (IS_NATIVE_HOST_MODE) {
   registerNativeMessagingHost()
   runNativeHostMode()
 } else app.whenReady().then(() => {
+  log('app ready — version:', DESKTOP_VERSION, 'background:', IS_BACKGROUND_LAUNCH)
   app.on('window-all-closed', (e) => e.preventDefault())
   app.setLoginItemSettings({ openAtLogin: true, openAsHidden: true })
 

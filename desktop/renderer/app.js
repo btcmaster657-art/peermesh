@@ -1,5 +1,7 @@
 // renderer/app.js
 
+document.getElementById('version-tag').textContent = `v${window.peermesh.version}`
+
 function formatBytes(bytes) {
   if (bytes < 1024) return `${bytes}B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`

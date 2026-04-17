@@ -1,13 +1,29 @@
 import { NextResponse } from 'next/server'
-import { readFile, access } from 'fs/promises'
+import { readFile } from 'fs/promises'
 import { join } from 'path'
 
 type Platform = 'win' | 'mac' | 'linux'
 
-const PLATFORM_MAP: Record<Platform, { file: string; name: string; mime: string }> = {
-  win:   { file: 'PeerMesh-Setup.exe',      name: 'PeerMesh-Setup.exe',      mime: 'application/octet-stream' },
-  mac:   { file: 'PeerMesh-Setup.dmg',      name: 'PeerMesh-Setup.dmg',      mime: 'application/x-apple-diskimage' },
-  linux: { file: 'PeerMesh-Setup.AppImage', name: 'PeerMesh-Setup.AppImage', mime: 'application/octet-stream' },
+const PLATFORM_MIME: Record<Platform, string> = {
+  win:   'application/octet-stream',
+  mac:   'application/x-apple-diskimage',
+  linux: 'application/octet-stream',
+}
+
+const PLATFORM_EXT: Record<Platform, string> = {
+  win:   '.exe',
+  mac:   '.dmg',
+  linux: '.AppImage',
+}
+
+function findLatestInstaller(dir: string, ext: string): string | null {
+  const { readdirSync } = require('fs')
+  try {
+    const files = readdirSync(dir).filter((f: string) => f.startsWith('PeerMesh-Setup_') && f.endsWith(ext))
+    if (!files.length) return null
+    files.sort().reverse()
+    return files[0]
+  } catch { return null }
 }
 
 function detectPlatform(ua: string): Platform {
@@ -24,39 +40,34 @@ export async function GET(req: Request) {
   const override = searchParams.get('platform') as Platform | null
   const platform: Platform = (override && override in PLATFORM_MAP) ? override : detectPlatform(ua)
 
-  const { file, name, mime } = PLATFORM_MAP[platform]
+  const mime = PLATFORM_MIME[platform]
+  const ext = PLATFORM_EXT[platform]
 
   // Try public/ first (Vercel)
-  const publicPath = join(process.cwd(), 'public', file)
-  try {
-    await access(publicPath)
-    const content = await readFile(publicPath)
+  const publicDir = join(process.cwd(), 'public')
+  const publicFile = findLatestInstaller(publicDir, ext)
+  if (publicFile) {
+    const content = await readFile(join(publicDir, publicFile))
     return new NextResponse(content.buffer as ArrayBuffer, {
       headers: {
         'Content-Type': mime,
-        'Content-Disposition': `attachment; filename="${name}"`,
-        'Cache-Control': 'public, max-age=86400',
+        'Content-Disposition': `attachment; filename="${publicFile}"`,
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
         'X-Platform': platform,
       },
     })
-  } catch {}
+  }
 
   // Try desktop/dist/ (local dev)
   try {
-    const { readdirSync } = await import('fs')
     const distDir = join(process.cwd(), 'desktop', 'dist')
-    const finders: Record<Platform, (f: string) => boolean> = {
-      win:   f => f.endsWith('.exe') && !f.endsWith('.blockmap'),
-      mac:   f => f.endsWith('.dmg'),
-      linux: f => f.endsWith('.AppImage'),
-    }
-    const found = readdirSync(distDir).find(finders[platform])
+    const found = findLatestInstaller(distDir, ext)
     if (found) {
       const content = await readFile(join(distDir, found))
       return new NextResponse(content.buffer as ArrayBuffer, {
         headers: {
           'Content-Type': mime,
-          'Content-Disposition': `attachment; filename="${name}"`,
+          'Content-Disposition': `attachment; filename="${found}"`,
           'X-Platform': platform,
         },
       })
