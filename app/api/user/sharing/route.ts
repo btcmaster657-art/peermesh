@@ -6,16 +6,13 @@ import { verifyDesktopToken } from '@/lib/desktop-token'
 const RELAY_SECRET = process.env.RELAY_SECRET ?? ''
 
 async function resolveUserId(req: Request, bodyUserId?: string): Promise<string | null> {
-  // Relay-secret path (server-to-server, no user token needed)
   const relaySecret = req.headers.get('x-relay-secret') ?? ''
   if (RELAY_SECRET && relaySecret === RELAY_SECRET) return bodyUserId ?? null
 
-  // Cookie session (web dashboard)
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
   if (user) return user.id
 
-  // Bearer token (desktop app)
   const auth = req.headers.get('authorization') ?? ''
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
   if (!token) return null
@@ -27,22 +24,47 @@ async function resolveUserId(req: Request, bodyUserId?: string): Promise<string 
   return data.user?.id ?? null
 }
 
+// ── GET: fetch fresh profile stats (extension polls this) ──────────────────
+export async function GET(req: Request) {
+  const userId = await resolveUserId(req)
+  if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  const { data, error } = await adminClient
+    .from('profiles')
+    .select('total_bytes_shared, total_bytes_used, bandwidth_used_month, bandwidth_limit, trust_score, is_sharing')
+    .eq('id', userId)
+    .single()
+
+  if (error || !data) return NextResponse.json({ error: 'Not found' }, { status: 404 })
+  return NextResponse.json(data)
+}
+
+// ── POST: set is_sharing flag OR increment bytes (desktop provider) ───────────
 export async function POST(req: Request) {
+  const body = await req.json().catch(() => ({}))
+
+  // Desktop bandwidth report: { bytes: number }
+  if (typeof body.bytes === 'number' && body.bytes > 0) {
+    const userId = await resolveUserId(req)
+    if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    await adminClient.rpc('increment_bytes_shared', { p_user_id: userId, p_bytes: body.bytes })
+    return NextResponse.json({ ok: true })
+  }
+
+  // Web dashboard: { isSharing: boolean }
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  const { isSharing } = await req.json()
-  if (typeof isSharing !== 'boolean') {
+  if (typeof body.isSharing !== 'boolean') {
     return NextResponse.json({ error: 'isSharing must be boolean' }, { status: 400 })
   }
 
-  await adminClient.from('profiles').update({ is_sharing: isSharing }).eq('id', user.id)
-  return NextResponse.json({ success: true, isSharing })
+  await adminClient.from('profiles').update({ is_sharing: body.isSharing }).eq('id', user.id)
+  return NextResponse.json({ success: true, isSharing: body.isSharing })
 }
 
 // ── PUT: provider heartbeat ───────────────────────────────────────────────────
-// Accepts x-relay-secret (relay → DB) or Authorization: Bearer <token> (desktop)
 export async function PUT(req: Request) {
   const body = await req.json().catch(() => ({}))
   const { device_id, country, user_id } = body

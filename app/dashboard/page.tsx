@@ -95,10 +95,12 @@ export default function Dashboard() {
       .catch(() => {})
   }, [])
 
-  // ── Poll desktop state ──────────────────────────────────────────────────────
+  // ── Poll desktop state + refresh profile from DB ──────────────────────────
   function startPolling() {
     if (pollRef.current) return
+    let tick = 0
     pollRef.current = setInterval(async () => {
+      tick++
       const dt = await checkDesktop()
       setDesktop(dt)
       if (dt.available) {
@@ -114,6 +116,14 @@ export default function Dashboard() {
         }
       } else {
         setIsSharing(false)
+      }
+      // Refresh profile from DB every 10s to pick up bytes/bandwidth changes
+      if (tick % 3 === 0) {
+        const { data: { user } } = await supabase.auth.getUser()
+        if (user) {
+          const { data } = await supabase.from('profiles').select('*').eq('id', user.id).single<Profile>()
+          if (data) setProfile(data)
+        }
       }
     }, 3000)
   }
@@ -292,7 +302,7 @@ export default function Dashboard() {
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '10px', marginBottom: '20px' }}>
         {[
           { label: 'TRUST', value: String(profile.trust_score) },
-          { label: 'SHARED', value: formatBytes(profile.total_bytes_shared) },
+          { label: 'SHARED', value: isSharing && sharingStats.bytesServed > 0 ? formatBytes(sharingStats.bytesServed) : formatBytes(profile.total_bytes_shared) },
           { label: 'USED', value: formatBytes(profile.total_bytes_used) },
         ].map(({ label, value }) => (
           <div key={label} style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '10px', padding: '14px', textAlign: 'center' }}>

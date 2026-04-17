@@ -321,9 +321,11 @@ async function handleFetch(request) {
         responseHeaders[k] = v
       }
     })
-    stats.bytesServed += responseBody.length
+    const bodyLen = responseBody.length
+    stats.bytesServed += bodyLen
     stats.requestsHandled++
-    log(`  <- ${res.status} ${url} (${responseBody.length}b)`)
+    log(`  <- ${res.status} ${url} (${bodyLen}b)`)
+    flushStats(bodyLen)
     return { requestId, status: res.status, headers: responseHeaders, body: responseBody, finalUrl: res.url }
   } catch (err) {
     log(`  x ${url}: ${err.message}`)
@@ -340,6 +342,28 @@ function startHeartbeat() {
   if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null }
   sendHeartbeat()
   heartbeatTimer = setInterval(sendHeartbeat, 30_000)
+}
+
+// ── Stats flush — write bytes to Supabase in batches ────────────────────────
+let _pendingBytes = 0
+let _flushTimer = null
+
+function flushStats(bytes) {
+  _pendingBytes += bytes
+  if (_flushTimer) return
+  _flushTimer = setTimeout(async () => {
+    _flushTimer = null
+    const toFlush = _pendingBytes
+    _pendingBytes = 0
+    if (!toFlush || !config.token || !config.userId) return
+    try {
+      await fetch(`${API_BASE}/api/user/sharing`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
+        body: JSON.stringify({ bytes: toFlush }),
+      })
+    } catch {}
+  }, 5000) // batch writes every 5s
 }
 
 function stopHeartbeat() {
@@ -453,6 +477,7 @@ function connectRelay() {
           sendRelayMessage({ type: 'tunnel_data', tunnelId: msg.tunnelId, data: chunk.toString('base64') })
           stats.bytesServed += chunk.length
           stats.requestsHandled++
+          flushStats(chunk.length)
         })
         socket.on('end', () => closeTunnel(msg.tunnelId, true))
         socket.on('close', () => activeTunnels.delete(msg.tunnelId))
@@ -891,7 +916,7 @@ function updateTray() {
     { label: 'Settings', click: showWindow },
     { label: 'Open Dashboard', click: () => shell.openExternal(`${API_BASE}/dashboard`) },
     { type: 'separator' },
-    { label: 'Quit', click: () => { stopRelay(); app.quit() } },
+    { label: 'Quit', click: () => { stopRelay(); if (settingsWindow) { settingsWindow.removeAllListeners('close'); settingsWindow.destroy() } app.quit() } },
   ])
   tray.setContextMenu(menu)
   tray.setToolTip(running ? `PeerMesh — Sharing (${config.country})` : 'PeerMesh — Inactive')
@@ -900,7 +925,12 @@ function updateTray() {
 // ── Settings window ───────────────────────────────────────────────────────────
 
 function showWindow() {
-  if (settingsWindow) { settingsWindow.show(); settingsWindow.focus(); return }
+  if (settingsWindow) {
+    if (settingsWindow.isMinimized()) settingsWindow.restore()
+    settingsWindow.show()
+    settingsWindow.focus()
+    return
+  }
   settingsWindow = new BrowserWindow({
     width: 380, height: 520, resizable: false,
     title: 'PeerMesh', backgroundColor: '#0a0a0f',
@@ -908,7 +938,11 @@ function showWindow() {
   })
   settingsWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'))
   settingsWindow.setMenuBarVisibility(false)
-  settingsWindow.on('closed', () => { settingsWindow = null })
+  // hide instead of destroy so second-instance can show it again
+  settingsWindow.on('close', (e) => {
+    e.preventDefault()
+    settingsWindow.hide()
+  })
 }
 
 function showNotification(title, body) {
@@ -1036,8 +1070,7 @@ if (IS_NATIVE_HOST_MODE) {
     return
   }
   app.on('second-instance', () => {
-    // A second instance tried to launch — just focus the existing window
-    if (settingsWindow) { settingsWindow.show(); settingsWindow.focus() }
+    showWindow()
   })
 
   log('app ready — version:', DESKTOP_VERSION, 'background:', IS_BACKGROUND_LAUNCH)

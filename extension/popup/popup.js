@@ -30,19 +30,17 @@ let state = {
   supabaseToken: null,
 }
 
-// ── Init ─────────────────────────────────────────────────────────────────────
+// ── Init ──────────────────────────────────────────────────────────────────────
 
 async function init() {
   const stored = await chrome.storage.local.get(['user', 'session', 'isSharing', 'helper', 'selectedCountry', 'extId', 'supabaseToken'])
 
-  // Generate a stable extension UUID if not yet created
   if (!stored.extId) {
     stored.extId = crypto.randomUUID()
     await chrome.storage.local.set({ extId: stored.extId })
   }
   state = { ...state, ...stored }
 
-  // Load peer counts
   try {
     const res = await fetch(`${API}/api/peers/available`)
     const data = await res.json()
@@ -62,7 +60,7 @@ async function init() {
   if (!state.user) startAuthPolling()
 }
 
-// ── Auth polling — checks if user signed in on website ────────────────────────
+// ── Auth polling ──────────────────────────────────────────────────────────────
 
 let authPollInterval = null
 let peerPollInterval = null
@@ -74,7 +72,6 @@ async function refreshRuntimeStatus() {
     if (!status) return
     state.session = status.session || null
     state.helper = status.helper || null
-    // Desktop is source of truth for sharing state
     state.isSharing = !!(state.helper?.available && (state.helper?.running || state.helper?.shareEnabled))
     await chrome.storage.local.set({
       session: state.session,
@@ -93,7 +90,6 @@ function startPeerPolling() {
       const updated = {}
       data.peers?.forEach(p => { updated[p.country] = p.count })
       state.peerCounts = updated
-      // Only re-render the grid, not the whole popup
       document.querySelectorAll('.country-btn').forEach(btn => {
         const count = state.peerCounts[btn.dataset.code] ?? 0
         btn.querySelector('.peers').textContent = count > 0 ? count + ' peers' : 'no peers'
@@ -105,7 +101,6 @@ function startPeerPolling() {
   if (!statusPollInterval) {
     statusPollInterval = setInterval(async () => {
       await refreshRuntimeStatus()
-      // Desktop is source of truth — sync isSharing from it
       const desktopSharing = !!(state.helper?.available && (state.helper?.running || state.helper?.shareEnabled))
       if (state.isSharing !== desktopSharing) {
         state.isSharing = desktopSharing
@@ -114,6 +109,33 @@ function startPeerPolling() {
       render()
     }, 3000)
   }
+
+  // Poll fresh profile stats from DB every 30s
+  setInterval(async () => {
+    if (!state.user || !state.supabaseToken) return
+    try {
+      const res = await fetch(`${API}/api/user/sharing`, {
+        headers: { 'Authorization': `Bearer ${state.supabaseToken}` },
+      })
+      if (!res.ok) return
+      const data = await res.json()
+      state.user = {
+        ...state.user,
+        totalShared: data.total_bytes_shared ?? state.user.totalShared,
+        totalUsed: data.total_bytes_used ?? state.user.totalUsed,
+        trustScore: data.trust_score ?? state.user.trustScore,
+      }
+      await chrome.storage.local.set({ user: state.user })
+      document.querySelectorAll('.stat').forEach(el => {
+        const lbl = el.querySelector('.lbl')?.textContent
+        const val = el.querySelector('.val')
+        if (!val) return
+        if (lbl === 'SHARED') val.textContent = formatBytes(state.user.totalShared || 0)
+        if (lbl === 'USED') val.textContent = formatBytes(state.user.totalUsed || 0)
+        if (lbl === 'TRUST') val.textContent = String(state.user.trustScore || 50)
+      })
+    } catch {}
+  }, 30000)
 }
 
 function startAuthPolling() {
@@ -269,12 +291,10 @@ function renderDashboard(app) {
       helperNotice.innerHTML = 'Desktop helper not installed. <a id="installHelperBtn" href="#" style="color:#00ff88;font-family:\'Courier New\',monospace;font-size:11px;text-decoration:underline">DOWNLOAD & INSTALL</a>'
       shareSection.appendChild(helperNotice)
     }
-    // Disable the share toggle visually
     const toggle = document.getElementById('shareToggle')
     if (toggle) { toggle.disabled = true; toggle.style.opacity = '0.4'; toggle.style.cursor = 'not-allowed' }
   }
 
-  // Bind events
   document.querySelectorAll('.country-btn').forEach(btn => {
     btn.onclick = () => {
       state.selectedCountry = btn.dataset.code
@@ -318,12 +338,13 @@ async function connectSession() {
     const data = await res.json()
     if (data.error) throw new Error(data.error)
 
-    // Tell service worker to connect to relay
     const response = await chrome.runtime.sendMessage({
       type: 'CONNECT',
       relayEndpoint: data.relayEndpoint,
       country: state.selectedCountry,
       userId: state.user.id,
+      dbSessionId: data.sessionId,
+      preferredProviderUserId: data.preferredProviderUserId ?? null,
       token: state.supabaseToken || state.user.token,
     })
 
@@ -346,7 +367,6 @@ async function connectSession() {
 async function disconnectSession() {
   if (state.session) {
     await chrome.runtime.sendMessage({ type: 'DISCONNECT' })
-
     try {
       await fetch(`${API}/api/session/end`, {
         method: 'POST',
@@ -366,10 +386,12 @@ async function disconnectSession() {
 
 async function toggleSharing(on) {
   if (on && !state.helper?.available) {
-    // Block toggle — desktop helper required
-    state.error = `Desktop helper required. <a href="${API}/api/desktop-download" style="color:#00ff88">Download & install</a> then reopen.`
-    render()
-    return
+    await refreshRuntimeStatus()
+    if (!state.helper?.available) {
+      state.error = `Desktop helper required. <a href="${API}/api/desktop-download" style="color:#00ff88">Download & install</a> then reopen.`
+      render()
+      return
+    }
   }
 
   const previous = state.isSharing
@@ -378,12 +400,12 @@ async function toggleSharing(on) {
 
   const response = await chrome.runtime.sendMessage({
     type: on ? 'START_SHARING' : 'STOP_SHARING',
-    country: state.user?.country,
+    country: state.user?.country_code || state.user?.country,
     userId: state.user?.id,
-    token: state.user?.token,
+    token: state.supabaseToken || state.user?.token,
     supabaseToken: state.supabaseToken,
     desktopToken: state.user?.token,
-    trust: state.user?.trustScore || 50,
+    trust: state.user?.trustScore || state.user?.trust_score || 50,
   })
 
   if (!response?.success) {
@@ -437,7 +459,7 @@ function formatBytes(bytes) {
   return `${(bytes / 1024 / 1024 / 1024).toFixed(2)}GB`
 }
 
-// ── Debug log panel ──────────────────────────────────────────────────────────
+// ── Debug log panel ───────────────────────────────────────────────────────────
 
 const logEntries = []
 
@@ -454,19 +476,41 @@ function appendLog(entry) {
 }
 
 async function initLogPanel() {
-  // Load existing logs from SW
   try {
     const res = await chrome.runtime.sendMessage({ type: 'GET_LOGS' })
     if (res?.logs) res.logs.forEach(appendLog)
   } catch {}
 }
 
-// Listen for live log entries from SW
+// ── Message listener ──────────────────────────────────────────────────────────
+
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.type === 'LOG') appendLog(msg.entry)
+
   if (msg.type === 'AUTH_SUCCESS') {
     state.user = msg.user
     chrome.storage.local.set({ user: msg.user })
+    render()
+  }
+
+  // Relay found a new provider transparently — update sessionId, no UI disruption
+  if (msg.type === 'SESSION_RECONNECTED') {
+    if (state.session) {
+      state.session = { ...state.session, id: msg.sessionId }
+      chrome.storage.local.set({ session: state.session })
+    }
+    // Brief visual pulse on the status pill so user knows a switch happened
+    const pill = document.querySelector('.status-pill')
+    if (pill) {
+      pill.style.opacity = '0.4'
+      setTimeout(() => { pill.style.opacity = '1' }, 600)
+    }
+  }
+
+  // Provider dropped and relay gave up finding a replacement
+  if (msg.type === 'SESSION_ENDED') {
+    state.session = null
+    chrome.storage.local.set({ session: null })
     render()
   }
 })
@@ -487,7 +531,6 @@ function renderLogPanel() {
     </div>`
   document.body.appendChild(panel)
 
-  // Populate existing entries
   logEntries.forEach(e => {
     const line = document.createElement('div')
     line.style.cssText = `color:${e.level === 'error' ? '#ff6060' : e.level === 'warn' ? '#ffaa00' : '#aaa'};margin:1px 0;word-break:break-all`
@@ -511,9 +554,5 @@ function renderLogPanel() {
     document.getElementById('pm-log-body').innerHTML = ''
   }
 }
-
-// ── Listen for auth from website ──────────────────────────────────────────────
-
-// (moved above into onMessage listener)
 
 init()

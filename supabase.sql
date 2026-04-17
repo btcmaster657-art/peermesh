@@ -64,6 +64,7 @@ create table profiles (
   total_bytes_used bigint default 0,
   bandwidth_used_month bigint default 0,
   bandwidth_limit bigint default 5368709120, -- 5GB free tier
+  preferred_providers jsonb default '{}'::jsonb -- { "NG": "provider-user-id", ... }
 
   created_at timestamptz default now(),
   updated_at timestamptz default now()
@@ -91,6 +92,9 @@ create table session_accountability (
   provider_id uuid references profiles(id) on delete set null,
   target_host text,
   provider_country text,
+  bytes_used bigint default 0,
+  started_at timestamptz default now(),
+  ended_at timestamptz,
   signed_receipt text not null,
   created_at timestamptz default now()
 );
@@ -265,6 +269,38 @@ returns void as $$
   set bandwidth_used_month = 0
   where subscription_status = 'free';
 $$ language sql security definer;
+
+-- Update peer affinity — set preferred provider for a country
+create or replace function set_preferred_provider(
+  p_user_id uuid,
+  p_country text,
+  p_provider_user_id uuid
+) returns void as $$
+  update profiles
+  set preferred_providers = preferred_providers || jsonb_build_object(p_country, p_provider_user_id::text),
+      updated_at = now()
+  where id = p_user_id;
+$$ language sql security definer;
+
+-- Finalize accountability row on session end
+create or replace function finalize_session_accountability(
+  p_session_id uuid,
+  p_provider_id uuid,
+  p_provider_country text,
+  p_bytes_used bigint,
+  p_target_host text default null
+) returns void as $$
+begin
+  update session_accountability
+  set
+    provider_id      = coalesce(p_provider_id, provider_id),
+    provider_country = coalesce(p_provider_country, provider_country),
+    target_host      = coalesce(p_target_host, target_host),
+    bytes_used       = p_bytes_used,
+    ended_at         = now()
+  where session_id = p_session_id;
+end;
+$$ language plpgsql security definer;
 
 -- Auto-create profile on signup
 create or replace function handle_new_user()
