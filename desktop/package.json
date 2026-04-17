@@ -1,6 +1,6 @@
 {
   "name": "peermesh-desktop",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "PeerMesh Desktop — Share your connection from the system tray",
   "author": "PeerMesh",
   "main": "main.js",
@@ -32,6 +32,7 @@
       "perMachine": false,
       "runAfterFinish": true,
       "createDesktopShortcut": false,
+      "deleteAppDataOnUninstall": false,
       "include": "assets/installer.nsh"
     },
     "files": [
