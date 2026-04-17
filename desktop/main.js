@@ -3,6 +3,7 @@ const { WebSocket } = require('ws')
 const path = require('path')
 const http = require('http')
 const fs = require('fs')
+const { chromium } = require('playwright-core')
 
 // Prevent uncaught errors from showing Electron's error dialog
 process.on('uncaughtException', (err) => {
@@ -56,7 +57,42 @@ function isAllowed(hostname) {
   return !BLOCKED.some(p => p.test(hostname)) && !PRIVATE.some(p => p.test(hostname))
 }
 
-// ── Fetch handler ─────────────────────────────────────────────────────────────
+// ── Playwright browser pool ───────────────────────────────────────────────────
+
+let browser = null
+// Cookie jar per origin so repeat visits look like a returning user
+const contextCache = new Map() // origin → BrowserContext
+
+async function getBrowser() {
+  if (browser && browser.isConnected()) return browser
+  // Use the Electron-bundled Chromium so no extra download is needed
+  const execPath = chromium.executablePath() ||
+    (process.platform === 'win32'
+      ? path.join(process.resourcesPath ?? __dirname, 'chromium', 'chrome.exe')
+      : undefined)
+  browser = await chromium.launch({
+    executablePath: execPath,
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled'],
+  })
+  browser.on('disconnected', () => { browser = null; contextCache.clear() })
+  return browser
+}
+
+async function getContext(origin) {
+  if (contextCache.has(origin)) return contextCache.get(origin)
+  const b = await getBrowser()
+  const ctx = await b.newContext({
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    locale: 'en-US',
+    timezoneId: 'America/New_York',
+    viewport: { width: 1280, height: 800 },
+  })
+  contextCache.set(origin, ctx)
+  return ctx
+}
+
+// ── Fetch handler — real Chrome TLS fingerprint ───────────────────────────────
 
 async function handleFetch(request) {
   const { requestId, url, method = 'GET', headers = {}, body = null } = request
@@ -65,27 +101,56 @@ async function handleFetch(request) {
     if (!isAllowed(parsed.hostname)) {
       return { requestId, status: 403, headers: {}, body: '', error: 'URL not allowed' }
     }
-    const res = await fetch(url, {
-      method,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-        ...headers,
-      },
-      body: body ?? undefined,
-      redirect: 'follow',
-    })
-    const responseBody = await res.text()
-    const responseHeaders = {}
-    res.headers.forEach((v, k) => {
-      if (!['content-encoding', 'transfer-encoding', 'connection'].includes(k)) {
-        responseHeaders[k] = v
+    const origin = parsed.origin
+    const ctx = await getContext(origin)
+    const page = await ctx.newPage()
+    try {
+      // Set extra headers from requester (forwarded browser headers)
+      const extraHeaders = {}
+      for (const [k, v] of Object.entries(headers)) {
+        if (!['host', 'content-length'].includes(k.toLowerCase())) extraHeaders[k] = v
       }
-    })
-    stats.bytesServed += responseBody.length
-    stats.requestsHandled++
-    return { requestId, status: res.status, headers: responseHeaders, body: responseBody, finalUrl: res.url }
+      if (Object.keys(extraHeaders).length) await page.setExtraHTTPHeaders(extraHeaders)
+
+      let responseStatus = 200
+      let responseHeaders = {}
+      let responseBody = ''
+
+      page.on('response', async (res) => {
+        if (res.url() === url || res.url().startsWith(origin)) {
+          responseStatus = res.status()
+          responseHeaders = await res.allHeaders()
+        }
+      })
+
+      if (method !== 'GET' && method !== 'HEAD') {
+        // For POST/PUT use fetch API inside the page context (same Chrome TLS)
+        const result = await page.evaluate(async ({ url, method, headers, body }) => {
+          const res = await fetch(url, { method, headers, body })
+          const text = await res.text()
+          const hdrs = {}
+          res.headers.forEach((v, k) => { hdrs[k] = v })
+          return { status: res.status, headers: hdrs, body: text, finalUrl: res.url }
+        }, { url, method, headers, body })
+        await page.close()
+        stats.bytesServed += result.body.length
+        stats.requestsHandled++
+        return { requestId, ...result }
+      }
+
+      const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 })
+      responseBody = await page.content()
+      responseStatus = response?.status() ?? 200
+      responseHeaders = await response?.allHeaders() ?? {}
+
+      await page.close()
+      stats.bytesServed += responseBody.length
+      stats.requestsHandled++
+      return { requestId, status: responseStatus, headers: responseHeaders, body: responseBody, finalUrl: url }
+    } catch (err) {
+      await page.close().catch(() => {})
+      throw err
+    }
   } catch (err) {
     return { requestId, status: 502, headers: {}, body: '', error: err.message }
   }
@@ -147,6 +212,10 @@ function stopRelay() {
   if (ws) { ws.removeAllListeners('close'); ws.close(1000); ws = null }
   running = false
   stats = { bytesServed: 0, requestsHandled: 0, connectedAt: null }
+  // Close browser contexts to free memory when not sharing
+  for (const ctx of contextCache.values()) ctx.close().catch(() => {})
+  contextCache.clear()
+  if (browser) { browser.close().catch(() => {}); browser = null }
   updateTray()
 }
 
@@ -259,10 +328,11 @@ ipcMain.handle('get-ext-id', () => config.extId)
 ipcMain.handle('check-website-auth', async () => {
   try {
     const res = await fetch(`${API_BASE}/api/extension-auth?ext_id=${config.extId}`)
-    if (!res.ok) return null
     const data = await res.json()
-    return data.user ?? null
-  } catch { return null }
+    if (res.status === 403) return { error: data.error || 'Account not verified' }
+    if (res.status === 404) return { error: 'User not found' }
+    return data.user ? { user: data.user } : { pending: true }
+  } catch { return { error: 'Could not reach server' } }
 })
 
 ipcMain.handle('open-auth', () => {

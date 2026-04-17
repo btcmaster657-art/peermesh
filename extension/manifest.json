@@ -8,7 +8,8 @@
     "storage",
     "alarms",
     "notifications",
-    "webRequest"
+    "webRequest",
+    "declarativeNetRequest"
   ],
   "host_permissions": ["<all_urls>"],
   "background": {

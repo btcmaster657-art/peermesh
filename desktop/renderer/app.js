@@ -86,20 +86,28 @@ function startAuthPoll() {
         authPollInterval = null
         return
       }
-      const user = await window.peermesh.checkWebsiteAuth()
-      if (user?.token) {
-        await window.peermesh.signIn({
-          token: user.token,
-          userId: user.id,
-          country: user.country || 'RW',
-          trust: user.trustScore || 50,
-        })
+      const result = await window.peermesh.checkWebsiteAuth()
+      if (result?.user?.token) {
         clearInterval(authPollInterval)
         authPollInterval = null
+        await window.peermesh.signIn({
+          token: result.user.token,
+          userId: result.user.id,
+          country: result.user.country || 'RW',
+          trust: result.user.trustScore || 50,
+        })
         await pollState()
+      } else if (result?.error) {
+        clearInterval(authPollInterval)
+        authPollInterval = null
+        const errEl = document.getElementById('auth-error')
+        errEl.textContent = result.error
+        errEl.style.display = 'block'
+        // Allow retry after showing error
+        setTimeout(() => { errEl.style.display = 'none'; startAuthPoll() }, 5000)
       }
     } catch {}
-  }, 500)
+  }, 1500)
 }
 
 // Start polling immediately and restart whenever auth screen is shown

@@ -53,7 +53,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 // ── Connect as requester ──────────────────────────────────────────────────────
 
-async function connectToRelay({ relayEndpoint, country, userId }) {
+async function connectToRelay(opts, attempt = 0) {
+  try {
+    return await _connectOnce(opts)
+  } catch (e) {
+    if (attempt < 4) {
+      await new Promise(r => setTimeout(r, 2000 * (attempt + 1)))
+      return connectToRelay(opts, attempt + 1)
+    }
+    throw e
+  }
+}
+
+async function _connectOnce({ relayEndpoint, country, userId }) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(relayEndpoint || RELAY_WS)
 
@@ -72,8 +84,7 @@ async function connectToRelay({ relayEndpoint, country, userId }) {
         currentSession = { ws, sessionId: msg.sessionId || agentSessionId, country, relayEndpoint }
         relayWs = ws
         agentSessionId = msg.sessionId || agentSessionId
-        chrome.action.setBadgeText({ text: 'ON' })
-        chrome.action.setBadgeBackgroundColor({ color: '#00ff88' })
+        setProxy(relayEndpoint, agentSessionId)
         resolve()
       }
 
@@ -99,7 +110,7 @@ async function connectToRelay({ relayEndpoint, country, userId }) {
       }
     }
 
-    ws.onerror = () => reject(new Error('WebSocket connection failed'))
+    ws.onerror = (e) => reject(new Error('WebSocket connection failed'))
     ws.onclose = () => {
       if (currentSession) {
         clearProxy()
@@ -153,14 +164,14 @@ function proxyFetch(url, options = {}) {
 
 // ── Set Chrome proxy to PAC script that routes through relay proxy ────────────
 
-function setProxy(relayEndpoint) {
-  // Build a PAC script URL — relay's HTTP proxy on port 8081
+function setProxy(relayEndpoint, sessionId) {
   const relayUrl = new URL(
     relayEndpoint.replace('wss://', 'https://').replace('ws://', 'http://')
   )
   const proxyHost = relayUrl.hostname
-  const proxyPort = 8081 // relay HTTP proxy port
+  const proxyPort = 8081
 
+  // Pass sessionId as proxy-auth username so relay can route to correct country
   const pacScript = `
     function FindProxyForURL(url, host) {
       if (host === 'localhost' || host === '127.0.0.1' || isPlainHostName(host)) {
@@ -180,8 +191,22 @@ function setProxy(relayEndpoint) {
     if (chrome.runtime.lastError) {
       console.error('[proxy] set error:', chrome.runtime.lastError.message)
     } else {
-      console.log(`[proxy] PAC script set — routing via ${proxyHost}:${proxyPort}`)
+      console.log(`[proxy] PAC script set — routing via ${proxyHost}:${proxyPort} session=${sessionId}`)
     }
+  })
+
+  // Inject session ID via declarativeNetRequest (MV3 compatible)
+  chrome.declarativeNetRequest.updateDynamicRules({
+    removeRuleIds: [1],
+    addRules: [{
+      id: 1,
+      priority: 1,
+      action: {
+        type: 'modifyHeaders',
+        requestHeaders: [{ header: 'X-PeerMesh-Session', operation: 'set', value: sessionId }],
+      },
+      condition: { urlFilter: '|http*', resourceTypes: ['main_frame', 'sub_frame', 'xmlhttprequest', 'other', 'stylesheet', 'script', 'image', 'font', 'media'] },
+    }],
   })
 
   chrome.action.setBadgeText({ text: 'ON' })
@@ -190,6 +215,7 @@ function setProxy(relayEndpoint) {
 
 function clearProxy() {
   chrome.proxy.settings.clear({ scope: 'regular' })
+  chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: [1] })
   chrome.action.setBadgeText({ text: '' })
 }
 
@@ -206,7 +232,7 @@ async function disconnect() {
 
 // ── Share as provider ─────────────────────────────────────────────────────────
 
-async function startSharing({ country, userId }) {
+async function startSharing({ country, userId }, attempt = 0) {
   if (providerWs) { providerWs.close(); providerWs = null }
 
   providerWs = new WebSocket(RELAY_WS)
@@ -216,17 +242,52 @@ async function startSharing({ country, userId }) {
       userId,
       country,
       trustScore: 50,
-      agentMode: false,
+      agentMode: true,  // extension can serve proxy_request messages directly
     }))
     isSharing = true
   }
-  providerWs.onmessage = (event) => {
+  providerWs.onmessage = async (event) => {
     const msg = JSON.parse(event.data)
     if (msg.type === 'session_request') {
       providerWs.send(JSON.stringify({ type: 'agent_ready', sessionId: msg.sessionId }))
     }
+    if (msg.type === 'proxy_request') {
+      const response = await handleExtensionProxyRequest(msg.request)
+      providerWs.send(JSON.stringify({ type: 'proxy_response', sessionId: msg.sessionId, response }))
+    }
   }
-  providerWs.onclose = () => { isSharing = false }
+  providerWs.onclose = () => {
+    isSharing = false
+    if (attempt < 4) {
+      setTimeout(() => startSharing({ country, userId }, attempt + 1), 3000 * (attempt + 1))
+    }
+  }
+}
+
+async function handleExtensionProxyRequest({ requestId, url, method = 'GET', headers = {}, body = null }) {
+  try {
+    const parsed = new URL(url)
+    const blocked = [/\.onion$/i, /^smtp\./i, /^mail\./i, /torrent/i]
+    const private_ = [/^localhost$/i, /^127\./, /^10\./, /^192\.168\./]
+    if (blocked.some(p => p.test(parsed.hostname)) || private_.some(p => p.test(parsed.hostname))) {
+      return { requestId, status: 403, headers: {}, body: '', error: 'URL not allowed' }
+    }
+    const init = { method, headers: {}, redirect: 'follow' }
+    // Strip hop-by-hop headers
+    for (const [k, v] of Object.entries(headers)) {
+      if (!['host', 'content-length', 'connection', 'x-peermesh-session'].includes(k.toLowerCase())) {
+        init.headers[k] = v
+      }
+    }
+    if (body && method !== 'GET' && method !== 'HEAD') init.body = body
+    const res = await fetch(url, init)
+    const text = await res.text()
+    const resHeaders = {}
+    res.headers.forEach((v, k) => { resHeaders[k] = v })
+    return { requestId, status: res.status, headers: resHeaders, body: text, finalUrl: res.url }
+  } catch (err) {
+    return { requestId, status: 502, headers: {}, body: '', error: err.message }
+  }
 }
 
 function stopSharing() {

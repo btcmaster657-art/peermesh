@@ -6,7 +6,8 @@
   "scripts": {
     "start": "electron .",
     "build-win": "electron-builder --win --x64",
-    "build-mac": "electron-builder --mac"
+    "build-mac": "electron-builder --mac",
+    "test": "node node_modules/@playwright/test/cli.js test"
   },
   "build": {
     "appId": "com.peermesh.desktop",
@@ -35,9 +36,11 @@
     ]
   },
   "dependencies": {
+    "playwright-core": "^1.44.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.59.1",
     "electron": "^33.0.0",
     "electron-builder": "^24.0.0"
   }

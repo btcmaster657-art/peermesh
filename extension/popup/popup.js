@@ -50,13 +50,33 @@ async function init() {
   state.loading = false
   render()
 
-  // If not logged in, poll for token using ext_id
   if (!state.user) startAuthPolling()
+  else startPeerPolling()
 }
 
 // ── Auth polling — checks if user signed in on website ────────────────────────
 
 let authPollInterval = null
+let peerPollInterval = null
+
+function startPeerPolling() {
+  if (peerPollInterval) return
+  peerPollInterval = setInterval(async () => {
+    try {
+      const res = await fetch(`${API}/api/peers/available`)
+      const data = await res.json()
+      const updated = {}
+      data.peers?.forEach(p => { updated[p.country] = p.count })
+      state.peerCounts = updated
+      // Only re-render the grid, not the whole popup
+      document.querySelectorAll('.country-btn').forEach(btn => {
+        const count = state.peerCounts[btn.dataset.code] ?? 0
+        btn.querySelector('.peers').textContent = count > 0 ? count + ' peers' : 'no peers'
+        btn.classList.toggle('no-peers', count === 0)
+      })
+    } catch {}
+  }, 30000)
+}
 
 function startAuthPolling() {
   if (authPollInterval) return
@@ -72,6 +92,7 @@ function startAuthPolling() {
         state.loading = false
         await chrome.storage.local.set({ user: data.user })
         render()
+        startPeerPolling()
       }
     } catch {}
   }, 2000)
@@ -156,7 +177,7 @@ function renderDashboard(app) {
       <button class="connect-btn" id="connectBtn" ${!selectedCountry ? 'disabled' : ''}>
         ${selectedCountry ? `CONNECT ${getFlagForCountry(selectedCountry)} ${selectedCountry}` : 'SELECT A COUNTRY'}
       </button>
-      ${state.error ? `<div class="error-msg">${state.error}</div>` : ''}
+      ${state.error ? `<div class="error-msg">${state.error} <button id="retryBtn" style="background:none;border:none;color:#00ff88;font-family:'Courier New',monospace;font-size:11px;cursor:pointer;text-decoration:underline">RETRY</button></div>` : ''}
     </div>
     `}
 
@@ -204,6 +225,7 @@ function renderDashboard(app) {
   })
 
   document.getElementById('connectBtn')?.addEventListener('click', connectSession)
+  document.getElementById('retryBtn')?.addEventListener('click', () => { state.error = null; render(); connectSession() })
   document.getElementById('disconnectBtn')?.addEventListener('click', disconnectSession)
   document.getElementById('shareToggle')?.addEventListener('change', e => toggleSharing(e.target.checked))
   document.getElementById('signOutBtn')?.addEventListener('click', signOut)

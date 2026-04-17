@@ -162,7 +162,11 @@
       </p>
     </div>
     <div class="mt-auto center" style="padding-bottom:8px">
-      <span style="font-size:10px;color:var(--muted)">Checking for sign-in...</span>
+      <div id="auth-status" style="font-size:10px;color:var(--muted);display:flex;align-items:center;justify-content:center;gap:6px">
+        <span style="display:inline-block;width:6px;height:6px;border:1.5px solid #1e1e2a;border-top-color:#00ff88;border-radius:50%;animation:spin 0.8s linear infinite"></span>
+        WAITING FOR SIGN IN...
+      </div>
+      <style>@keyframes spin{to{transform:rotate(360deg)}}</style>
     </div>
   </div>
 

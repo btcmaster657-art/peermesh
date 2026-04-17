@@ -300,17 +300,16 @@ const proxyPending = new Map() // requestId/tunnelId → pending
 const proxySessionMap = new Map()
 
 const httpProxyServer = createServer((req, res) => {
-  // Plain HTTP requests — forward via proxy_request to agent
-  const sessionId = proxySessionMap.get(req.socket.remotePort) ||
-    [...sessions.values()].find(s => peers.get(s.requesterId)?.agentMode === false)?.sessionId
+  // Resolve session from X-PeerMesh-Session header injected by the extension
+  const headerSessionId = req.headers['x-peermesh-session']
+  const sessionId = headerSessionId || proxySessionMap.get(req.socket.remotePort)
+  const sessionEntry = sessionId ? sessions.get(sessionId) : null
+  const sessionCountry = sessionEntry?.country ?? null
 
-  // Find an available agent provider
-  let provider = null
-  if (sessionId) {
-    const s = sessions.get(sessionId)
-    if (s) provider = peers.get(s.providerId)
+  let provider = sessionEntry ? peers.get(sessionEntry.providerId) : null
+  if (!provider || provider.readyState !== WebSocket.OPEN) {
+    provider = findAnyAgentProvider(sessionCountry)
   }
-  if (!provider) provider = findAnyAgentProvider()
 
   if (!provider) {
     res.writeHead(503, { 'Content-Type': 'text/plain' })
@@ -336,8 +335,7 @@ const httpProxyServer = createServer((req, res) => {
       reject: () => { res.writeHead(502); res.end('Bad Gateway') },
     })
 
-    const sid = sessions.get([...sessions.keys()].find(k => sessions.get(k)?.providerId === provider.peerId))
-    const actualSessionId = [...sessions.entries()].find(([, s]) => s.providerId === provider.peerId)?.[0]
+    const actualSessionId = sessionId || [...sessions.entries()].find(([, s]) => s.providerId === provider.peerId)?.[0]
     send(provider, { type: 'proxy_request', sessionId: actualSessionId, request })
 
     setTimeout(() => {
@@ -354,7 +352,17 @@ httpProxyServer.on('connect', (req, clientSocket, head) => {
   const [hostname, portStr] = (req.url || '').split(':')
   const port = parseInt(portStr) || 443
 
-  const provider = findAnyAgentProvider()
+  // Session ID passed via Proxy-Authorization: Bearer <sessionId>
+  const authHeader = req.headers['proxy-authorization'] || ''
+  const headerSessionId = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null
+  const connectSessionId = headerSessionId || proxySessionMap.get(clientSocket.remotePort)
+  const connectSession = connectSessionId ? sessions.get(connectSessionId) : null
+  const connectCountry = connectSession?.country ?? null
+
+  let provider = connectSession ? peers.get(connectSession.providerId) : null
+  if (!provider || provider.readyState !== WebSocket.OPEN) {
+    provider = findAnyAgentProvider(connectCountry)
+  }
   if (!provider) {
     clientSocket.write('HTTP/1.1 503 No Provider Available\r\n\r\n')
     clientSocket.destroy()
@@ -362,7 +370,7 @@ httpProxyServer.on('connect', (req, clientSocket, head) => {
   }
 
   const tunnelId = randomUUID()
-  const actualSessionId = [...sessions.entries()].find(([, s]) => s.providerId === provider.peerId)?.[0]
+  const actualSessionId = connectSessionId ?? [...sessions.entries()].find(([, s]) => s.providerId === provider.peerId)?.[0]
 
   // Tell agent to open TCP connection to target and relay data
   send(provider, { type: 'open_tunnel', tunnelId, hostname, port, sessionId: actualSessionId })
@@ -435,9 +443,14 @@ function handleProxyMessage(ws, msg) {
   }
 }
 
-function findAnyAgentProvider() {
+function findAnyAgentProvider(country = null) {
   for (const [, peer] of peers) {
-    if (peer.role === 'provider' && peer.agentMode && peer.readyState === WebSocket.OPEN) {
+    if (
+      peer.role === 'provider' &&
+      peer.agentMode &&
+      peer.readyState === WebSocket.OPEN &&
+      (country === null || peer.country === country)
+    ) {
       return peer
     }
   }
