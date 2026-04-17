@@ -1,11 +1,11 @@
 {
-  "name": "peermesh-provider-agent",
+  "name": "peermesh-agent",
   "version": "1.0.0",
   "type": "module",
-  "description": "PeerMesh provider agent — share your connection from your machine",
-  "main": "agent.js",
+  "description": "PeerMesh provider agent",
+  "main": "peermesh-agent.js",
   "scripts": {
-    "start": "node agent.js"
+    "start": "node peermesh-agent.js"
   },
   "dependencies": {
     "ws": "^8.18.0"

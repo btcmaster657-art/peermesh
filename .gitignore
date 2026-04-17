@@ -4,7 +4,13 @@
 /node_modules
 relay/node_modules
 provider-agent/node_modules
+desktop/node_modules
+**/node_modules
 /.pnp
+
+# desktop build artifacts (keep exe in public/ instead)
+desktop/dist
+desktop/.webpack
 .pnp.*
 .yarn/*
 !.yarn/patches

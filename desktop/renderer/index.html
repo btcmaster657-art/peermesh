@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PeerMesh</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    :root {
+      --bg: #0a0a0f;
+      --surface: #13131a;
+      --border: #1e1e2a;
+      --accent: #00ff88;
+      --accent-dim: rgba(0,255,136,0.1);
+      --text: #e8e8f0;
+      --muted: #666680;
+      --danger: #ff4466;
+    }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 13px;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      user-select: none;
+    }
+    .logo {
+      font-family: 'Courier New', monospace;
+      color: var(--accent);
+      font-size: 13px;
+      letter-spacing: 4px;
+      padding: 20px 20px 0;
+      text-align: center;
+    }
+    .screen { display: none; flex-direction: column; flex: 1; padding: 20px; }
+    .screen.active { display: flex; }
+
+    /* ── Auth screen ── */
+    #auth-screen h2 { font-size: 18px; font-weight: 600; margin-bottom: 8px; text-align: center; }
+    #auth-screen p { color: var(--muted); font-size: 12px; text-align: center; line-height: 1.6; margin-bottom: 24px; }
+
+    .btn {
+      width: 100%;
+      padding: 13px;
+      border: none;
+      border-radius: 9px;
+      font-family: 'Courier New', monospace;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      cursor: pointer;
+      margin-bottom: 8px;
+      transition: opacity 0.2s;
+    }
+    .btn-primary { background: var(--accent); color: #000; }
+    .btn-primary:hover { opacity: 0.9; }
+    .btn-primary:disabled { background: var(--muted); cursor: not-allowed; }
+    .btn-secondary { background: transparent; color: var(--text); border: 1px solid var(--border); }
+    .btn-danger { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
+
+    /* ── Main screen ── */
+    .status-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px;
+      margin-bottom: 12px;
+      text-align: center;
+    }
+    .status-card.active { border-color: var(--accent); background: var(--accent-dim); }
+    .status-dot {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      background: var(--muted);
+      display: inline-block;
+      margin-right: 8px;
+    }
+    .status-dot.on { background: var(--accent); box-shadow: 0 0 8px var(--accent); animation: pulse 2s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+    .status-label { font-family: 'Courier New', monospace; font-size: 12px; letter-spacing: 0.5px; }
+    .status-country { font-size: 24px; margin: 8px 0 4px; }
+    .status-stats { font-size: 11px; color: var(--muted); }
+
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px;
+      margin-bottom: 10px;
+    }
+    .toggle-info h4 { font-size: 13px; font-weight: 500; margin-bottom: 2px; }
+    .toggle-info p { font-size: 11px; color: var(--muted); }
+
+    .toggle {
+      width: 44px; height: 24px;
+      border-radius: 12px;
+      border: none;
+      background: var(--border);
+      cursor: pointer;
+      position: relative;
+      transition: background 0.2s;
+      flex-shrink: 0;
+    }
+    .toggle.on { background: var(--accent); }
+    .toggle::after {
+      content: '';
+      position: absolute;
+      width: 18px; height: 18px;
+      background: white;
+      border-radius: 50%;
+      top: 3px; left: 3px;
+      transition: left 0.2s;
+    }
+    .toggle.on::after { left: 23px; }
+
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .stat-box {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      text-align: center;
+    }
+    .stat-val { font-family: 'Courier New', monospace; font-size: 16px; color: var(--accent); display: block; margin-bottom: 3px; }
+    .stat-lbl { font-size: 10px; color: var(--muted); letter-spacing: 0.5px; }
+
+    .error { color: var(--danger); font-size: 11px; text-align: center; padding: 8px; background: rgba(255,68,102,0.1); border-radius: 6px; margin-bottom: 8px; }
+
+    .divider { height: 1px; background: var(--border); margin: 12px 0; }
+
+    .link-btn { background: none; border: none; color: var(--muted); font-size: 11px; cursor: pointer; padding: 4px; text-decoration: underline; font-family: 'Courier New', monospace; }
+    .link-btn:hover { color: var(--text); }
+
+    .center { text-align: center; }
+    .mt-auto { margin-top: auto; }
+  </style>
+</head>
+<body>
+  <div class="logo">PEERMESH</div>
+
+  <!-- Auth Screen -->
+  <div id="auth-screen" class="screen active">
+    <div style="flex:1;display:flex;flex-direction:column;justify-content:center">
+      <h2>Welcome to PeerMesh</h2>
+      <p>Share your connection from the system tray.<br>Sign in to get started.</p>
+      <div id="auth-error" class="error" style="display:none"></div>
+      <button class="btn btn-primary" id="btn-open-browser">SIGN IN WITH BROWSER</button>
+      <p style="color:var(--muted);font-size:11px;text-align:center;line-height:1.7;margin-top:8px">
+        Click above to sign in on peermesh.com.<br>
+        This app will activate automatically.
+      </p>
+    </div>
+    <div class="mt-auto center" style="padding-bottom:8px">
+      <span style="font-size:10px;color:var(--muted)">Checking for sign-in...</span>
+    </div>
+  </div>
+
+  <!-- Main Screen -->
+  <div id="main-screen" class="screen">
+    <!-- Status card -->
+    <div id="status-card" class="status-card">
+      <div>
+        <span class="status-dot" id="status-dot"></span>
+        <span class="status-label" id="status-label">NOT SHARING</span>
+      </div>
+      <div class="status-country" id="status-country"></div>
+      <div class="status-stats" id="status-stats"></div>
+    </div>
+
+    <!-- Share toggle -->
+    <div class="toggle-row">
+      <div class="toggle-info">
+        <h4>Share my connection</h4>
+        <p id="toggle-desc">Help others browse. Stay free.</p>
+      </div>
+      <button class="toggle" id="share-toggle"></button>
+    </div>
+
+    <!-- Stats -->
+    <div class="stats-grid">
+      <div class="stat-box">
+        <span class="stat-val" id="stat-requests">0</span>
+        <span class="stat-lbl">REQUESTS</span>
+      </div>
+      <div class="stat-box">
+        <span class="stat-val" id="stat-bytes">0B</span>
+        <span class="stat-lbl">SERVED</span>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <button class="btn btn-secondary" id="btn-dashboard">OPEN DASHBOARD IN BROWSER</button>
+
+    <div class="mt-auto">
+      <div class="divider"></div>
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <span style="font-size:11px;color:var(--muted)" id="user-label"></span>
+        <button class="link-btn" id="btn-signout">Sign out</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

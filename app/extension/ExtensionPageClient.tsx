@@ -18,6 +18,10 @@ export default function ExtensionPageClient() {
   }
 
   useEffect(() => {
+    // Auto-detect if coming from share toggle
+    if (window.location.hash === '#share') {
+      document.title = 'PeerMesh — Install to Share'
+    }
     const interval = setInterval(() => {
       if (document.querySelector('[data-peermesh-extension]')) {
         setStep('done')
