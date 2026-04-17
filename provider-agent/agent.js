@@ -1,17 +1,29 @@
 #!/usr/bin/env node
 /**
- * PeerMesh Provider Agent
- * Runs on your machine and shares your real IP connection.
- * Exposes a local control server on port 7654 for the dashboard to talk to.
- *
- * Setup (one time):
- *   npm install ws
- *
- * Start:
- *   node agent.js
- *
- * The dashboard will configure it automatically via localhost:7654
+ * PeerMesh Provider Agent — self-bootstrapping
+ * Just run: node peermesh-agent.js
+ * (installs its own dependencies automatically)
  */
+
+import { execSync } from 'child_process'
+import { existsSync } from 'fs'
+import { createRequire } from 'module'
+import { fileURLToPath } from 'url'
+import { dirname, join } from 'path'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+
+// Auto-install ws if not present
+if (!existsSync(join(__dirname, 'node_modules', 'ws'))) {
+  console.log('[setup] Installing dependencies...')
+  try {
+    execSync('npm install ws', { cwd: __dirname, stdio: 'inherit' })
+    console.log('[setup] Done!')
+  } catch (e) {
+    console.error('[setup] npm install failed. Please run: npm install ws')
+    process.exit(1)
+  }
+}
 
 import { WebSocket } from 'ws'
 import { createServer } from 'http'

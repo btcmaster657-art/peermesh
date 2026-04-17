@@ -115,18 +115,36 @@ export default function Dashboard() {
       return
     }
 
-    // Toggle ON — step 1: check if agent is running
     setShareStatus('checking')
-
     const health = await checkAgent()
 
     if (!health) {
-      // Agent not running — show install instructions
+      // Agent not running — auto-download it, then start polling
       setShareStatus('needs_install')
+
+      // Auto-trigger download immediately
+      const a = document.createElement('a')
+      a.href = '/api/agent-download'
+      a.download = 'peermesh-agent.js'
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+
+      // Start polling — go active as soon as user runs the agent
+      let attempts = 0
+      const waitForAgent = setInterval(async () => {
+        attempts++
+        const h = await checkAgent()
+        if (h?.running) {
+          clearInterval(waitForAgent)
+          await doStartAgent(profile)
+        } else if (attempts > 60) { // give up after 60s
+          clearInterval(waitForAgent)
+        }
+      }, 1000)
       return
     }
 
-    // Agent is running — configure and start
     await doStartAgent(profile)
   }, [profile, shareStatus])
 
@@ -352,32 +370,33 @@ export default function Dashboard() {
           </button>
         </div>
 
-        {/* Install instructions */}
+        {/* Install instructions — minimal, auto-downloaded */}
         {shareStatus === 'needs_install' && (
-          <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '8px', padding: '14px' }}>
-            <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '11px', color: 'var(--accent)', marginBottom: '10px', letterSpacing: '0.5px' }}>ONE-TIME SETUP REQUIRED</div>
-            <p style={{ fontSize: '12px', color: 'var(--muted)', marginBottom: '12px', lineHeight: 1.6 }}>
-              Download the PeerMesh agent to share your real connection. Requires Node.js 18+.
+          <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '8px', padding: '14px', marginTop: '14px' }}>
+            <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '11px', color: 'var(--accent)', marginBottom: '8px', letterSpacing: '0.5px' }}>⬇ AGENT DOWNLOADING...</div>
+            <p style={{ fontSize: '12px', color: 'var(--muted)', marginBottom: '12px', lineHeight: 1.7 }}>
+              A file called <strong style={{ color: 'var(--text)' }}>peermesh-agent.js</strong> is downloading. Once it's there:
             </p>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-              <a
-                href="/api/agent-download"
-                download="agent.js"
-                style={{ display: 'block', padding: '10px 14px', background: 'var(--accent)', color: '#000', borderRadius: '7px', fontFamily: 'var(--font-geist-mono)', fontSize: '11px', fontWeight: 700, textDecoration: 'none', textAlign: 'center', letterSpacing: '0.5px' }}
-              >
-                ↓ DOWNLOAD AGENT
-              </a>
-              <div style={{ background: 'var(--surface)', borderRadius: '6px', padding: '10px 12px', fontFamily: 'var(--font-geist-mono)', fontSize: '11px', color: 'var(--text)' }}>
-                <div style={{ color: 'var(--muted)', marginBottom: '4px' }}># In the folder where you saved agent.js:</div>
-                <div>npm install ws</div>
-                <div>node agent.js</div>
-              </div>
+            <div style={{ background: 'var(--surface)', borderRadius: '6px', padding: '10px 12px', fontFamily: 'var(--font-geist-mono)', fontSize: '11px', color: 'var(--accent)', marginBottom: '12px' }}>
+              node peermesh-agent.js
+            </div>
+            <p style={{ fontSize: '11px', color: 'var(--muted)', marginBottom: '12px', lineHeight: 1.6 }}>
+              Requires Node.js 18+ · <a href="https://nodejs.org" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent)' }}>Download Node.js</a>
+            </p>
+            <div style={{ display: 'flex', gap: '8px' }}>
               <button
                 onClick={() => doStartAgent(profile)}
-                style={{ padding: '10px', background: 'transparent', border: '1px solid var(--accent)', color: 'var(--accent)', borderRadius: '7px', fontFamily: 'var(--font-geist-mono)', fontSize: '11px', cursor: 'pointer', letterSpacing: '0.5px' }}
+                style={{ flex: 1, padding: '10px', background: 'var(--accent)', color: '#000', border: 'none', borderRadius: '7px', fontFamily: 'var(--font-geist-mono)', fontSize: '11px', fontWeight: 700, cursor: 'pointer', letterSpacing: '0.5px' }}
               >
-                I STARTED IT — CONNECT NOW
+                ✓ IT'S RUNNING
               </button>
+              <a
+                href="/api/agent-download"
+                download="peermesh-agent.js"
+                style={{ padding: '10px 14px', background: 'transparent', border: '1px solid var(--border)', color: 'var(--muted)', borderRadius: '7px', fontFamily: 'var(--font-geist-mono)', fontSize: '11px', textDecoration: 'none', display: 'flex', alignItems: 'center' }}
+              >
+                ↓ RE-DOWNLOAD
+              </a>
             </div>
           </div>
         )}
