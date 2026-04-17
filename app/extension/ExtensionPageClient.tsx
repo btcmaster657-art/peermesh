@@ -150,9 +150,15 @@ export default function ExtensionPageClient() {
   async function sendAuthToExtension() {
     setSending(true)
     try {
-      const res = await fetch('/api/extension-auth')
+      const extId = document.querySelector<HTMLElement>('[data-peermesh-extension]')?.dataset.extId
+      if (!extId) throw new Error('Extension not detected — make sure it is installed and enabled')
+      const res = await fetch('/api/extension-auth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ext_id: extId }),
+      })
       const data = await res.json()
-      if (data.error) throw new Error(data.error)
+      if (!res.ok) throw new Error(data.error ?? 'Something went wrong')
       setAuthed(true)
       setStep('done')
       showToast('✓ Signed in to extension!')
