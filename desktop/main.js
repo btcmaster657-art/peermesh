@@ -938,19 +938,6 @@ if (IS_NATIVE_HOST_MODE) {
   }
 })
 
-function killSiblingProcesses() {
-  // Clean up any orphaned PeerMesh/node/electron processes on Windows
-  if (process.platform === 'win32') {
-    const kills = [
-      ['taskkill', ['/F', '/IM', 'PeerMesh.exe', '/T']],
-      ['taskkill', ['/F', '/IM', 'node.exe', '/T']],
-    ]
-    for (const [cmd, args] of kills) {
-      try { spawnSync(cmd, args, { stdio: 'ignore' }) } catch {}
-    }
-  }
-}
-
 app.on('before-quit', () => {
   stopRelay()
   closeAllTunnels(false)
@@ -959,9 +946,8 @@ app.on('before-quit', () => {
   contextCache.clear()
   controlServer.close()
   localProxyServer.close()
-})
-
-app.on('quit', () => {
-  killSiblingProcesses()
-  process.exit(0)
+  // Kill child processes spawned by this app (detached background instances)
+  if (process.platform === 'win32') {
+    try { spawnSync('taskkill', ['/F', '/PID', String(process.pid), '/T'], { stdio: 'ignore' }) } catch {}
+  }
 })
