@@ -110,8 +110,22 @@ create table extension_auth_tokens (
   created_at timestamptz default now()
 );
 
+-- Device authorization codes (OAuth 2.0 Device Flow for desktop app)
+create table device_codes (
+  id uuid primary key default gen_random_uuid(),
+  device_code text not null unique,   -- long random code for polling
+  user_code text not null unique,     -- short human-readable code (e.g. PMSH-4829)
+  user_id uuid references profiles(id) on delete cascade,
+  token text,                         -- desktop token issued after approval
+  status text default 'pending' check (status in ('pending','approved','expired','denied')),
+  expires_at timestamptz not null default (now() + interval '10 minutes'),
+  created_at timestamptz default now()
+);
+
 -- Auto-delete used/expired tokens
 create index on extension_auth_tokens (ext_id) where used = false;
+create index on device_codes (device_code) where status = 'pending';
+create index on device_codes (user_code) where status = 'pending';
 
 -- Peer availability view
 create view peer_availability as
@@ -242,4 +256,10 @@ create policy "Service role only"
 alter table extension_auth_tokens enable row level security;
 create policy "Service role only ext tokens"
   on extension_auth_tokens for all
+  using (false);
+
+-- Device codes: service role only
+alter table device_codes enable row level security;
+create policy "Service role only device codes"
+  on device_codes for all
   using (false);

@@ -817,6 +817,7 @@ function showNotification(title, body) {
 ipcMain.handle('get-ext-id', () => config.extId)
 
 ipcMain.handle('check-website-auth', async () => {
+  // Legacy ext_id flow — kept for backward compat but device flow is preferred
   try {
     const res = await fetch(`${API_BASE}/api/extension-auth?ext_id=${config.extId}`)
     const data = await res.json()
@@ -824,14 +825,33 @@ ipcMain.handle('check-website-auth', async () => {
     if (res.status === 401) return { error: 'Session expired — please sign in again' }
     if (res.status === 404) return { error: 'User not found' }
     if (!data.user) return { pending: true }
-    // Validate the desktop token before trusting it
     if (!data.user.token || !data.user.id) return { error: 'Invalid auth response' }
     return { user: data.user }
   } catch { return { error: 'Could not reach server' } }
 })
 
-ipcMain.handle('open-auth', () => {
-  shell.openExternal(`${API_BASE}/auth?mode=login&source=desktop&ext_id=${config.extId}`)
+// Device flow — request a code, open browser, poll for approval
+ipcMain.handle('request-device-code', async () => {
+  try {
+    const res = await fetch(`${API_BASE}/api/extension-auth`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ device: true }),
+    })
+    if (!res.ok) return { error: 'Could not reach server' }
+    return await res.json() // { device_code, user_code, verification_uri, expires_in, interval }
+  } catch { return { error: 'Could not reach server' } }
+})
+
+ipcMain.handle('poll-device-code', async (_, { device_code }) => {
+  try {
+    const res = await fetch(`${API_BASE}/api/extension-auth?device_code=${encodeURIComponent(device_code)}`)
+    return await res.json() // { status: 'pending'|'approved'|'denied'|'expired', user? }
+  } catch { return { status: 'pending' } }
+})
+
+ipcMain.handle('open-auth', (_, url) => {
+  shell.openExternal(url || `${API_BASE}/extension?activate=1`)
 })
 
 ipcMain.handle('get-state', () => ({

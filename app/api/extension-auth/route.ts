@@ -1,73 +1,137 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { adminClient } from '@/lib/supabase/admin'
-import { createHmac } from 'crypto'
+import { issueDesktopToken, verifyDesktopToken } from '@/lib/desktop-token'
+
+export { verifyDesktopToken } // re-export for desktop/main.js verify call
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  'Access-Control-Allow-Methods': 'GET, POST, PATCH, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization',
 }
 
-const TOKEN_SECRET = process.env.DESKTOP_TOKEN_SECRET ?? process.env.SUPABASE_SERVICE_ROLE_KEY ?? 'changeme'
-const TOKEN_TTL_MS = 60 * 60 * 1000 // 1 hour
+const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? 'https://peermesh-beta.vercel.app'
 
-/** Issue a short-lived HMAC-signed token: base64(payload).signature */
-function issueDesktopToken(userId: string): string {
-  const payload = Buffer.from(JSON.stringify({ sub: userId, iat: Date.now(), exp: Date.now() + TOKEN_TTL_MS })).toString('base64url')
-  const sig = createHmac('sha256', TOKEN_SECRET).update(payload).digest('base64url')
-  return `${payload}.${sig}`
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function generateDeviceCode(): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+  return Array.from({ length: 32 }, () => chars[Math.floor(Math.random() * chars.length)]).join('')
 }
 
-/** Verify a desktop token. Returns userId or null. */
-export function verifyDesktopToken(token: string): string | null {
-  try {
-    const [payload, sig] = token.split('.')
-    if (!payload || !sig) return null
-    const expected = createHmac('sha256', TOKEN_SECRET).update(payload).digest('base64url')
-    if (expected !== sig) return null
-    const data = JSON.parse(Buffer.from(payload, 'base64url').toString())
-    if (data.exp < Date.now()) return null
-    return data.sub as string
-  } catch {
-    return null
-  }
+function generateUserCode(): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+  const part = () => Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join('')
+  return `${part()}-${part()}`
 }
 
 export async function OPTIONS() {
   return new NextResponse(null, { status: 204, headers: CORS })
 }
 
-// POST /api/extension-auth — called by website after sign-in to write a one-time token
+// ── POST ──────────────────────────────────────────────────────────────────────
+// Two uses:
+//   1. Website after sign-in → body: { ext_id }  (extension flow)
+//   2. Desktop app           → body: { device: true }  (device flow — request code)
+
 export async function POST(req: Request) {
+  const body = await req.json().catch(() => ({}))
+
+  // ── Device flow: desktop requests a code ──────────────────────────────────
+  if (body.device === true) {
+    const device_code = generateDeviceCode()
+    const user_code = generateUserCode()
+
+    await adminClient.from('device_codes').insert({
+      device_code,
+      user_code,
+      status: 'pending',
+      expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+    })
+
+    return NextResponse.json({
+      device_code,
+      user_code,
+      verification_uri: `${APP_URL}/activate`,
+      expires_in: 600,
+      interval: 3,
+    }, { headers: CORS })
+  }
+
+  // ── Extension flow: website writes token after sign-in ────────────────────
   const supabase = await createClient()
   const { data: { session } } = await supabase.auth.getSession()
   if (!session) return NextResponse.json({ error: 'Not authenticated' }, { status: 401, headers: CORS })
 
-  const { ext_id } = await req.json()
+  const { ext_id } = body
   if (!ext_id || typeof ext_id !== 'string' || ext_id.length < 10) {
     return NextResponse.json({ error: 'Invalid ext_id' }, { status: 400, headers: CORS })
   }
 
-  const desktopToken = issueDesktopToken(session.user.id)
+  const token = issueDesktopToken(session.user.id)
 
   await adminClient.from('extension_auth_tokens').upsert({
     ext_id,
     user_id: session.user.id,
-    // Store our signed desktop token, NOT the raw Supabase access_token
-    token: desktopToken,
+    token,
     used: false,
-    expires_at: new Date(Date.now() + TOKEN_TTL_MS).toISOString(),
+    expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
   }, { onConflict: 'ext_id' })
 
   return NextResponse.json({ ok: true }, { headers: CORS })
 }
 
-// GET /api/extension-auth?verify=1 — called by desktop app to verify its signed token
-// Authorization: Bearer <desktopToken>  ?userId=<uid>
+// ── PATCH ─────────────────────────────────────────────────────────────────────
+// Website (authenticated) approves or denies a device code.
+// Body: { user_code, action: 'approve' | 'deny' }
+
+export async function PATCH(req: Request) {
+  const supabase = await createClient()
+  const { data: { session } } = await supabase.auth.getSession()
+  if (!session) return NextResponse.json({ error: 'Not authenticated' }, { status: 401, headers: CORS })
+
+  const { user_code, action } = await req.json().catch(() => ({}))
+  if (!user_code || !['approve', 'deny'].includes(action)) {
+    return NextResponse.json({ error: 'Invalid request' }, { status: 400, headers: CORS })
+  }
+
+  const { data: row } = await adminClient
+    .from('device_codes')
+    .select('*')
+    .eq('user_code', (user_code as string).toUpperCase().trim())
+    .eq('status', 'pending')
+    .gt('expires_at', new Date().toISOString())
+    .single()
+
+  if (!row) return NextResponse.json({ error: 'Invalid or expired code' }, { status: 404, headers: CORS })
+
+  if (action === 'deny') {
+    await adminClient.from('device_codes').update({ status: 'denied' }).eq('id', row.id)
+    return NextResponse.json({ ok: true }, { headers: CORS })
+  }
+
+  // Approve — issue desktop token
+  const token = issueDesktopToken(session.user.id)
+  await adminClient.from('device_codes').update({
+    status: 'approved',
+    user_id: session.user.id,
+    token,
+  }).eq('id', row.id)
+
+  return NextResponse.json({ ok: true }, { headers: CORS })
+}
+
+// ── GET ───────────────────────────────────────────────────────────────────────
+// Three uses (via query params):
+//   ?device_code=<code>          — desktop polls for approval
+//   ?verify=1&userId=<id>        — desktop verifies its token (Authorization: Bearer <token>)
+//   ?ext_id=<uuid>               — extension exchanges for user data
+
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url)
 
+  // ── Token verify ──────────────────────────────────────────────────────────
   if (searchParams.get('verify') === '1') {
     const auth = req.headers.get('authorization') ?? ''
     const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
@@ -79,12 +143,55 @@ export async function GET(req: Request) {
     return NextResponse.json({ ok: true, userId: tokenUserId }, { headers: CORS })
   }
 
-  // GET /api/extension-auth?ext_id=<uuid> — called by extension to exchange for user data
-  const ext_id = searchParams.get('ext_id')
+  // ── Device code poll ──────────────────────────────────────────────────────
+  const device_code = searchParams.get('device_code')
+  if (device_code) {
+    const { data: row } = await adminClient
+      .from('device_codes')
+      .select('*')
+      .eq('device_code', device_code)
+      .single()
 
-  if (!ext_id) {
-    return NextResponse.json({ error: 'Missing ext_id' }, { status: 400, headers: CORS })
+    if (!row) return NextResponse.json({ error: 'Invalid device_code' }, { status: 404, headers: CORS })
+
+    if (new Date(row.expires_at) < new Date()) {
+      await adminClient.from('device_codes').update({ status: 'expired' }).eq('device_code', device_code)
+      return NextResponse.json({ status: 'expired' }, { headers: CORS })
+    }
+
+    if (row.status === 'pending') return NextResponse.json({ status: 'pending' }, { headers: CORS })
+    if (row.status === 'denied') return NextResponse.json({ status: 'denied' }, { headers: CORS })
+    if (row.status === 'expired') return NextResponse.json({ status: 'expired' }, { headers: CORS })
+
+    if (row.status === 'approved' && row.token && row.user_id) {
+      const { data: profile } = await adminClient
+        .from('profiles')
+        .select('username, country_code, trust_score, is_verified')
+        .eq('id', row.user_id)
+        .single()
+
+      if (!profile?.is_verified) {
+        return NextResponse.json({ error: 'Account not verified' }, { status: 403, headers: CORS })
+      }
+
+      return NextResponse.json({
+        status: 'approved',
+        user: {
+          id: row.user_id,
+          token: row.token,
+          username: profile.username,
+          country: profile.country_code,
+          trustScore: profile.trust_score,
+        },
+      }, { headers: CORS })
+    }
+
+    return NextResponse.json({ status: row.status }, { headers: CORS })
   }
+
+  // ── Extension ext_id exchange ─────────────────────────────────────────────
+  const ext_id = searchParams.get('ext_id')
+  if (!ext_id) return NextResponse.json({ error: 'Missing parameter' }, { status: 400, headers: CORS })
 
   const { data: row } = await adminClient
     .from('extension_auth_tokens')
@@ -96,7 +203,6 @@ export async function GET(req: Request) {
 
   if (!row) return NextResponse.json({ pending: true }, { headers: CORS })
 
-  // Verify our signed token
   const userId = verifyDesktopToken(row.token)
   if (!userId || userId !== row.user_id) {
     return NextResponse.json({ error: 'Invalid or expired token' }, { status: 401, headers: CORS })
@@ -112,13 +218,12 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: 'Account not verified' }, { status: 403, headers: CORS })
   }
 
-  // Mark token as used (one-time)
   await adminClient.from('extension_auth_tokens').update({ used: true }).eq('ext_id', ext_id)
 
   return NextResponse.json({
     user: {
       id: row.user_id,
-      token: row.token, // signed desktop token, not Supabase JWT
+      token: row.token,
       username: profile.username,
       country: profile.country_code,
       trustScore: profile.trust_score,

@@ -70,55 +70,72 @@ async function pollState() {
 }
 
 setInterval(pollState, 2000)
-pollState()
 
-// ── Poll website auth via main process (no CORS) ──────────────────────────────
+// ── Device flow auth ──────────────────────────────────────────────────────────
 
-let authPollInterval = null
+let devicePollInterval = null
 
-function startAuthPoll() {
-  if (authPollInterval) return
-  authPollInterval = setInterval(async () => {
-    try {
-      const state = await window.peermesh.getState()
-      if (!state || state.config.userId) {
-        clearInterval(authPollInterval)
-        authPollInterval = null
-        return
-      }
-      const result = await window.peermesh.checkWebsiteAuth()
-      if (result?.user?.token) {
-        clearInterval(authPollInterval)
-        authPollInterval = null
-        await window.peermesh.signIn({
-          token: result.user.token,
-          userId: result.user.id,
-          country: result.user.country || 'RW',
-          trust: result.user.trustScore || 50,
-        })
-        await pollState()
-      } else if (result?.error) {
-        clearInterval(authPollInterval)
-        authPollInterval = null
-        const errEl = document.getElementById('auth-error')
-        errEl.textContent = result.error
-        errEl.style.display = 'block'
-        // Allow retry after showing error
-        setTimeout(() => { errEl.style.display = 'none'; startAuthPoll() }, 5000)
-      }
-    } catch {}
-  }, 1500)
+function stopDevicePoll() {
+  if (devicePollInterval) { clearInterval(devicePollInterval); devicePollInterval = null }
 }
 
-// Start polling immediately and restart whenever auth screen is shown
-startAuthPoll()
+async function startDeviceFlow() {
+  const statusEl = document.getElementById('auth-status')
+  const codeEl = document.getElementById('device-code-display')
+  const errEl = document.getElementById('auth-error')
+
+  errEl.style.display = 'none'
+  codeEl.textContent = ''
+  statusEl.textContent = 'Requesting code...'
+
+  const result = await window.peermesh.requestDeviceCode()
+  if (result.error) {
+    errEl.textContent = result.error
+    errEl.style.display = 'block'
+    statusEl.textContent = 'Could not connect to server.'
+    return
+  }
+
+  const { device_code, user_code, verification_uri, interval = 3 } = result
+
+  codeEl.textContent = user_code
+  statusEl.textContent = 'Enter this code on the website:'
+
+  // Open browser to activation page with code pre-filled
+  await window.peermesh.openAuth(`${verification_uri}?code=${encodeURIComponent(user_code)}`)
+
+  stopDevicePoll()
+  devicePollInterval = setInterval(async () => {
+    const poll = await window.peermesh.pollDeviceCode(device_code)
+
+    if (poll.status === 'approved' && poll.user) {
+      stopDevicePoll()
+      await window.peermesh.signIn({
+        token: poll.user.token,
+        userId: poll.user.id,
+        country: poll.user.country || 'RW',
+        trust: poll.user.trustScore || 50,
+      })
+      await pollState()
+    } else if (poll.status === 'denied') {
+      stopDevicePoll()
+      codeEl.textContent = ''
+      statusEl.textContent = ''
+      errEl.textContent = 'Sign-in was denied.'
+      errEl.style.display = 'block'
+    } else if (poll.status === 'expired') {
+      stopDevicePoll()
+      codeEl.textContent = ''
+      statusEl.textContent = ''
+      errEl.textContent = 'Code expired. Click the button to try again.'
+      errEl.style.display = 'block'
+    }
+  }, interval * 1000)
+}
 
 // ── Event listeners ───────────────────────────────────────────────────────────
 
-document.getElementById('btn-open-browser').addEventListener('click', async () => {
-  await window.peermesh.openAuth()
-  startAuthPoll()
-})
+document.getElementById('btn-open-browser').addEventListener('click', startDeviceFlow)
 
 document.getElementById('share-toggle').addEventListener('click', async () => {
   await window.peermesh.toggleSharing()
@@ -130,6 +147,12 @@ document.getElementById('btn-dashboard').addEventListener('click', async () => {
 })
 
 document.getElementById('btn-signout').addEventListener('click', async () => {
+  stopDevicePoll()
   await window.peermesh.signOut()
   await pollState()
+})
+
+// Auto-start device flow on load if not signed in
+pollState().then(state => {
+  if (state && !state.config.userId) startDeviceFlow()
 })

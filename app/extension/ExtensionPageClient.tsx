@@ -1,11 +1,85 @@
 'use client'
 
 import { useState, useEffect } from 'react'
+import { useSearchParams } from 'next/navigation'
 
 const STORE_URL = 'https://chrome.google.com/webstore/detail/peermesh/YOUR_EXTENSION_ID'
 const mono = "'Courier New', monospace"
 
+// ── Device Activation Screen ──────────────────────────────────────────────────
+function ActivateScreen() {
+  const searchParams = useSearchParams()
+  const [code, setCode] = useState((searchParams.get('code') ?? '').toUpperCase())
+  const [status, setStatus] = useState<'idle' | 'loading' | 'approved' | 'denied' | 'error'>('idle')
+  const [error, setError] = useState('')
+
+  async function handleAction(action: 'approve' | 'deny') {
+    setStatus('loading')
+    setError('')
+    try {
+      const res = await fetch('/api/extension-auth', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_code: code.toUpperCase().trim(), action }),
+      })
+      const data = await res.json()
+      if (!res.ok) { setError(data.error ?? 'Something went wrong'); setStatus('error'); return }
+      setStatus(action === 'approve' ? 'approved' : 'denied')
+    } catch {
+      setError('Network error — please try again')
+      setStatus('error')
+    }
+  }
+
+  const card: React.CSSProperties = { background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '12px', padding: '24px', width: '100%', maxWidth: '400px' }
+
+  if (status === 'approved') return (
+    <div style={{ ...card, textAlign: 'center' }}>
+      <div style={{ fontSize: '40px', marginBottom: '12px' }}>✅</div>
+      <div style={{ fontFamily: mono, color: 'var(--accent)', fontSize: '13px', marginBottom: '8px', letterSpacing: '1px' }}>DESKTOP AUTHORIZED</div>
+      <div style={{ fontSize: '13px', color: 'var(--muted)' }}>You can close this tab. The desktop app is now signed in.</div>
+    </div>
+  )
+
+  if (status === 'denied') return (
+    <div style={{ ...card, textAlign: 'center' }}>
+      <div style={{ fontSize: '40px', marginBottom: '12px' }}>🚫</div>
+      <div style={{ fontFamily: mono, color: '#ff6060', fontSize: '13px', marginBottom: '8px', letterSpacing: '1px' }}>REQUEST DENIED</div>
+      <div style={{ fontSize: '13px', color: 'var(--muted)' }}>The desktop sign-in was rejected.</div>
+    </div>
+  )
+
+  return (
+    <div style={card}>
+      <div style={{ fontFamily: mono, color: 'var(--accent)', fontSize: '12px', letterSpacing: '4px', marginBottom: '20px', textAlign: 'center' }}>PEERMESH</div>
+      <div style={{ fontSize: '15px', fontWeight: 600, marginBottom: '6px', textAlign: 'center' }}>Authorize Desktop App</div>
+      <div style={{ fontSize: '13px', color: 'var(--muted)', marginBottom: '24px', textAlign: 'center' }}>Enter the code shown in the PeerMesh desktop app</div>
+      <input
+        value={code}
+        onChange={e => setCode(e.target.value.toUpperCase())}
+        placeholder="XXXX-XXXX"
+        maxLength={9}
+        style={{ width: '100%', padding: '12px 16px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text)', fontFamily: mono, fontSize: '20px', letterSpacing: '4px', textAlign: 'center', marginBottom: '16px', boxSizing: 'border-box' }}
+      />
+      {error && <div style={{ color: '#ff6060', fontSize: '12px', marginBottom: '12px', textAlign: 'center' }}>{error}</div>}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+        <button onClick={() => handleAction('deny')} disabled={!code || status === 'loading'}
+          style={{ padding: '12px', background: 'none', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--muted)', cursor: 'pointer', fontFamily: mono, fontSize: '11px' }}>
+          DENY
+        </button>
+        <button onClick={() => handleAction('approve')} disabled={code.replace('-', '').length < 8 || status === 'loading'}
+          style={{ padding: '12px', background: 'var(--accent)', border: 'none', borderRadius: '8px', color: '#000', cursor: 'pointer', fontFamily: mono, fontSize: '11px', fontWeight: 700 }}>
+          {status === 'loading' ? 'AUTHORIZING...' : 'AUTHORIZE'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
 export default function ExtensionPageClient() {
+  const searchParams = useSearchParams()
+  const isActivate = searchParams.get('activate') === '1' || !!searchParams.get('code')
+
   const [step, setStep] = useState<'idle' | 'downloading' | 'guide' | 'done'>('idle')
   const [copied, setCopied] = useState(false)
   const [toast, setToast] = useState('')
@@ -104,7 +178,12 @@ export default function ExtensionPageClient() {
         @keyframes slideup { from { opacity: 0; transform: translateX(-50%) translateY(10px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
       `}</style>
 
-      <main style={{ maxWidth: '520px', margin: '0 auto', width: '100%', padding: '40px 20px' }}>
+      {isActivate ? (
+        <main className="flex flex-1 items-center justify-center" style={{ padding: '24px' }}>
+          <ActivateScreen />
+        </main>
+      ) : (
+        <main style={{ maxWidth: '520px', margin: '0 auto', width: '100%', padding: '40px 20px' }}>
 
         <div style={{ fontFamily: mono, color: 'var(--accent)', fontSize: '12px', letterSpacing: '4px', marginBottom: '28px' }}>
           PEERMESH
@@ -262,8 +341,10 @@ export default function ExtensionPageClient() {
 
       </main>
 
+      )}
+
       {/* Toast */}
-      {toast && (
+      {!isActivate && toast && (
         <div style={{
           position: 'fixed',
           bottom: '28px',
