@@ -3,9 +3,10 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
-import { checkAgent, startAgent, stopAgent } from '@/lib/agent-client'
+import { checkDesktop, syncDesktopAuth, startDesktopSharing, stopDesktopSharing } from '@/lib/agent-client'
 import { COUNTRIES, formatBytes, getFlagForCountry } from '@/lib/utils'
 import type { Profile, PeerAvailability } from '@/lib/types'
+import type { DesktopState } from '@/lib/agent-client'
 
 const RELAY = process.env.NEXT_PUBLIC_RELAY_ENDPOINT ?? 'ws://localhost:8080'
 
@@ -18,9 +19,12 @@ export default function Dashboard() {
   const [peerCounts, setPeerCounts] = useState<Record<string, number>>({})
   const [selectedCountry, setSelectedCountry] = useState<string | null>(null)
   const [isSharing, setIsSharing] = useState(false)
-  const [agentStats, setAgentStats] = useState({ bytesServed: 0, requestsHandled: 0 })
+  const [desktop, setDesktop] = useState<DesktopState | null>(null)
+  const [desktopChecked, setDesktopChecked] = useState(false)
+  const [sharingStats, setSharingStats] = useState({ bytesServed: 0, requestsHandled: 0 })
   const [connecting, setConnecting] = useState(false)
   const [loading, setLoading] = useState(true)
+  const [shareError, setShareError] = useState<string | null>(null)
 
   // ── Load profile ────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -34,20 +38,34 @@ export default function Dashboard() {
       setProfile(data)
       setLoading(false)
 
-      // Check if agent is running (for users with extension/agent already active)
-      if (data.is_sharing) {
-        const health = await checkAgent()
-        if (health?.running) {
-          setIsSharing(true)
-          setAgentStats({ bytesServed: health.stats.bytesServed, requestsHandled: health.stats.requestsHandled })
-          startPolling()
-        } else {
-          await fetch('/api/user/sharing', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ isSharing: false }),
+      // Check desktop helper
+      const dt = await checkDesktop()
+      setDesktop(dt)
+      setDesktopChecked(true)
+
+      if (dt.available) {
+        // Sync auth to desktop so it has fresh token
+        const { data: { session } } = await supabase.auth.getSession()
+        if (session) {
+          await syncDesktopAuth({
+            token: session.access_token,
+            userId: user.id,
+            country: data.country_code,
+            trust: data.trust_score,
           })
         }
+        if (dt.running || dt.shareEnabled) {
+          setIsSharing(true)
+          if (dt.stats) setSharingStats({ bytesServed: dt.stats.bytesServed, requestsHandled: dt.stats.requestsHandled })
+          startPolling()
+        }
+      } else if (data.is_sharing) {
+        // Desktop not available but DB says sharing — clear it
+        await fetch('/api/user/sharing', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ isSharing: false }),
+        })
       }
     }
     load()
@@ -66,14 +84,15 @@ export default function Dashboard() {
       .catch(() => {})
   }, [])
 
-  // ── Poll agent health ───────────────────────────────────────────────────────
+  // ── Poll desktop state ──────────────────────────────────────────────────────
   function startPolling() {
     if (pollRef.current) return
     pollRef.current = setInterval(async () => {
-      const health = await checkAgent()
-      if (health?.running) {
-        setAgentStats({ bytesServed: health.stats.bytesServed, requestsHandled: health.stats.requestsHandled })
-      } else {
+      const dt = await checkDesktop()
+      setDesktop(dt)
+      if (dt.available && (dt.running || dt.shareEnabled)) {
+        if (dt.stats) setSharingStats({ bytesServed: dt.stats.bytesServed, requestsHandled: dt.stats.requestsHandled })
+      } else if (isSharing) {
         setIsSharing(false)
         stopPolling()
         await fetch('/api/user/sharing', {
@@ -89,15 +108,15 @@ export default function Dashboard() {
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
   }
 
-  // ── Share toggle — extension handles this ──────────────────────────────────
+  // ── Share toggle ────────────────────────────────────────────────────────────
   const handleShareToggle = useCallback(async () => {
     if (!profile) return
+    setShareError(null)
 
     if (isSharing) {
-      // Turn OFF
       setIsSharing(false)
       stopPolling()
-      await stopAgent()
+      await stopDesktopSharing()
       await fetch('/api/user/sharing', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -106,31 +125,37 @@ export default function Dashboard() {
       return
     }
 
-    // Turn ON — check if extension/agent already running
-    const health = await checkAgent()
-    if (health?.running) {
-      const { data: { session } } = await supabase.auth.getSession()
-      if (!session) return
-      await startAgent({
-        relay: RELAY,
-        apiBase: process.env.NEXT_PUBLIC_APP_URL ?? '',
-        token: session.access_token,
-        userId: profile.id,
-        country: profile.country_code,
-        trust: profile.trust_score,
-      })
-      setIsSharing(true)
-      startPolling()
-      await fetch('/api/user/sharing', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ isSharing: true }),
-      })
+    // Check desktop
+    const dt = await checkDesktop()
+    setDesktop(dt)
+
+    if (!dt.available) {
+      setShareError('desktop_required')
       return
     }
 
-    // Not running — send to extension page
-    router.push('/extension#share')
+    const { data: { session } } = await supabase.auth.getSession()
+    if (!session) return
+
+    const ok = await startDesktopSharing({
+      token: session.access_token,
+      userId: profile.id,
+      country: profile.country_code,
+      trust: profile.trust_score,
+    })
+
+    if (!ok) {
+      setShareError('desktop_required')
+      return
+    }
+
+    setIsSharing(true)
+    startPolling()
+    await fetch('/api/user/sharing', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ isSharing: true }),
+    })
   }, [profile, isSharing])
 
   // ── Connect ─────────────────────────────────────────────────────────────────
@@ -155,7 +180,7 @@ export default function Dashboard() {
 
   async function handleSignOut() {
     stopPolling()
-    await stopAgent()
+    await stopDesktopSharing()
     await supabase.auth.signOut()
     router.push('/')
   }
@@ -171,6 +196,7 @@ export default function Dashboard() {
   if (!profile) return null
 
   const bandwidthPct = Math.min(100, Math.round((profile.bandwidth_used_month / profile.bandwidth_limit) * 100))
+  const desktopAvailable = desktop?.available ?? false
 
   return (
     <main style={{ maxWidth: '680px', margin: '0 auto', width: '100%', padding: '24px 20px' }}>
@@ -182,10 +208,33 @@ export default function Dashboard() {
           {profile.is_premium && (
             <span style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--accent)', border: '1px solid var(--accent)', padding: '3px 8px', borderRadius: '4px', letterSpacing: '1px' }}>PREMIUM</span>
           )}
+          {desktopChecked && (
+            <span style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: desktopAvailable ? 'var(--accent)' : 'var(--muted)', letterSpacing: '1px' }}>
+              {desktopAvailable ? '● DESKTOP' : '○ NO DESKTOP'}
+            </span>
+          )}
           <span style={{ fontSize: '13px', color: 'var(--muted)' }}>{profile.username ?? 'user'}</span>
           <button onClick={handleSignOut} style={{ background: 'none', border: '1px solid var(--border)', color: 'var(--muted)', padding: '6px 12px', borderRadius: '6px', fontSize: '11px', cursor: 'pointer', fontFamily: 'var(--font-geist-mono)' }}>OUT</button>
         </div>
       </div>
+
+      {/* Desktop required banner */}
+      {desktopChecked && !desktopAvailable && (
+        <a
+          href="/api/desktop-download"
+          download
+          style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', background: 'rgba(255,80,80,0.07)', border: '1px solid rgba(255,80,80,0.3)', borderRadius: '12px', padding: '12px 16px', marginBottom: '16px', textDecoration: 'none' }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <span style={{ fontSize: '18px' }}>🖥️</span>
+            <div>
+              <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: '#ff6060', letterSpacing: '0.5px', marginBottom: '2px' }}>DESKTOP HELPER REQUIRED</div>
+              <div style={{ fontSize: '12px', color: 'var(--muted)' }}>Install the desktop app to share your connection and enable full-browser routing</div>
+            </div>
+          </div>
+          <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '11px', color: '#ff6060', whiteSpace: 'nowrap', flexShrink: 0 }}>↓ INSTALL</div>
+        </a>
+      )}
 
       {/* Extension banner */}
       {!selectedCountry && (
@@ -291,14 +340,16 @@ export default function Dashboard() {
       </div>
 
       {/* Share toggle */}
-      <div style={{ background: 'var(--surface)', border: `1px solid ${isSharing ? 'rgba(0,255,136,0.3)' : 'var(--border)'}`, borderRadius: '12px', padding: '16px', marginBottom: '16px' }}>
+      <div style={{ background: 'var(--surface)', border: `1px solid ${isSharing ? 'rgba(0,255,136,0.3)' : shareError ? 'rgba(255,80,80,0.3)' : 'var(--border)'}`, borderRadius: '12px', padding: '16px', marginBottom: '16px' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <div>
             <div style={{ fontSize: '14px', fontWeight: 500, marginBottom: '3px' }}>Share my connection</div>
             <div style={{ fontSize: '12px', color: isSharing ? 'var(--accent)' : 'var(--muted)' }}>
               {isSharing
-                ? `${agentStats.requestsHandled} requests · ${formatBytes(agentStats.bytesServed)} served`
-                : 'Install the extension to share and earn credits'}
+                ? `${sharingStats.requestsHandled} requests · ${formatBytes(sharingStats.bytesServed)} served`
+                : desktopAvailable
+                  ? 'Desktop helper ready — toggle to start sharing'
+                  : 'Desktop helper required for full-browser sharing'}
             </div>
           </div>
           <button
@@ -308,25 +359,14 @@ export default function Dashboard() {
             <div style={{ position: 'absolute', width: '18px', height: '18px', borderRadius: '50%', background: 'white', top: '3px', left: isSharing ? '23px' : '3px', transition: 'left 0.2s' }} />
           </button>
         </div>
-      </div>
-
-      {/* Windows desktop app download */}
-      {typeof navigator !== 'undefined' && navigator.userAgent.includes('Windows') && (
-        <a
-          href="/api/desktop-download"
-          download="PeerMesh-Setup.exe"
-          style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '12px', padding: '12px 16px', marginBottom: '16px', textDecoration: 'none' }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <span style={{ fontSize: '18px' }}>🖥️</span>
-            <div>
-              <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--text)', letterSpacing: '0.5px', marginBottom: '2px' }}>WINDOWS DESKTOP APP</div>
-              <div style={{ fontSize: '12px', color: 'var(--muted)' }}>Share your connection without the browser open — runs in system tray</div>
-            </div>
+        {shareError === 'desktop_required' && (
+          <div style={{ marginTop: '10px', fontSize: '11px', color: '#ff6060', fontFamily: 'var(--font-geist-mono)' }}>
+            Desktop helper not running.{' '}
+            <a href="/api/desktop-download" download style={{ color: 'var(--accent)', textDecoration: 'underline' }}>Download & install</a>
+            {' '}then reopen this page.
           </div>
-          <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '11px', color: 'var(--muted)', whiteSpace: 'nowrap', flexShrink: 0 }}>↓ DOWNLOAD</div>
-        </a>
-      )}
+        )}
+      </div>
 
       {/* Tier / upgrade */}
       {!profile.is_premium && (

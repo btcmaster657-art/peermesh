@@ -1,8 +1,3 @@
-# fly.toml app configuration file generated for peermesh-relay on 2026-04-17T00:18:39+01:00
-#
-# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
-#
-
 app = 'peermesh-relay'
 primary_region = 'jnb'
 
@@ -13,6 +8,7 @@ primary_region = 'jnb'
   PORT = '8080'
   PROXY_PORT = '8081'
 
+# WebSocket + health endpoint (port 80/443 via Fly HTTP layer)
 [[services]]
   protocol = 'tcp'
   internal_port = 8080
@@ -33,6 +29,7 @@ primary_region = 'jnb'
     hard_limit = 500
     soft_limit = 400
 
+# Raw TCP proxy port — requires dedicated IPv4 (fly ips allocate-v4)
 [[services]]
   protocol = 'tcp'
   internal_port = 8081
@@ -42,7 +39,6 @@ primary_region = 'jnb'
 
   [[services.ports]]
     port = 8081
-    handlers = []
 
   [services.concurrency]
     type = 'connections'

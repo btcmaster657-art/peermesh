@@ -1,12 +1,13 @@
 {
   "name": "peermesh-desktop",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "PeerMesh Desktop — Share your connection from the system tray",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
     "build-win": "electron-builder --win --x64",
     "build-mac": "electron-builder --mac",
+    "build-linux": "electron-builder --linux --x64",
     "test": "node node_modules/@playwright/test/cli.js test"
   },
   "build": {
@@ -20,6 +21,11 @@
       "target": "dmg",
       "icon": "assets/icon.icns",
       "category": "public.app-category.utilities"
+    },
+    "linux": {
+      "target": "AppImage",
+      "icon": "assets/icon.png",
+      "category": "Network"
     },
     "nsis": {
       "oneClick": true,

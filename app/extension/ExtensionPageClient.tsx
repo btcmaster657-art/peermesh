@@ -195,6 +195,21 @@ export default function ExtensionPageClient() {
               YouTube, Google, Netflix — everything works. Your entire browser routes through the peer's real IP.
             </p>
 
+            <div style={{ ...card, marginBottom: '20px' }}>
+              <div style={{ fontFamily: mono, fontSize: '10px', color: 'var(--accent)', letterSpacing: '1px', marginBottom: '10px' }}>
+                FULL-BROWSER SHARING
+              </div>
+              <p style={{ color: 'var(--muted)', fontSize: '12px', lineHeight: 1.7, marginBottom: '12px' }}>
+                The extension is the control surface. The desktop helper is required when you want to share your own connection for full-browser traffic.
+              </p>
+              <a
+                href="/api/desktop-download"
+                style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: '10px 14px', background: 'transparent', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: '8px', textDecoration: 'none', fontFamily: mono, fontSize: '11px', letterSpacing: '0.5px' }}
+              >
+                DOWNLOAD DESKTOP HELPER
+              </a>
+            </div>
+
             <a
               href={STORE_URL}
               target="_blank"

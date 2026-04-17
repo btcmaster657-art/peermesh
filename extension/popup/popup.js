@@ -21,6 +21,7 @@ let state = {
   user: null,
   session: null,
   isSharing: false,
+  helper: null,
   selectedCountry: null,
   peerCounts: {},
   loading: true,
@@ -31,7 +32,7 @@ let state = {
 // ── Init ─────────────────────────────────────────────────────────────────────
 
 async function init() {
-  const stored = await chrome.storage.local.get(['user', 'session', 'isSharing', 'selectedCountry', 'extId'])
+  const stored = await chrome.storage.local.get(['user', 'session', 'isSharing', 'helper', 'selectedCountry', 'extId'])
 
   // Generate a stable extension UUID if not yet created
   if (!stored.extId) {
@@ -47,6 +48,10 @@ async function init() {
     data.peers?.forEach(p => { state.peerCounts[p.country] = p.count })
   } catch {}
 
+  if (state.user) {
+    await refreshRuntimeStatus()
+  }
+
   state.loading = false
   render()
 
@@ -58,6 +63,22 @@ async function init() {
 
 let authPollInterval = null
 let peerPollInterval = null
+let statusPollInterval = null
+
+async function refreshRuntimeStatus() {
+  try {
+    const status = await chrome.runtime.sendMessage({ type: 'GET_STATUS' })
+    if (!status) return
+    state.session = status.session || null
+    state.isSharing = !!status.isSharing
+    state.helper = status.helper || null
+    await chrome.storage.local.set({
+      session: state.session,
+      isSharing: state.isSharing,
+      helper: state.helper,
+    })
+  } catch {}
+}
 
 function startPeerPolling() {
   if (peerPollInterval) return
@@ -76,6 +97,13 @@ function startPeerPolling() {
       })
     } catch {}
   }, 30000)
+
+  if (!statusPollInterval) {
+    statusPollInterval = setInterval(async () => {
+      await refreshRuntimeStatus()
+      render()
+    }, 5000)
+  }
 }
 
 function startAuthPolling() {
@@ -91,6 +119,7 @@ function startAuthPolling() {
         state.user = data.user
         state.loading = false
         await chrome.storage.local.set({ user: data.user })
+        await refreshRuntimeStatus()
         render()
         startPeerPolling()
       }
@@ -138,7 +167,11 @@ function renderAuth(app) {
 }
 
 function renderDashboard(app) {
-  const { session, isSharing, selectedCountry, user } = state
+  const { session, isSharing, selectedCountry, user, helper } = state
+  const helperReady = !!helper?.available
+  const helperLabel = helperReady
+    ? (isSharing ? 'Desktop helper active — full-browser sharing enabled.' : 'Desktop helper detected — ready to share.')
+    : 'Desktop helper required for full-browser sharing.'
 
   app.innerHTML = `
     <div class="header">
@@ -214,6 +247,22 @@ function renderDashboard(app) {
       <button id="signOutBtn" style="background:none;border:none;color:var(--muted);font-size:10px;cursor:pointer;font-family:'Courier New',monospace">SIGN OUT</button>
     </div>`
 
+  const shareInfo = app.querySelector('.share-info p')
+  if (shareInfo) shareInfo.textContent = helperLabel
+
+  if (!helperReady) {
+    const shareSection = shareInfo?.closest('.section')
+    if (shareSection) {
+      const helperNotice = document.createElement('div')
+      helperNotice.className = 'error-msg'
+      helperNotice.innerHTML = 'Desktop helper not installed. <a id="installHelperBtn" href="#" style="color:#00ff88;font-family:\'Courier New\',monospace;font-size:11px;text-decoration:underline">DOWNLOAD & INSTALL</a>'
+      shareSection.appendChild(helperNotice)
+    }
+    // Disable the share toggle visually
+    const toggle = document.getElementById('shareToggle')
+    if (toggle) { toggle.disabled = true; toggle.style.opacity = '0.4'; toggle.style.cursor = 'not-allowed' }
+  }
+
   // Bind events
   document.querySelectorAll('.country-btn').forEach(btn => {
     btn.onclick = () => {
@@ -229,6 +278,10 @@ function renderDashboard(app) {
   document.getElementById('disconnectBtn')?.addEventListener('click', disconnectSession)
   document.getElementById('shareToggle')?.addEventListener('change', e => toggleSharing(e.target.checked))
   document.getElementById('signOutBtn')?.addEventListener('click', signOut)
+  document.getElementById('installHelperBtn')?.addEventListener('click', (e) => {
+    e.preventDefault()
+    chrome.tabs.create({ url: `${API}/api/desktop-download` })
+  })
 }
 
 // ── Actions ───────────────────────────────────────────────────────────────────
@@ -301,15 +354,37 @@ async function disconnectSession() {
 }
 
 async function toggleSharing(on) {
-  state.isSharing = on
-  await chrome.storage.local.set({ isSharing: on })
+  if (on && !state.helper?.available) {
+    // Block toggle — desktop helper required
+    state.error = `Desktop helper required. <a href="${API}/api/desktop-download" style="color:#00ff88">Download & install</a> then reopen.`
+    render()
+    return
+  }
 
-  await chrome.runtime.sendMessage({
+  const previous = state.isSharing
+  state.isSharing = on
+  render()
+
+  const response = await chrome.runtime.sendMessage({
     type: on ? 'START_SHARING' : 'STOP_SHARING',
     country: state.user?.country,
     userId: state.user?.id,
     token: state.user?.token,
+    trust: state.user?.trustScore || 50,
   })
+
+  if (!response?.success) {
+    state.isSharing = previous
+    state.helper = response?.helper || state.helper
+    state.error = response?.error || 'Desktop helper is required'
+    render()
+    return
+  }
+
+  state.error = null
+  state.isSharing = on
+  state.helper = response.helper || state.helper
+  await chrome.storage.local.set({ isSharing: on, helper: state.helper })
 
   try {
     await fetch(`${API}/api/user/sharing`, {
@@ -321,6 +396,9 @@ async function toggleSharing(on) {
       body: JSON.stringify({ isSharing: on }),
     })
   } catch {}
+
+  await refreshRuntimeStatus()
+  render()
 }
 
 async function signOut() {
@@ -328,6 +406,7 @@ async function signOut() {
   state.user = null
   state.session = null
   state.isSharing = false
+  state.helper = null
   await chrome.storage.local.clear()
   render()
 }

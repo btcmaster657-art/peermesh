@@ -47,6 +47,9 @@ wss.on('connection', (ws, req) => {
     userId: null,
     trustScore: 50,
     sessionId: null,
+    providerKind: 'unknown',
+    supportsHttp: true,
+    supportsTunnel: false,
     bytesTransferred: 0,
     isAlive: true,
   })
@@ -103,18 +106,30 @@ function handleMessage(ws, msg) {
       ws.userId = msg.userId
       ws.trustScore = msg.trustScore ?? 50
       ws.agentMode = msg.agentMode ?? false
+      ws.providerKind = msg.providerKind ?? 'unknown'
+      ws.supportsHttp = msg.supportsHttp ?? true
+      ws.supportsTunnel = msg.supportsTunnel ?? false
       peers.set(ws.peerId, ws)
       send(ws, { type: 'registered', peerId: ws.peerId })
-      log(ws.peerId.slice(0,8), `REGISTERED_PROVIDER country=${ws.country} userId=${ws.userId?.slice(0,8)} trust=${ws.trustScore} agent=${ws.agentMode}`)
+      log(
+        ws.peerId.slice(0,8),
+        `REGISTERED_PROVIDER country=${ws.country} userId=${ws.userId?.slice(0,8)} trust=${ws.trustScore} agent=${ws.agentMode}`,
+        `kind=${ws.providerKind} http=${ws.supportsHttp} tunnel=${ws.supportsTunnel}`,
+      )
       log(ws.peerId.slice(0,8), `PEERS AFTER REGISTER`, peersSnapshot())
       break
     }
 
     case 'request_session': {
-      log(ws.peerId.slice(0,8), `REQUEST_SESSION country=${msg.country} userId=${msg.userId?.slice(0,8)}`)
+      const requireTunnel = !!msg.requireTunnel
+      log(
+        ws.peerId.slice(0,8),
+        `REQUEST_SESSION country=${msg.country} userId=${msg.userId?.slice(0,8)}`,
+        `requireTunnel=${requireTunnel}`,
+      )
       log(ws.peerId.slice(0,8), `PEERS AT REQUEST TIME`, peersSnapshot())
 
-      const provider = findProvider(msg.country, ws.peerId, msg.userId)
+      const provider = findProvider(msg.country, ws.peerId, msg.userId, { requireTunnel })
 
       if (!provider) {
         log(ws.peerId.slice(0,8), `NO_PROVIDER_FOUND for country=${msg.country}`)
@@ -128,10 +143,14 @@ function handleMessage(ws, msg) {
             if (peer.trustScore < 30) reasons.push(`low_trust(${peer.trustScore})`)
             if (peer.peerId === ws.peerId) reasons.push('same_peer')
             if (peer.userId === msg.userId) reasons.push('same_user')
+            if (peer.supportsHttp === false) reasons.push('no_http')
+            if (requireTunnel && !peer.supportsTunnel) reasons.push('no_tunnel')
             log(ws.peerId.slice(0,8), `  PROVIDER_REJECTED ${peer.peerId.slice(0,8)} userId=${peer.userId?.slice(0,8)}`, reasons.join(', '))
           }
         }
-        send(ws, { type: 'error', message: `No peers available in ${msg.country}` })
+        send(ws, { type: 'error', message: requireTunnel
+          ? `No full-browser peers available in ${msg.country}`
+          : `No peers available in ${msg.country}` })
         return
       }
 
@@ -207,7 +226,7 @@ function handleMessage(ws, msg) {
       const proxySession = sessions.get(msg.sessionId)
       if (!proxySession) return
       const provider = peers.get(proxySession.providerId)
-      if (provider?.agentMode) {
+      if (provider?.agentMode && provider.supportsHttp !== false) {
         send(provider, { type: 'proxy_request', sessionId: msg.sessionId, request: msg.request })
       }
       break
@@ -245,7 +264,7 @@ function send(ws, data) {
   }
 }
 
-function findProvider(country, requesterId, requestingUserId) {
+function findProvider(country, requesterId, requestingUserId, { requireTunnel = false } = {}) {
   for (const [, peer] of peers) {
     if (
       peer.role === 'provider' &&
@@ -254,7 +273,9 @@ function findProvider(country, requesterId, requestingUserId) {
       peer.readyState === WebSocket.OPEN &&
       peer.trustScore >= 30 &&
       peer.peerId !== requesterId &&
-      peer.userId !== requestingUserId
+      peer.userId !== requestingUserId &&
+      peer.supportsHttp !== false &&
+      (!requireTunnel || peer.supportsTunnel)
     ) {
       return peer
     }
@@ -314,7 +335,7 @@ const httpProxyServer = createServer((req, res) => {
 
   let provider = sessionEntry ? peers.get(sessionEntry.providerId) : null
   if (!provider || provider.readyState !== WebSocket.OPEN) {
-    provider = findAnyAgentProvider(sessionCountry)
+    provider = findAnyAgentProvider(sessionCountry, { requireTunnel: false })
   }
 
   if (!provider) {
@@ -369,7 +390,7 @@ httpProxyServer.on('connect', (req, clientSocket, head) => {
 
   let provider = connectSession ? peers.get(connectSession.providerId) : null
   if (!provider || provider.readyState !== WebSocket.OPEN) {
-    provider = findAnyAgentProvider(connectCountry)
+    provider = findAnyAgentProvider(connectCountry, { requireTunnel: true })
   }
   if (!provider) {
     clientSocket.write('HTTP/1.1 503 No Provider Available\r\n\r\n')
@@ -451,11 +472,13 @@ function handleProxyMessage(ws, msg) {
   }
 }
 
-function findAnyAgentProvider(country = null) {
+function findAnyAgentProvider(country = null, { requireTunnel = false } = {}) {
   for (const [, peer] of peers) {
     if (
       peer.role === 'provider' &&
       peer.agentMode &&
+      peer.supportsHttp !== false &&
+      (!requireTunnel || peer.supportsTunnel) &&
       peer.readyState === WebSocket.OPEN &&
       (country === null || peer.country === country)
     ) {
