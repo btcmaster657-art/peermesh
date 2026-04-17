@@ -42,7 +42,7 @@ primary_region = 'jnb'
 
   [[services.ports]]
     port = 8081
-    handlers = ['tls']
+    handlers = []
 
   [services.concurrency]
     type = 'connections'

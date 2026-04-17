@@ -183,7 +183,7 @@ function setProxy(relayEndpoint, sessionId) {
       if (host === 'localhost' || host === '127.0.0.1' || isPlainHostName(host)) {
         return 'DIRECT';
       }
-      return 'HTTPS ${proxyHost}:${proxyPort}';
+      return 'PROXY ${proxyHost}:${proxyPort}';
     }
   `
 
