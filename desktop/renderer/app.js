@@ -293,11 +293,21 @@ document.getElementById('share-toggle').addEventListener('click', async () => {
   }
   clearMainError()
 
-  // Show disclosure on first share
+  // Show disclosure on first share — re-check DB in case another client already accepted
   const state = await window.peermesh.getState()
-  if (!state.running && !state.config.hasAcceptedProviderTerms) {
-    showDisclosureModal()
-    return
+  if (!state.running) {
+    let accepted = state.config.hasAcceptedProviderTerms
+    if (!accepted) {
+      // Re-fetch from DB to catch acceptances from CLI/extension/dashboard
+      try {
+        const result = await window.peermesh.acceptProviderTerms({ checkOnly: true })
+        accepted = result?.accepted === true
+      } catch {}
+    }
+    if (!accepted) {
+      showDisclosureModal()
+      return
+    }
   }
 
   await doToggleSharing()

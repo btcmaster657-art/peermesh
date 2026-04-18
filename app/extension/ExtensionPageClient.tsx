@@ -136,16 +136,11 @@ export default function ExtensionPageClient() {
       document.title = 'PeerMesh — Install to Share'
     }
 
-    // If ext_id present, check auth so we can auto sign-in to the extension
-    if (urlExtId) {
-      const supabase = createClient()
-      supabase.auth.getSession().then(({ data: { session } }) => {
-        setIsLoggedIn(!!session)
-        setAuthChecked(true)
-      }).catch(() => { setIsLoggedIn(false); setAuthChecked(true) })
-    } else {
+    const supabase = createClient()
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setIsLoggedIn(!!session)
       setAuthChecked(true)
-    }
+    }).catch(() => { setIsLoggedIn(false); setAuthChecked(true) })
 
     // Detect extension presence
     const interval = setInterval(() => {
@@ -256,10 +251,11 @@ export default function ExtensionPageClient() {
     )
   }
 
-  if (!isActivate && urlExtId && authChecked && !isLoggedIn) {
-    if (typeof window !== 'undefined') {
-      window.location.href = `/auth?mode=login&source=extension&ext_id=${urlExtId}`
-    }
+  if (!isActivate && authChecked && !isLoggedIn) {
+    const redirectTarget = urlExtId
+      ? `/auth?mode=login&source=extension&ext_id=${urlExtId}`
+      : `/auth?mode=login&source=extension`
+    if (typeof window !== 'undefined') window.location.href = redirectTarget
     return (
       <main className="flex flex-1 items-center justify-center">
         <div style={{ fontFamily: mono, color: 'var(--muted)', fontSize: '12px', letterSpacing: '2px' }}>REDIRECTING...</div>

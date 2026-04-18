@@ -121,7 +121,7 @@ async function refreshRuntimeStatus() {
     if (!status) return
     state.session = status.session || null
     state.helper = status.helper || null
-    state.isSharing = !!(state.helper?.available && (state.helper?.running || state.helper?.shareEnabled))
+    state.isSharing = !!(state.helper?.available && state.helper?.running)
     await chrome.storage.local.set({
       session: state.session,
       isSharing: state.isSharing,
@@ -150,7 +150,7 @@ function startPeerPolling() {
   if (!statusPollInterval) {
     statusPollInterval = setInterval(async () => {
       await refreshRuntimeStatus()
-      const desktopSharing = !!(state.helper?.available && (state.helper?.running || state.helper?.shareEnabled))
+      const desktopSharing = !!(state.helper?.available && state.helper?.running)
       if (state.isSharing !== desktopSharing) {
         state.isSharing = desktopSharing
         await chrome.storage.local.set({ isSharing: desktopSharing })

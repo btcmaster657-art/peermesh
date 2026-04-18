@@ -28,7 +28,7 @@ const API_BASE    = 'https://peermesh-beta.vercel.app'
 const RELAY_WS    = 'wss://peermesh-relay.fly.dev'
 const CONFIG_DIR  = join(homedir(), '.peermesh')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
-const VERSION     = '1.0.10'
+const VERSION     = '1.0.11'
 
 const BLOCKED = [/\.onion$/i, /^smtp\./i, /^mail\./i, /torrent/i]
 const PRIVATE = [/^localhost$/i, /^127\./, /^10\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./]
@@ -267,6 +267,13 @@ async function handleFetch(request, limitBytes) {
 let myPort = null   // the port this CLI process actually bound
 let peerPort = null // the port the other process is on (for cross-notify)
 
+function notifyPeer(path, body) {
+  if (!peerPort) return
+  const init = { method: 'POST', signal: AbortSignal.timeout(1500) }
+  if (body) { init.headers = { 'Content-Type': 'application/json' }; init.body = JSON.stringify(body) }
+  fetch(`http://127.0.0.1:${peerPort}${path}`, init).catch(() => {})
+}
+
 function buildHandler(port) {
   return http.createServer((req, res) => {
     const origin = req.headers.origin || ''
@@ -291,13 +298,6 @@ function buildHandler(port) {
       }
     }
 
-    function notifyPeer(path, body) {
-      if (!peerPort) return
-      const init = { method: 'POST', signal: AbortSignal.timeout(1500) }
-      if (body) { init.headers = { 'Content-Type': 'application/json' }; init.body = JSON.stringify(body) }
-      fetch(`http://127.0.0.1:${peerPort}${path}`, init).catch(() => {})
-    }
-
     if (req.method === 'GET' && url.pathname === '/native/state') {
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(state()))
@@ -315,7 +315,6 @@ function buildHandler(port) {
           if (data.trust)  config.trust  = data.trust
           saveConfig(config)
           if (!running) connectRelay(_controlLimitBytes)
-          notifyPeer('/native/share/start', { token: config.token, userId: config.userId })
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify(state()))
         } catch (e) { res.writeHead(400); res.end(JSON.stringify({ error: e.message })) }
@@ -325,7 +324,6 @@ function buildHandler(port) {
 
     if (req.method === 'POST' && url.pathname === '/native/share/stop') {
       stopRelay()
-      notifyPeer('/native/share/stop')
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(state()))
       return
@@ -359,11 +357,29 @@ function startControlServer() {
     if (e.code !== 'EADDRINUSE') { log('Control server error: ' + e.message, 'error'); return }
     // Desktop owns 7654 — bind to PEER_PORT instead
     const secondary = buildHandler(PEER_PORT)
-    secondary.listen(PEER_PORT, '127.0.0.1', () => {
+    secondary.listen(PEER_PORT, '127.0.0.1', async () => {
       myPort = PEER_PORT
-      log('Desktop detected on port ' + CONTROL_PORT + ' — CLI running as peer on port ' + PEER_PORT)
+      // Read desktop's actual relay state
+      let desktopState = null
+      try {
+        const r = await fetch(`http://127.0.0.1:${CONTROL_PORT}/native/state`, { signal: AbortSignal.timeout(1500) })
+        if (r.ok) desktopState = await r.json()
+      } catch {}
+      const desktopSharing = !!desktopState?.running
+      log('Desktop detected on port ' + CONTROL_PORT + (desktopSharing ? ' (sharing active)' : ' (not sharing)') + ' — CLI running as peer on port ' + PEER_PORT)
       // Register our port with the desktop so it can cross-notify us
       registerWithPeer(CONTROL_PORT)
+      // Sync sharing state: if desktop is already sharing, CLI joins too;
+      // if CLI is about to share (connectRelay called after this), desktop will
+      // be notified via notifyPeer in /native/share/start handler.
+      // But if desktop is sharing and CLI hasn't started yet, start CLI relay.
+      if (desktopSharing && !running && _controlLimitBytes !== undefined) {
+        // Inherit credentials from desktop state if CLI has none
+        if (!config.token && desktopState?.userId) {
+          log('Inheriting session from desktop — sharing started', 'warn')
+        }
+        connectRelay(_controlLimitBytes)
+      }
     })
     secondary.on('error', e2 => log('Could not bind peer port: ' + e2.message, 'error'))
   })
@@ -421,6 +437,8 @@ function connectRelay(limitBytes) {
         case 'registered':
           log(`Sharing active — country: auto-detected from IP`)
           printStatus(limitBytes)
+          // Tell peer (desktop) to start sharing too if it isn't already
+          notifyPeer('/native/share/start', { token: config.token, userId: config.userId })
           break
 
         case 'error':
@@ -492,6 +510,8 @@ function stopRelay() {
   if (ws) { ws.removeAllListeners('close'); ws.close(1000); ws = null }
   running = false
   closeAllTunnels()
+  // Tell peer (desktop) to stop sharing too
+  notifyPeer('/native/share/stop')
 }
 
 // ── Status display ────────────────────────────────────────────────────────────
