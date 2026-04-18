@@ -226,6 +226,12 @@ async function startDeviceFlow() {
     if (poll.status === 'approved' && poll.user) {
       stopDevicePoll()
       resetAuthUI()
+      // Show a brief "getting codes" flash before transitioning
+      const codeWaiting = document.getElementById('code-waiting')
+      if (codeWaiting) {
+        codeWaiting.style.display = 'flex'
+        codeWaiting.innerHTML = '<span style="display:inline-block;width:10px;height:10px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin 0.8s linear infinite"></span> SIGNING IN...'
+      }
       const res = await window.peermesh.signIn({
         token: poll.user.token,
         userId: poll.user.id,
@@ -238,7 +244,14 @@ async function startDeviceFlow() {
         document.getElementById('auth-error').style.display = 'block'
         document.getElementById('btn-open-browser').disabled = false
         document.getElementById('btn-open-browser').textContent = 'SIGN IN WITH BROWSER'
+        if (codeWaiting) codeWaiting.style.display = 'none'
         return
+      }
+      // Poll rapidly a few times so the share toggle turns green quickly
+      for (let i = 0; i < 5; i++) {
+        await new Promise(r => setTimeout(r, 600))
+        const s = await pollState()
+        if (s && s.running) break
       }
       await pollState()
     } else if (poll.status === 'denied') {
@@ -254,11 +267,13 @@ async function startDeviceFlow() {
       stopDevicePoll()
       codeEl.style.display = 'none'
       codeHint.style.display = 'none'
+      copyBtn.style.display = 'none'
       const txt = document.getElementById('auth-error-text')
       if (txt) txt.textContent = 'Code expired — click below to get a new one.'
       errEl.style.display = 'block'
+      document.getElementById('auth-status').textContent = ''
       btn.disabled = false
-      btn.textContent = 'SIGN IN WITH BROWSER'
+      btn.textContent = 'GET NEW CODE'
     }
   }, interval * 1000)
 }
@@ -277,6 +292,47 @@ document.getElementById('share-toggle').addEventListener('click', async () => {
     return
   }
   clearMainError()
+
+  // Show disclosure on first share
+  const state = await window.peermesh.getState()
+  if (!state.running && !state.config.hasAcceptedProviderTerms) {
+    showDisclosureModal()
+    return
+  }
+
+  await doToggleSharing()
+})
+
+function showDisclosureModal() {
+  const existing = document.getElementById('pm-disclosure')
+  if (existing) return
+  const overlay = document.createElement('div')
+  overlay.id = 'pm-disclosure'
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.82);display:flex;align-items:center;justify-content:center;z-index:999;padding:16px'
+  overlay.innerHTML = `
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:22px;max-width:320px;width:100%">
+      <div style="font-family:'Courier New',monospace;font-size:10px;color:var(--accent);letter-spacing:1px;margin-bottom:10px">BEFORE YOU SHARE</div>
+      <div style="font-size:14px;font-weight:600;margin-bottom:14px;line-height:1.3">What sharing your connection means</div>
+      <div style="display:flex;gap:10px;margin-bottom:10px;font-size:12px;color:var(--muted);line-height:1.5"><span>🌐</span><span>Your IP address will be used by other PeerMesh users to browse the web.</span></div>
+      <div style="display:flex;gap:10px;margin-bottom:10px;font-size:12px;color:var(--muted);line-height:1.5"><span>🔒</span><span>All sessions are logged with signed receipts.</span></div>
+      <div style="display:flex;gap:10px;margin-bottom:10px;font-size:12px;color:var(--muted);line-height:1.5"><span>🚫</span><span>Blocked: .onion sites, SMTP/mail, torrents, private IPs.</span></div>
+      <div style="display:flex;gap:10px;margin-bottom:10px;font-size:12px;color:var(--muted);line-height:1.5"><span>⚡</span><span>You can stop sharing at any time.</span></div>
+      <div style="display:flex;gap:10px;margin-bottom:10px;font-size:12px;color:var(--muted);line-height:1.5"><span>💸</span><span>Sharing earns you free browsing credits.</span></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:16px">
+        <button id="pm-disclose-cancel" style="padding:10px;background:none;border:1px solid var(--border);border-radius:8px;color:var(--muted);cursor:pointer;font-family:'Courier New',monospace;font-size:10px">CANCEL</button>
+        <button id="pm-disclose-accept" style="padding:10px;background:var(--accent);border:none;border-radius:8px;color:#000;cursor:pointer;font-family:'Courier New',monospace;font-size:10px;font-weight:700">I UNDERSTAND — SHARE</button>
+      </div>
+    </div>`
+  document.body.appendChild(overlay)
+  document.getElementById('pm-disclose-cancel').onclick = () => overlay.remove()
+  document.getElementById('pm-disclose-accept').onclick = async () => {
+    overlay.remove()
+    await window.peermesh.acceptProviderTerms()
+    await doToggleSharing()
+  }
+}
+
+async function doToggleSharing() {
   const toggle = document.getElementById('share-toggle')
   const label = document.getElementById('status-label')
   const dot = document.getElementById('status-dot')
@@ -306,8 +362,14 @@ document.getElementById('share-toggle').addEventListener('click', async () => {
     dot.style.border = ''
     dot.style.borderTopColor = ''
   }
+  // Poll a few times so the UI reflects the relay connection quickly
+  for (let i = 0; i < 6; i++) {
+    await new Promise(r => setTimeout(r, 500))
+    const s = await pollState()
+    if (s && (s.running || !s.shareEnabled)) break
+  }
   await pollState()
-})
+}
 
 document.getElementById('btn-dashboard').addEventListener('click', async () => {
   await window.peermesh.openDashboard()

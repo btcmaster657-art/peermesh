@@ -815,6 +815,8 @@ const controlServer = http.createServer((req, res) => {
   if (req.method === 'POST' && url.pathname === '/native/share/stop') {
     stopRelay()
     notifyPeer('/native/share/stop')
+    // Eagerly persist false so dashboard sees it immediately
+    persistSharingState(false)
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({
       available: true, running: false, shareEnabled: false,
@@ -1104,6 +1106,12 @@ ipcMain.handle('open-dashboard', () => {
   shell.openExternal(`${API_BASE}/dashboard`)
 })
 
+ipcMain.handle('accept-provider-terms', () => {
+  config.hasAcceptedProviderTerms = true
+  saveConfig()
+  return { success: true }
+})
+
 // ── App lifecycle ─────────────────────────────────────────────────────────────
 
 if (IS_NATIVE_HOST_MODE) {
@@ -1173,6 +1181,24 @@ if (IS_NATIVE_HOST_MODE) {
 app.on('before-quit', () => {
   stopRelay()
   closeAllTunnels(false)
-  controlServer.close()
-  localProxyServer.close()
+  try { controlServer.close() } catch {}
+  try { localProxyServer.close() } catch {}
+  // Synchronously mark sharing as stopped in DB before process exits
+  if (config.token && config.userId && config.extId) {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
+      body: JSON.stringify({ device_id: config.extId }),
+    }).catch(() => {})
+    fetch(`${API_BASE}/api/user/sharing`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
+      body: JSON.stringify({ isSharing: false }),
+    }).catch(() => {})
+  }
+  // Kill any lingering node/agent child processes
+  if (process.platform === 'win32') {
+    try { spawnSync('taskkill', ['/F', '/IM', 'node.exe', '/T'], { stdio: 'ignore' }) } catch {}
+  } else {
+    try { spawnSync('pkill', ['-f', 'peermesh'], { stdio: 'ignore' }) } catch {}
+  }
 })

@@ -795,7 +795,6 @@ sudo systemctl enable --now peermesh.service`} />
               <CliSection label="Run (starts sharing immediately)" cmd="peermesh-provider" />
               <CliSection label="Run without installing" cmd="npx @btcmaster1000/peermesh-provider" />
               <CliSection label="Set a daily bandwidth limit" cmd="peermesh-provider --limit 500" />
-              <CliSection label="Override your country" cmd="peermesh-provider --country NG" />
               <CliSection label="Show today's usage then exit" cmd="peermesh-provider --status" />
               <CliSection label="Clear saved credentials and re-authenticate" cmd="peermesh-provider --reset" />
               <CliSection label="Remove daily limit" cmd="peermesh-provider --no-limit" />

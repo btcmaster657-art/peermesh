@@ -115,7 +115,8 @@ export default function ExtensionPageClient() {
   const isActivate = searchParams.get('activate') === '1' || !!searchParams.get('code')
   const urlExtId = searchParams.get('ext_id') ?? ''
 
-  const [authChecked, setAuthChecked] = useState(false)
+  // Start as unchecked when ext_id is present so spinner shows immediately
+  const [authChecked, setAuthChecked] = useState(() => !urlExtId || isActivate)
   const [isLoggedIn, setIsLoggedIn] = useState(false)
   const [step, setStep] = useState<'idle' | 'downloading' | 'guide' | 'done'>('idle')
   const [desktopDownloading, setDesktopDownloading] = useState(false)
@@ -241,7 +242,7 @@ export default function ExtensionPageClient() {
     marginBottom: '16px',
   }
 
-  // ── Auth gate — only block when ext_id is present and auth hasn't resolved ──
+  // ── Auth gate — show spinner immediately when ext_id is present ──
   if (!isActivate && urlExtId && !authChecked) {
     return (
       <main className="flex flex-1 items-center justify-center">

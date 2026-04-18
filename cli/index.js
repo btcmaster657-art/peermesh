@@ -11,7 +11,6 @@
  * Options:
  *   --limit <MB>     Set daily bandwidth limit in MB and save to your account
  *   --no-limit       Remove your daily limit
- *   --country <CC>   Override country code (e.g. --country NG)
  *   --reset          Clear saved credentials and re-authenticate
  *   --status         Show today's usage and limit then exit
  */
@@ -29,7 +28,7 @@ const API_BASE    = 'https://peermesh-beta.vercel.app'
 const RELAY_WS    = 'wss://peermesh-relay.fly.dev'
 const CONFIG_DIR  = join(homedir(), '.peermesh')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
-const VERSION     = '1.0.6'
+const VERSION     = '1.0.7'
 
 const BLOCKED = [/\.onion$/i, /^smtp\./i, /^mail\./i, /torrent/i]
 const PRIVATE = [/^localhost$/i, /^127\./, /^10\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./]
@@ -40,9 +39,6 @@ const args        = process.argv.slice(2)
 const limitIdx    = args.indexOf('--limit')
 const limitArg    = limitIdx !== -1 ? args[limitIdx + 1] : undefined
 const noLimit     = args.includes('--no-limit')
-const countryIdx  = args.indexOf('--country')
-const countryRaw  = countryIdx !== -1 ? args[countryIdx + 1] : undefined
-const countryArg  = countryRaw && !countryRaw.startsWith('--') ? countryRaw : undefined
 const resetFlag   = args.includes('--reset')
 const statusFlag  = args.includes('--status')
 const serveFlag   = args.includes('--serve')
@@ -585,7 +581,7 @@ async function main() {
       config.token    = user.token
       config.userId   = user.id
       config.username = user.username
-      config.country  = countryArg ?? user.country ?? 'RW'
+      config.country  = user.country ?? 'RW'
       config.trust    = user.trustScore ?? 50
       saveConfig(config)
       console.log(`  ✓  Signed in as ${config.username ?? config.userId.slice(0, 8)}`)
@@ -595,7 +591,6 @@ async function main() {
       process.exit(1)
     }
   } else {
-    if (countryArg) { config.country = countryArg; saveConfig(config) }
     // Verify token
     try {
       const res = await fetch(`${API_BASE}/api/extension-auth?verify=1&userId=${config.userId}`, {

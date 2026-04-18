@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('peermesh', {
   toggleSharing: () => ipcRenderer.invoke('toggle-sharing'),
   signOut: () => ipcRenderer.invoke('sign-out'),
   openDashboard: () => ipcRenderer.invoke('open-dashboard'),
+  acceptProviderTerms: () => ipcRenderer.invoke('accept-provider-terms'),
   requestDeviceCode: () => ipcRenderer.invoke('request-device-code'),
   pollDeviceCode: (device_code) => ipcRenderer.invoke('poll-device-code', { device_code }),
 })

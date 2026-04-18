@@ -32,6 +32,7 @@ let state = {
   extId: null,
   supabaseToken: null,
   isOnline: navigator.onLine,
+  showDisclosure: false,
 }
 
 window.addEventListener('online', () => { state.isOnline = true; render() })
@@ -57,7 +58,7 @@ async function handleExpiredSession() {
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 async function init() {
-  const stored = await chrome.storage.local.get(['user', 'session', 'isSharing', 'helper', 'selectedCountry', 'extId', 'supabaseToken'])
+  const stored = await chrome.storage.local.get(['user', 'session', 'isSharing', 'helper', 'selectedCountry', 'extId', 'supabaseToken', 'hasAcceptedProviderTerms'])
 
   if (!stored.extId) {
     stored.extId = crypto.randomUUID()
@@ -386,6 +387,47 @@ function renderDashboard(app) {
     e.preventDefault()
     chrome.tabs.create({ url: `${API}/api/desktop-download` })
   })
+
+  // Disclosure modal
+  if (state.showDisclosure) {
+    const overlay = document.createElement('div')
+    overlay.id = 'pm-disclosure'
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.82);display:flex;align-items:center;justify-content:center;z-index:999;padding:16px'
+    overlay.innerHTML = `
+      <div style="background:#13131a;border:1px solid #1e1e2a;border-radius:14px;padding:22px;max-width:320px;width:100%">
+        <div style="font-family:'Courier New',monospace;font-size:10px;color:#00ff88;letter-spacing:1px;margin-bottom:10px">BEFORE YOU SHARE</div>
+        <div style="font-size:14px;font-weight:600;margin-bottom:14px;line-height:1.3">What sharing your connection means</div>
+        ${[
+          ['🌐', 'Your IP address will be used by other PeerMesh users to browse the web.'],
+          ['🔒', 'All sessions are logged with signed receipts.'],
+          ['🚫', 'Blocked: .onion sites, SMTP/mail, torrents, private IPs.'],
+          ['⚡', 'You can stop sharing at any time.'],
+          ['💸', 'Sharing earns you free browsing credits.'],
+        ].map(([icon, text]) => `
+          <div style="display:flex;gap:10px;margin-bottom:10px;font-size:12px;color:#666680;line-height:1.5">
+            <span style="flex-shrink:0">${icon}</span><span>${text}</span>
+          </div>`).join('')}
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:16px">
+          <button id="pm-disclose-cancel" style="padding:10px;background:none;border:1px solid #1e1e2a;border-radius:8px;color:#666680;cursor:pointer;font-family:'Courier New',monospace;font-size:10px">CANCEL</button>
+          <button id="pm-disclose-accept" style="padding:10px;background:#00ff88;border:none;border-radius:8px;color:#000;cursor:pointer;font-family:'Courier New',monospace;font-size:10px;font-weight:700">I UNDERSTAND — SHARE</button>
+        </div>
+      </div>`
+    document.body.appendChild(overlay)
+    document.getElementById('pm-disclose-cancel').onclick = () => {
+      state.showDisclosure = false
+      // Uncheck the toggle visually
+      const toggle = document.getElementById('shareToggle')
+      if (toggle) toggle.checked = false
+      overlay.remove()
+    }
+    document.getElementById('pm-disclose-accept').onclick = async () => {
+      state.showDisclosure = false
+      state.hasAcceptedProviderTerms = true
+      await chrome.storage.local.set({ hasAcceptedProviderTerms: true })
+      overlay.remove()
+      toggleSharing(true)
+    }
+  }
 }
 
 // ── Actions ───────────────────────────────────────────────────────────────────
@@ -466,6 +508,14 @@ async function disconnectSession() {
 
 async function toggleSharing(on) {
   if (state.shareToggling) return
+
+  // First-time share — show disclosure modal
+  if (on && !state.hasAcceptedProviderTerms) {
+    state.showDisclosure = true
+    render()
+    return
+  }
+
   state.shareToggling = true
   render()
 
