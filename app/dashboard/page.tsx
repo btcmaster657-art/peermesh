@@ -426,7 +426,8 @@ export default function Dashboard() {
       {/* Extension banner */}
       {showExtBanner && (
         <a
-          href="/extension"
+          href={extUpdateAvailable ? '/api/extension-download' : '/extension'}
+          download={extUpdateAvailable ? 'peermesh-extension.zip' : undefined}
           style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', background: 'var(--surface)', border: `1px solid ${extUpdateAvailable ? 'rgba(255,200,0,0.5)' : 'var(--accent)'}`, borderRadius: '12px', padding: '12px 16px', marginBottom: '16px', textDecoration: 'none' }}
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
@@ -672,6 +673,31 @@ export default function Dashboard() {
           )}
         </div>
       )}
+
+      {/* CLI banner */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', background: 'var(--surface)', border: `1px solid ${cliRunning ? (cliUpdateAvailable ? 'rgba(255,200,0,0.5)' : 'rgba(0,255,136,0.3)') : 'var(--border)'}`, borderRadius: '10px', marginBottom: '12px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <span style={{ fontSize: '16px' }}>⌨️</span>
+          <div>
+            <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: cliRunning ? (cliUpdateAvailable ? '#ffc800' : 'var(--accent)') : 'var(--muted)', letterSpacing: '0.5px', marginBottom: '2px' }}>
+              {cliRunning
+                ? cliUpdateAvailable ? `CLI UPDATE AVAILABLE — v${latestCliVersion}` : '● CLI DETECTED — SHARING ACTIVE'
+                : 'SHARE FROM ANY MACHINE'}
+            </div>
+            <div style={{ fontSize: '11px', color: 'var(--muted)' }}>
+              {cliRunning
+                ? cliUpdateAvailable ? `You have v${cliProcessVersion}. Run: npm install -g @btcmaster1000/peermesh-provider@latest` : `v${cliProcessVersion} — in sync with this dashboard`
+                : latestCliVersion ? `Latest: v${latestCliVersion} — no desktop app needed` : 'No desktop app needed — just Node.js'}
+            </div>
+          </div>
+        </div>
+        <button
+          onClick={() => { setCliDocTab(detectedOS); setShowCliDocs(true) }}
+          style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: cliUpdateAvailable ? '#ffc800' : 'var(--accent)', background: 'var(--bg)', border: `1px solid ${cliUpdateAvailable ? 'rgba(255,200,0,0.4)' : 'rgba(0,255,136,0.3)'}`, padding: '5px 10px', borderRadius: '5px', cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0 }}
+        >
+          {cliUpdateAvailable ? '↑ UPDATE →' : 'CLI DOCS →'}
+        </button>
+      </div>
 
       {/* CLI Docs modal */}
       {showCliDocs && (

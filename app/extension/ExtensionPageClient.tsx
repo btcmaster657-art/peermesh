@@ -18,9 +18,10 @@ function ActivateScreen() {
 
   // Check if user is already logged in; if not, redirect to sign-in then back
   useEffect(() => {
-    fetch('/api/extension-auth', { method: 'GET' })
-      .then(r => setStatus(r.ok ? 'idle' : 'redirect'))
-      .catch(() => setStatus('redirect'))
+    const supabase = createClient()
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setStatus(session ? 'idle' : 'redirect')
+    }).catch(() => setStatus('redirect'))
   }, [])
 
   useEffect(() => {
