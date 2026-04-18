@@ -16,6 +16,12 @@ const COUNTRY_TZ = {
   JP: { tz: 'Asia/Tokyo',      lang: 'ja-JP' },
 }
 
+// Always stamp the PeerMesh dashboard so it can detect the extension + version
+if (document.documentElement) {
+  document.documentElement.setAttribute('data-peermesh-extension', '1')
+  document.documentElement.setAttribute('data-ext-version', chrome.runtime.getManifest().version)
+}
+
 chrome.storage.local.get(['session'], ({ session }) => {
   if (!session?.country) return
 

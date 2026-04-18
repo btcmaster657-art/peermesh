@@ -1,9 +1,11 @@
 {
   "name": "@btcmaster1000/peermesh-provider",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Share your connection with PeerMesh and earn free browsing credits",
   "type": "module",
-  "bin": { "peermesh-provider": "./index.js" },
+  "bin": {
+    "peermesh-provider": "./index.js"
+  },
   "files": [
     "index.js",
     "README.md"
@@ -17,6 +19,12 @@
   "engines": {
     "node": ">=18.0.0"
   },
-  "keywords": ["peermesh", "provider", "proxy", "vpn", "bandwidth"],
+  "keywords": [
+    "peermesh",
+    "provider",
+    "proxy",
+    "vpn",
+    "bandwidth"
+  ],
   "license": "MIT"
 }

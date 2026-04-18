@@ -20,9 +20,17 @@ function getExtensionVersion(): string {
   } catch { return '1.0.0' }
 }
 
+function getCliVersion(): string {
+  try {
+    const pkg = JSON.parse(readFileSync(join(process.cwd(), 'cli', 'package.json'), 'utf-8'))
+    return pkg.version ?? '1.0.0'
+  } catch { return '1.0.0' }
+}
+
 export async function GET() {
   return NextResponse.json({
     desktop: getLatestDesktopVersion(),
     extension: getExtensionVersion(),
+    cli: getCliVersion(),
   })
 }

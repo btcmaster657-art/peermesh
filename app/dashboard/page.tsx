@@ -50,6 +50,7 @@ export default function Dashboard() {
   const [isOnline, setIsOnline] = useState(true)
   const [latestDesktopVersion, setLatestDesktopVersion] = useState<string | null>(null)
   const [latestExtVersion, setLatestExtVersion] = useState<string | null>(null)
+  const [latestCliVersion, setLatestCliVersion] = useState<string | null>(null)
   const [extInstalled, setExtInstalled] = useState(false)
   const [extVersion, setExtVersion] = useState<string | null>(null)
   const [showCliDocs, setShowCliDocs] = useState(false)
@@ -83,6 +84,7 @@ export default function Dashboard() {
         fetch('/api/version').then(r => r.json()).then(v => {
           setLatestDesktopVersion(v.desktop ?? null)
           setLatestExtVersion(v.extension ?? null)
+          setLatestCliVersion(v.cli ?? null)
         }).catch(() => {})
 
         const dt = await checkDesktop()
@@ -121,8 +123,9 @@ export default function Dashboard() {
 
   // ── Load peer counts ────────────────────────────────────────────────────────
   useEffect(() => {
-    const el = document.querySelector<HTMLElement>('[data-peermesh-extension]')
-    if (el) {
+    // Extension stamps data-peermesh-extension on <html> via content script
+    const el = document.documentElement
+    if (el.dataset.peermeshExtension) {
       setExtInstalled(true)
       setExtVersion(el.dataset.extVersion ?? null)
     }
@@ -328,9 +331,10 @@ export default function Dashboard() {
 
   const bandwidthPct = profile.bandwidth_limit > 0
     ? Math.min(100, Math.round((profile.bandwidth_used_month / profile.bandwidth_limit) * 100))
-    : 0
+    : profile.bandwidth_used_month > 0 ? 100 : 0
   const desktopAvailable = desktop?.available ?? false
   const isCLI = desktop?.source === 'cli'
+  const cliUpdateAvailable = isCLI && !!(latestCliVersion && desktop?.version && latestCliVersion !== desktop.version)
 
   // Detect OS for CLI docs default tab
   const detectedOS: 'windows' | 'mac' | 'linux' = typeof navigator !== 'undefined'
@@ -339,10 +343,9 @@ export default function Dashboard() {
       : 'linux'
     : 'linux'
   const desktopUpdateAvailable = !!(latestDesktopVersion && desktop?.version && latestDesktopVersion !== desktop.version)
-  const extUpdateAvailable = extInstalled && latestExtVersion && extVersion && latestExtVersion !== extVersion
-  // Show ext banner only when: not installed, OR installed but update available
-  // Never show when installed and up-to-date
-  const showExtBanner = !extInstalled || !!extUpdateAvailable
+  const extUpdateAvailable = !!(extInstalled && latestExtVersion && extVersion && latestExtVersion !== extVersion)
+  // Show ext banner only when not installed OR update available
+  const showExtBanner = !extInstalled || extUpdateAvailable
 
   return (
     <main style={{ maxWidth: '680px', margin: '0 auto', width: '100%', padding: '24px 20px' }}>
@@ -652,21 +655,27 @@ export default function Dashboard() {
       )}
 
       {/* CLI provider banner — shows detected state */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', background: 'var(--surface)', border: `1px solid ${isCLI && desktopAvailable ? 'rgba(0,255,136,0.3)' : 'var(--border)'}`, borderRadius: '10px', marginBottom: '12px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', background: 'var(--surface)', border: `1px solid ${isCLI && desktopAvailable ? (cliUpdateAvailable ? 'rgba(255,200,0,0.5)' : 'rgba(0,255,136,0.3)') : 'var(--border)'}`, borderRadius: '10px', marginBottom: '12px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
           <span style={{ fontSize: '16px' }}>⌨️</span>
           <div>
-            <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: isCLI && desktopAvailable ? 'var(--accent)' : 'var(--muted)', letterSpacing: '0.5px', marginBottom: '2px' }}>
-              {isCLI && desktopAvailable ? '● CLI DETECTED — SHARING ACTIVE' : 'SHARE FROM ANY MACHINE'}
+            <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: isCLI && desktopAvailable ? (cliUpdateAvailable ? '#ffc800' : 'var(--accent)') : 'var(--muted)', letterSpacing: '0.5px', marginBottom: '2px' }}>
+              {isCLI && desktopAvailable
+                ? cliUpdateAvailable ? `CLI UPDATE AVAILABLE — v${latestCliVersion}` : '● CLI DETECTED — SHARING ACTIVE'
+                : 'SHARE FROM ANY MACHINE'}
             </div>
-            <div style={{ fontSize: '11px', color: 'var(--muted)' }}>{isCLI && desktopAvailable ? 'CLI is running and in sync with this dashboard' : 'No desktop app needed — just Node.js'}</div>
+            <div style={{ fontSize: '11px', color: 'var(--muted)' }}>
+              {isCLI && desktopAvailable
+                ? cliUpdateAvailable ? `You have v${desktop?.version}. Run: npm install -g @btcmaster1000/peermesh-provider@latest` : `v${desktop?.version} — in sync with this dashboard`
+                : latestCliVersion ? `Latest: v${latestCliVersion} — no desktop app needed` : 'No desktop app needed — just Node.js'}
+            </div>
           </div>
         </div>
         <button
           onClick={() => { setCliDocTab(detectedOS); setShowCliDocs(true) }}
-          style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--accent)', background: 'var(--bg)', border: '1px solid rgba(0,255,136,0.3)', padding: '5px 10px', borderRadius: '5px', cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0 }}
+          style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: cliUpdateAvailable ? '#ffc800' : 'var(--accent)', background: 'var(--bg)', border: `1px solid ${cliUpdateAvailable ? 'rgba(255,200,0,0.4)' : 'rgba(0,255,136,0.3)'}`, padding: '5px 10px', borderRadius: '5px', cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0 }}
         >
-          CLI DOCS →
+          {cliUpdateAvailable ? '↑ UPDATE →' : 'CLI DOCS →'}
         </button>
       </div>
 
@@ -757,12 +766,19 @@ sudo systemctl enable --now peermesh.service`} />
               </div>
             )}
 
-            <div style={{ marginTop: '20px', paddingTop: '16px', borderTop: '1px solid var(--border)', fontSize: '11px', color: 'var(--muted)', lineHeight: 1.6 }}>
-              <span style={{ fontFamily: 'var(--font-geist-mono)', color: 'var(--accent)' }}>OPTIONS: </span>
-              <code style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px' }}>--limit 500</code> · daily MB cap &nbsp;·&nbsp;
-              <code style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px' }}>--country NG</code> · override country &nbsp;·&nbsp;
-              <code style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px' }}>--status</code> · show usage &nbsp;·&nbsp;
-              <code style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px' }}>--reset</code> · re-auth
+            <div style={{ marginTop: '20px', paddingTop: '16px', borderTop: '1px solid var(--border)', display: 'flex', flexDirection: 'column', gap: '14px' }}>
+
+              <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '9px', color: 'var(--muted)', letterSpacing: '0.5px' }}>UPDATE</div>
+              <CliSection label="Update to latest version" cmd="npm install -g @btcmaster1000/peermesh-provider@latest" />
+
+              <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '9px', color: 'var(--muted)', letterSpacing: '0.5px', marginTop: '4px' }}>USAGE</div>
+              <CliSection label="Run (starts sharing immediately)" cmd="peermesh-provider" />
+              <CliSection label="Run without installing" cmd="npx @btcmaster1000/peermesh-provider" />
+              <CliSection label="Set a daily bandwidth limit" cmd="peermesh-provider --limit 500" />
+              <CliSection label="Override your country" cmd="peermesh-provider --country NG" />
+              <CliSection label="Show today's usage then exit" cmd="peermesh-provider --status" />
+              <CliSection label="Clear saved credentials and re-authenticate" cmd="peermesh-provider --reset" />
+              <CliSection label="Remove daily limit" cmd="peermesh-provider --no-limit" />
             </div>
           </div>
         </div>
