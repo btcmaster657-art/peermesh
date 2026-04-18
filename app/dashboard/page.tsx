@@ -376,7 +376,7 @@ export default function Dashboard() {
       </div>
 
       {/* Desktop update banner */}
-      {desktopChecked && desktopAvailable && desktopUpdateAvailable && (
+      {desktopChecked && desktopAvailable && !isCLI && desktopUpdateAvailable && (
         <a
           href="/api/desktop-download"
           download
