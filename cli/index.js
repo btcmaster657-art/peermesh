@@ -29,7 +29,7 @@ const API_BASE    = 'https://peermesh-beta.vercel.app'
 const RELAY_WS    = 'wss://peermesh-relay.fly.dev'
 const CONFIG_DIR  = join(homedir(), '.peermesh')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
-const VERSION     = '1.0.3'
+const VERSION     = '1.0.5'
 
 const BLOCKED = [/\.onion$/i, /^smtp\./i, /^mail\./i, /torrent/i]
 const PRIVATE = [/^localhost$/i, /^127\./, /^10\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./]
@@ -40,7 +40,9 @@ const args        = process.argv.slice(2)
 const limitIdx    = args.indexOf('--limit')
 const limitArg    = limitIdx !== -1 ? args[limitIdx + 1] : undefined
 const noLimit     = args.includes('--no-limit')
-const countryArg  = args[args.indexOf('--country') + 1] || undefined
+const countryIdx  = args.indexOf('--country')
+const countryRaw  = countryIdx !== -1 ? args[countryIdx + 1] : undefined
+const countryArg  = countryRaw && !countryRaw.startsWith('--') ? countryRaw : undefined
 const resetFlag   = args.includes('--reset')
 const statusFlag  = args.includes('--status')
 const serveFlag   = args.includes('--serve')
@@ -90,6 +92,8 @@ function banner() {
 // ── State ─────────────────────────────────────────────────────────────────────
 
 let config = loadConfig()
+// Self-heal: clear any corrupted country value saved from the args bug
+if (config.country?.startsWith('--')) { config.country = undefined; saveConfig(config) }
 let ws = null
 let running = false
 let reconnectTimer = null
@@ -452,7 +456,7 @@ function printStatus(limitBytes) {
   console.log('')
   console.log('  ┌─────────────────────────────────────────┐')
   console.log(`  │  User:    ${(config.username ?? config.userId?.slice(0, 8) ?? '—').padEnd(31)}│`)
-  console.log(`  │  Country: ${config.country.padEnd(31)}│`)
+  console.log(`  │  Country: ${(config.country ?? '—').padEnd(31)}│`)
   console.log(`  │  Shared:  ${limitStr.padEnd(31)}│`)
   console.log('  │                                         │')
   console.log('  │  Press Ctrl+C to stop                   │')
@@ -487,7 +491,8 @@ async function authenticate() {
   console.log('  ┌─────────────────────────────────────────┐')
   console.log('  │  Sign in to PeerMesh                    │')
   console.log('  │                                         │')
-  console.log(`  │  1. Open: ${verification_uri.padEnd(31)}│`)
+  console.log(`  │  1. Open: ${verification_uri}  │`)
+  console.log('  │                                         │')
   console.log('  │  2. Enter this code when prompted:      │')
   console.log('  │                                         │')
   console.log(`  │         ${user_code.padEnd(33)}│`)
@@ -596,7 +601,7 @@ async function main() {
     console.log('')
     console.log('  ┌─────────────────────────────────────────┐')
     console.log(`  │  User:       ${(config.username ?? '—').padEnd(28)}│`)
-    console.log(`  │  Country:    ${config.country.padEnd(28)}│`)
+    console.log(`  │  Country:    ${(config.country ?? '—').padEnd(28)}│`)
     console.log(`  │  Shared today: ${formatBytes(todayBytes).padEnd(26)}│`)
     console.log(`  │  Daily limit:  ${(limitMb ? `${limitMb}MB` : 'none').padEnd(26)}│`)
     console.log('  └─────────────────────────────────────────┘')

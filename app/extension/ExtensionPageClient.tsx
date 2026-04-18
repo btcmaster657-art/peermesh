@@ -12,14 +12,29 @@ function ActivateScreen() {
     const raw = (searchParams.get('code') ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '')
     return raw.length >= 4 ? `${raw.slice(0, 4)}-${raw.slice(4, 8)}` : raw
   })
+  const [status, setStatus] = useState<'checking' | 'redirect' | 'idle' | 'loading' | 'approved' | 'denied' | 'error'>('checking')
+  const [error, setError] = useState('')
+
+  // Check if user is already logged in; if not, redirect to sign-in then back
+  useEffect(() => {
+    fetch('/api/extension-auth', { method: 'GET' })
+      .then(r => setStatus(r.ok ? 'idle' : 'redirect'))
+      .catch(() => setStatus('redirect'))
+  }, [])
+
+  useEffect(() => {
+    if ((status as string) === 'redirect') {
+      window.location.href = `/auth?mode=login&source=activate&activate=1`
+    }
+  }, [status])
 
   function handleCodeChange(val: string) {
     const clean = val.toUpperCase().replace(/[^A-Z0-9]/g, '')
     if (clean.length <= 4) setCode(clean)
     else setCode(`${clean.slice(0, 4)}-${clean.slice(4, 8)}`)
   }
-  const [status, setStatus] = useState<'idle' | 'loading' | 'approved' | 'denied' | 'error'>('idle')
-  const [error, setError] = useState('')
+
+  const codeReady = code.replace(/[^A-Z0-9]/g, '').length === 8
 
   async function handleAction(action: 'approve' | 'deny') {
     setStatus('loading')
@@ -31,6 +46,7 @@ function ActivateScreen() {
         body: JSON.stringify({ user_code: code.toUpperCase().trim(), action }),
       })
       const data = await res.json()
+      if (res.status === 401) { window.location.href = `/auth?mode=login&source=activate&activate=1`; return }
       if (!res.ok) { setError(data.error ?? 'Something went wrong'); setStatus('error'); return }
       setStatus(action === 'approve' ? 'approved' : 'denied')
     } catch {
@@ -41,11 +57,18 @@ function ActivateScreen() {
 
   const card: React.CSSProperties = { background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '12px', padding: '24px', width: '100%', maxWidth: '400px' }
 
+  if (status === 'checking' || (status as string) === 'redirect') return (
+    <div style={{ ...card, textAlign: 'center' }}>
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+      <span style={{ display: 'inline-block', width: '20px', height: '20px', border: '2px solid var(--border)', borderTopColor: 'var(--accent)', borderRadius: '50%', animation: 'spin 0.7s linear infinite' }} />
+    </div>
+  )
+
   if (status === 'approved') return (
     <div style={{ ...card, textAlign: 'center' }}>
       <div style={{ fontSize: '40px', marginBottom: '12px' }}>✅</div>
-      <div style={{ fontFamily: mono, color: 'var(--accent)', fontSize: '13px', marginBottom: '8px', letterSpacing: '1px' }}>DESKTOP AUTHORIZED</div>
-      <div style={{ fontSize: '13px', color: 'var(--muted)' }}>You can close this tab. The desktop app is now signed in.</div>
+      <div style={{ fontFamily: mono, color: 'var(--accent)', fontSize: '13px', marginBottom: '8px', letterSpacing: '1px' }}>AUTHORIZED</div>
+      <div style={{ fontSize: '13px', color: 'var(--muted)' }}>You can close this tab. The app is now signed in.</div>
     </div>
   )
 
@@ -53,30 +76,31 @@ function ActivateScreen() {
     <div style={{ ...card, textAlign: 'center' }}>
       <div style={{ fontSize: '40px', marginBottom: '12px' }}>🚫</div>
       <div style={{ fontFamily: mono, color: '#ff6060', fontSize: '13px', marginBottom: '8px', letterSpacing: '1px' }}>REQUEST DENIED</div>
-      <div style={{ fontSize: '13px', color: 'var(--muted)' }}>The desktop sign-in was rejected.</div>
+      <div style={{ fontSize: '13px', color: 'var(--muted)' }}>The sign-in request was rejected.</div>
     </div>
   )
 
   return (
     <div style={card}>
       <div style={{ fontFamily: mono, color: 'var(--accent)', fontSize: '12px', letterSpacing: '4px', marginBottom: '20px', textAlign: 'center' }}>PEERMESH</div>
-      <div style={{ fontSize: '15px', fontWeight: 600, marginBottom: '6px', textAlign: 'center' }}>Authorize Desktop App</div>
-      <div style={{ fontSize: '13px', color: 'var(--muted)', marginBottom: '24px', textAlign: 'center' }}>Enter the code shown in the PeerMesh desktop app</div>
+      <div style={{ fontSize: '15px', fontWeight: 600, marginBottom: '6px', textAlign: 'center' }}>Authorize App</div>
+      <div style={{ fontSize: '13px', color: 'var(--muted)', marginBottom: '24px', textAlign: 'center' }}>Enter the code shown in your PeerMesh app or CLI</div>
       <input
         value={code}
         onChange={e => handleCodeChange(e.target.value)}
         placeholder="XXXX-XXXX"
         maxLength={9}
+        autoFocus
         style={{ width: '100%', padding: '12px 16px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text)', fontFamily: mono, fontSize: '20px', letterSpacing: '4px', textAlign: 'center', marginBottom: '16px', boxSizing: 'border-box' }}
       />
       {error && <div style={{ color: '#ff6060', fontSize: '12px', marginBottom: '12px', textAlign: 'center' }}>{error}</div>}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
-        <button onClick={() => handleAction('deny')} disabled={!code || status === 'loading'}
-          style={{ padding: '12px', background: 'none', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--muted)', cursor: 'pointer', fontFamily: mono, fontSize: '11px' }}>
+        <button onClick={() => handleAction('deny')} disabled={!codeReady || status === 'loading'}
+          style={{ padding: '12px', background: 'none', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--muted)', cursor: !codeReady || status === 'loading' ? 'not-allowed' : 'pointer', fontFamily: mono, fontSize: '11px' }}>
           DENY
         </button>
-        <button onClick={() => handleAction('approve')} disabled={code.replace('-', '').length < 8 || status === 'loading'}
-          style={{ padding: '12px', background: 'var(--accent)', border: 'none', borderRadius: '8px', color: '#000', cursor: 'pointer', fontFamily: mono, fontSize: '11px', fontWeight: 700 }}>
+        <button onClick={() => handleAction('approve')} disabled={!codeReady || status === 'loading'}
+          style={{ padding: '12px', background: codeReady ? 'var(--accent)' : 'var(--surface)', border: `1px solid ${codeReady ? 'transparent' : 'var(--border)'}`, borderRadius: '8px', color: codeReady ? '#000' : 'var(--muted)', cursor: !codeReady || status === 'loading' ? 'not-allowed' : 'pointer', fontFamily: mono, fontSize: '11px', fontWeight: 700, transition: 'all 0.15s' }}>
           {status === 'loading' ? 'AUTHORIZING...' : 'AUTHORIZE'}
         </button>
       </div>

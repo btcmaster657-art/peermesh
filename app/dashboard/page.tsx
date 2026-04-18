@@ -779,6 +779,30 @@ sudo systemctl enable --now peermesh.service`} />
               <CliSection label="Show today's usage then exit" cmd="peermesh-provider --status" />
               <CliSection label="Clear saved credentials and re-authenticate" cmd="peermesh-provider --reset" />
               <CliSection label="Remove daily limit" cmd="peermesh-provider --no-limit" />
+
+              <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '9px', color: 'var(--muted)', letterSpacing: '0.5px', marginTop: '4px' }}>UNINSTALL</div>
+              <CliSection label="Remove the CLI" cmd="npm uninstall -g peermesh-provider" />
+              {cliDocTab === 'windows' && (
+                <>
+                  <CliSection label="Remove saved credentials (PowerShell)" cmd={`Remove-Item -Recurse -Force "$env:USERPROFILE\.peermesh"`} />
+                  <CliSection label="Remove saved credentials (cmd)" cmd={`rmdir /s /q "%USERPROFILE%\.peermesh"`} />
+                  <CliSection label="Remove startup task" cmd={`Unregister-ScheduledTask -TaskName "PeerMesh" -Confirm:$false`} />
+                </>
+              )}
+              {cliDocTab === 'mac' && (
+                <>
+                  <CliSection label="Remove saved credentials" cmd="rm -rf ~/.peermesh" />
+                  <CliSection label="Remove startup service" cmd={`launchctl unload ~/Library/LaunchAgents/app.peermesh.provider.plist
+rm ~/Library/LaunchAgents/app.peermesh.provider.plist`} />
+                </>
+              )}
+              {cliDocTab === 'linux' && (
+                <>
+                  <CliSection label="Remove saved credentials" cmd="rm -rf ~/.peermesh" />
+                  <CliSection label="Remove startup service" cmd={`sudo systemctl disable --now peermesh.service
+sudo rm /etc/systemd/system/peermesh.service`} />
+                </>
+              )}
             </div>
           </div>
         </div>

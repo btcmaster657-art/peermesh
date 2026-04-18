@@ -136,7 +136,41 @@ Register-ScheduledTask -TaskName "PeerMesh Provider" -Action $action -Trigger $t
 npm uninstall -g peermesh-provider
 ```
 
-Saved credentials are stored in `~/.peermesh/config.json`. Delete that folder to fully remove all data.
+To also remove saved credentials and config:
+
+**Mac/Linux:**
+```bash
+rm -rf ~/.peermesh
+```
+
+**Windows (PowerShell):**
+```powershell
+Remove-Item -Recurse -Force "$env:USERPROFILE\.peermesh"
+```
+
+**Windows (cmd):**
+```cmd
+rmdir /s /q "%USERPROFILE%\.peermesh"
+```
+
+If you set up a background service, remove it first:
+
+**Linux — systemd:**
+```bash
+sudo systemctl disable --now peermesh.service
+sudo rm /etc/systemd/system/peermesh.service
+```
+
+**Mac — launchd:**
+```bash
+launchctl unload ~/Library/LaunchAgents/app.peermesh.provider.plist
+rm ~/Library/LaunchAgents/app.peermesh.provider.plist
+```
+
+**Windows — Task Scheduler:**
+```powershell
+Unregister-ScheduledTask -TaskName "PeerMesh Provider" -Confirm:$false
+```
 
 ---
 

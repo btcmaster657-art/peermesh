@@ -18,16 +18,18 @@ export default function AuthForm() {
   const [loading, setLoading] = useState(false)
 
   const extId = searchParams.get('ext_id')
+  const activate = searchParams.get('activate') === '1' || searchParams.get('source') === 'activate'
 
   useEffect(() => {
     setMode((searchParams.get('mode') as 'login' | 'signup') || 'login')
   }, [searchParams])
 
-  // If already signed in and ext_id present, write token and redirect to extension page
+  // If already signed in, redirect appropriately
   useEffect(() => {
-    if (!extId) return
+    if (!extId && !activate) return
     supabase.auth.getSession().then(async ({ data: { session } }) => {
       if (!session) return
+      if (activate) { router.push('/extension?activate=1'); return }
       await fetch('/api/extension-auth', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -35,7 +37,7 @@ export default function AuthForm() {
       })
       router.push(`/extension?ext_id=${extId}`)
     })
-  }, [extId])
+  }, [extId, activate])
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -83,6 +85,8 @@ export default function AuthForm() {
             body: JSON.stringify({ ext_id: extId }),
           })
           router.push(`/extension?ext_id=${extId}`)
+        } else if (activate) {
+          router.push('/extension?activate=1')
         } else {
           router.push('/dashboard')
         }

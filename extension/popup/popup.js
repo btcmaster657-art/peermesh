@@ -35,6 +35,23 @@ let state = {
 window.addEventListener('online', () => { state.isOnline = true; render() })
 window.addEventListener('offline', () => { state.isOnline = false; render() })
 
+// ── Session expiry ────────────────────────────────────────────────────────────
+
+async function handleExpiredSession() {
+  await chrome.runtime.sendMessage({ type: 'DISCONNECT' }).catch(() => {})
+  state.user = null
+  state.session = null
+  state.isSharing = false
+  state.helper = null
+  state.supabaseToken = null
+  await chrome.storage.local.clear()
+  // Preserve extId so auth polling can resume
+  const extId = state.extId
+  await chrome.storage.local.set({ extId })
+  render()
+  startAuthPolling()
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 async function init() {
@@ -53,6 +70,20 @@ async function init() {
   } catch {}
 
   if (state.user) {
+    // Verify token is still valid before showing the dashboard
+    try {
+      const res = await fetch(`${API}/api/extension-auth?verify=1&userId=${state.user.id}`, {
+        headers: { 'Authorization': `Bearer ${state.user.token}` },
+      })
+      if (res.status === 401 || res.status === 403) {
+        state.loading = false
+        render()
+        renderLogPanel()
+        await initLogPanel()
+        await handleExpiredSession()
+        return
+      }
+    } catch {} // offline — allow through with cached credentials
     await refreshRuntimeStatus()
     startPeerPolling()
   }
@@ -122,6 +153,7 @@ function startPeerPolling() {
       const res = await fetch(`${API}/api/user/sharing`, {
         headers: { 'Authorization': `Bearer ${state.supabaseToken}` },
       })
+      if (res.status === 401 || res.status === 403) { await handleExpiredSession(); return }
       if (!res.ok) return
       const data = await res.json()
       state.user = {
@@ -367,6 +399,7 @@ async function connectSession() {
     })
 
     const data = await res.json()
+    if (res.status === 401 || res.status === 403) { await handleExpiredSession(); return }
     if (!res.ok || data.error) throw new Error(data.error ?? `Server error (${res.status})`)
 
     const response = await chrome.runtime.sendMessage({
