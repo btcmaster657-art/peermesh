@@ -7,6 +7,38 @@ function setVersion(v) {
 
 setVersion(window.peermesh.version)
 
+// ── Network status ────────────────────────────────────────────────────────────
+
+function setOffline(isOffline) {
+  const authBanner = document.getElementById('offline-banner')
+  const mainBanner = document.getElementById('main-offline-banner')
+  const display = isOffline ? 'flex' : 'none'
+  if (authBanner) authBanner.style.display = display
+  if (mainBanner) mainBanner.style.display = display
+  const btn = document.getElementById('btn-open-browser')
+  if (btn && document.getElementById('auth-screen').classList.contains('active')) {
+    btn.disabled = isOffline
+    if (isOffline) btn.textContent = 'NO INTERNET'
+  }
+}
+
+window.addEventListener('online', () => setOffline(false))
+window.addEventListener('offline', () => setOffline(true))
+setOffline(!navigator.onLine)
+
+function showMainError(msg) {
+  const el = document.getElementById('main-error')
+  const txt = document.getElementById('main-error-text')
+  if (!el || !txt) return
+  txt.textContent = msg
+  el.style.display = 'block'
+}
+
+function clearMainError() {
+  const el = document.getElementById('main-error')
+  if (el) el.style.display = 'none'
+}
+
 function formatBytes(bytes) {
   if (bytes < 1024) return `${bytes}B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`
@@ -21,6 +53,8 @@ function getFlagForCountry(code) {
 function showScreen(id) {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'))
   document.getElementById(id).classList.add('active')
+  // Re-apply offline state whenever screen changes
+  setOffline(!navigator.onLine)
 }
 
 function updateUI(state) {
@@ -59,7 +93,9 @@ function updateUI(state) {
   toggle.className = 'toggle' + (running ? ' on' : '')
   document.getElementById('toggle-desc').textContent = running
     ? 'Sharing active — earning credits'
-    : 'Help others browse. Stay free.'
+    : config.userId
+      ? 'Help others browse. Stay free.'
+      : 'Sign in to start sharing.'
 
   document.getElementById('stat-requests').textContent = String(stats.requestsHandled)
   document.getElementById('stat-bytes').textContent = formatBytes(stats.bytesServed)
@@ -105,8 +141,8 @@ function resetAuthUI() {
   copyBtn.style.display = 'none'
   errEl.style.display = 'none'
   statusEl.innerHTML = '<span style="display:inline-block;width:8px;height:8px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin 0.8s linear infinite"></span> WAITING FOR SIGN IN...'
-  btn.disabled = false
-  btn.textContent = 'SIGN IN WITH BROWSER'
+  btn.disabled = !navigator.onLine
+  btn.textContent = navigator.onLine ? 'SIGN IN WITH BROWSER' : 'NO INTERNET'
 }
 
 async function startDeviceFlow() {
@@ -128,9 +164,23 @@ async function startDeviceFlow() {
   btn.disabled = true
   btn.textContent = 'OPENING BROWSER...'
 
+  if (!navigator.onLine) {
+    const txt = document.getElementById('auth-error-text')
+    if (txt) txt.textContent = 'No internet connection — check your network and try again'
+    errEl.style.display = 'block'
+    codeWaiting.style.display = 'none'
+    btn.disabled = true
+    btn.textContent = 'NO INTERNET'
+    deviceFlowActive = false
+    return
+  }
+
   const result = await window.peermesh.requestDeviceCode()
   if (result.error) {
-    errEl.textContent = result.error
+    const txt = document.getElementById('auth-error-text')
+    if (txt) txt.textContent = result.error === 'Could not reach server'
+      ? 'Could not reach server — check your internet connection'
+      : result.error
     errEl.style.display = 'block'
     codeWaiting.style.display = 'none'
     btn.disabled = false
@@ -157,6 +207,7 @@ async function startDeviceFlow() {
   btn.disabled = false
   btn.textContent = 'OPEN BROWSER AGAIN'
 
+  // open-auth now shows a dialog: Open Browser or Copy Link
   await window.peermesh.openAuth(`${verification_uri}?activate=1&code=${encodeURIComponent(user_code)}`)
 
   stopDevicePoll()
@@ -174,7 +225,8 @@ async function startDeviceFlow() {
         trust: poll.user.trustScore || 50,
       })
       if (res && res.success === false) {
-        document.getElementById('auth-error').textContent = res.error || 'Sign-in failed.'
+        const txt = document.getElementById('auth-error-text')
+        if (txt) txt.textContent = res.error || 'Sign-in failed — please try again'
         document.getElementById('auth-error').style.display = 'block'
         document.getElementById('btn-open-browser').disabled = false
         document.getElementById('btn-open-browser').textContent = 'SIGN IN WITH BROWSER'
@@ -185,7 +237,8 @@ async function startDeviceFlow() {
       stopDevicePoll()
       codeEl.style.display = 'none'
       codeHint.style.display = 'none'
-      errEl.textContent = 'Sign-in was denied.'
+      const txt = document.getElementById('auth-error-text')
+      if (txt) txt.textContent = 'Sign-in was denied. Click below to try again.'
       errEl.style.display = 'block'
       btn.disabled = false
       btn.textContent = 'SIGN IN WITH BROWSER'
@@ -193,7 +246,8 @@ async function startDeviceFlow() {
       stopDevicePoll()
       codeEl.style.display = 'none'
       codeHint.style.display = 'none'
-      errEl.textContent = 'Code expired. Click to try again.'
+      const txt = document.getElementById('auth-error-text')
+      if (txt) txt.textContent = 'Code expired — click below to get a new one.'
       errEl.style.display = 'block'
       btn.disabled = false
       btn.textContent = 'SIGN IN WITH BROWSER'
@@ -210,7 +264,23 @@ document.getElementById('btn-open-browser').addEventListener('click', () => {
 })
 
 document.getElementById('share-toggle').addEventListener('click', async () => {
-  await window.peermesh.toggleSharing()
+  if (!navigator.onLine) {
+    showMainError('No internet connection — sharing requires an active network')
+    return
+  }
+  clearMainError()
+  const toggle = document.getElementById('share-toggle')
+  toggle.style.opacity = '0.5'
+  toggle.style.pointerEvents = 'none'
+  try {
+    const result = await window.peermesh.toggleSharing()
+    if (result && result.error) showMainError(result.error)
+  } catch {
+    showMainError('Could not toggle sharing — please try again')
+  } finally {
+    toggle.style.opacity = ''
+    toggle.style.pointerEvents = ''
+  }
   await pollState()
 })
 
@@ -225,9 +295,8 @@ document.getElementById('btn-signout').addEventListener('click', async () => {
   await pollState()
 })
 
-// On load: auto-start device flow if not signed in
+// On load: apply network state then auto-start device flow if not signed in
+setOffline(!navigator.onLine)
 pollState().then(state => {
-  if (!state || !state.config.userId) {
-    startDeviceFlow()
-  }
+  if (!state || !state.config.userId) startDeviceFlow()
 })

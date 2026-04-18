@@ -3,7 +3,6 @@
 import { useState, useEffect } from 'react'
 import { useSearchParams } from 'next/navigation'
 
-const STORE_URL = 'https://chrome.google.com/webstore/detail/peermesh/YOUR_EXTENSION_ID'
 const mono = "'Courier New', monospace"
 
 // ── Device Activation Screen ──────────────────────────────────────────────────
@@ -90,6 +89,8 @@ export default function ExtensionPageClient() {
   const isActivate = searchParams.get('activate') === '1' || !!searchParams.get('code')
   const urlExtId = searchParams.get('ext_id') ?? ''
 
+  const [authChecked, setAuthChecked] = useState(false)
+  const [isLoggedIn, setIsLoggedIn] = useState(false)
   const [step, setStep] = useState<'idle' | 'downloading' | 'guide' | 'done'>('idle')
   const [desktopDownloading, setDesktopDownloading] = useState(false)
   const [copied, setCopied] = useState(false)
@@ -103,10 +104,18 @@ export default function ExtensionPageClient() {
   }
 
   useEffect(() => {
-    // Auto-detect if coming from share toggle
+    if (isActivate) return
+
+    // Always check auth first — show spinner until resolved
+    fetch('/api/extension-auth', { method: 'GET' })
+      .then(r => { setIsLoggedIn(r.ok); setAuthChecked(true) })
+      .catch(() => { setIsLoggedIn(false); setAuthChecked(true) })
+
     if (window.location.hash === '#share') {
       document.title = 'PeerMesh — Install to Share'
     }
+
+    // Detect extension presence
     const interval = setInterval(() => {
       if (document.querySelector('[data-peermesh-extension]')) {
         setStep('done')
@@ -114,14 +123,15 @@ export default function ExtensionPageClient() {
       }
     }, 1000)
     return () => clearInterval(interval)
-  }, [])
+  }, [isActivate])
 
-  // Auto sign-in if ext_id is in URL and user is already authenticated
+  // Auto sign-in to extension once auth is confirmed and ext_id is present
+  // Only runs after authChecked so we never call it before knowing login state
   useEffect(() => {
-    if (!urlExtId || isActivate) return
+    if (!urlExtId || isActivate || !authChecked || !isLoggedIn) return
     sendAuthToExtension()
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [urlExtId])
+  }, [urlExtId, authChecked, isLoggedIn])
 
   async function handleDownload() {
     setStep('downloading')
@@ -199,6 +209,30 @@ export default function ExtensionPageClient() {
     marginBottom: '16px',
   }
 
+  // ── Auth gate — show spinner while checking, not the page content ────────────
+  if (!isActivate && !authChecked) {
+    return (
+      <main className="flex flex-1 items-center justify-center">
+        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px' }}>
+          <span style={{ display: 'inline-block', width: '20px', height: '20px', border: '2px solid var(--border)', borderTopColor: 'var(--accent)', borderRadius: '50%', animation: 'spin 0.7s linear infinite' }} />
+          <div style={{ fontFamily: mono, color: 'var(--muted)', fontSize: '11px', letterSpacing: '2px' }}>CHECKING AUTH...</div>
+        </div>
+      </main>
+    )
+  }
+
+  if (!isActivate && authChecked && !isLoggedIn) {
+    if (typeof window !== 'undefined') {
+      window.location.href = `/auth?mode=login&source=extension${urlExtId ? `&ext_id=${urlExtId}` : ''}`
+    }
+    return (
+      <main className="flex flex-1 items-center justify-center">
+        <div style={{ fontFamily: mono, color: 'var(--muted)', fontSize: '12px', letterSpacing: '2px' }}>REDIRECTING...</div>
+      </main>
+    )
+  }
+
   return (
     <>
       <style>{`
@@ -213,29 +247,32 @@ export default function ExtensionPageClient() {
       ) : (
         <main style={{ maxWidth: '520px', margin: '0 auto', width: '100%', padding: '40px 20px' }}>
 
-        <div style={{ fontFamily: mono, color: 'var(--accent)', fontSize: '12px', letterSpacing: '4px', marginBottom: '28px' }}>
-          PEERMESH
+        {/* Header with back button */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '28px' }}>
+          <a href="/dashboard" style={{ color: 'var(--muted)', fontFamily: mono, fontSize: '11px', textDecoration: 'none', letterSpacing: '0.5px' }}>← BACK</a>
+          <span style={{ fontFamily: mono, color: 'var(--accent)', fontSize: '12px', letterSpacing: '4px' }}>PEERMESH</span>
         </div>
 
         {/* ── Done ── */}
         {step === 'done' && (
           <div style={{ ...card, border: '1px solid var(--accent)', background: 'var(--accent-dim)', textAlign: 'center' }}>
             <div style={{ fontSize: '32px', marginBottom: '12px' }}>✓</div>
-            <div style={{ fontFamily: mono, color: 'var(--accent)', fontSize: '13px', marginBottom: '8px', letterSpacing: '1px' }}>
-              EXTENSION INSTALLED
-            </div>
-            <p style={{ color: 'var(--muted)', fontSize: '13px', lineHeight: 1.7, marginBottom: authed ? 0 : '16px' }}>
+            <div style={{ fontFamily: mono, color: 'var(--accent)', fontSize: '13px', marginBottom: '8px', letterSpacing: '1px' }}>EXTENSION INSTALLED</div>
+            <p style={{ color: 'var(--muted)', fontSize: '13px', lineHeight: 1.7, marginBottom: authed ? '16px' : '16px' }}>
               Click the PeerMesh icon in your Chrome toolbar to start browsing.
             </p>
             {!authed && (
               <button
                 onClick={sendAuthToExtension}
                 disabled={sending}
-                style={{ padding: '11px 20px', background: 'var(--accent)', color: '#000', border: 'none', borderRadius: '8px', fontFamily: mono, fontSize: '11px', fontWeight: 700, cursor: sending ? 'not-allowed' : 'pointer', letterSpacing: '0.5px' }}
+                style={{ padding: '11px 20px', background: 'var(--accent)', color: '#000', border: 'none', borderRadius: '8px', fontFamily: mono, fontSize: '11px', fontWeight: 700, cursor: sending ? 'not-allowed' : 'pointer', letterSpacing: '0.5px', marginBottom: '10px' }}
               >
                 {sending ? 'SIGNING IN...' : 'SIGN IN TO EXTENSION'}
               </button>
             )}
+            <div>
+              <a href="/dashboard" style={{ fontFamily: mono, fontSize: '10px', color: 'var(--muted)', textDecoration: 'none', letterSpacing: '0.5px' }}>← BACK TO DASHBOARD</a>
+            </div>
           </div>
         )}
 
@@ -254,15 +291,20 @@ export default function ExtensionPageClient() {
             </p>
 
             {[
-              { icon: '📦', title: 'Unzip the downloaded file', desc: 'Find peermesh-extension.zip in your Downloads. Right-click it → Extract All (Windows) or double-click (Mac). You’ll get a folder called peermesh-extension.' },
+              { icon: '📦', title: 'Unzip the downloaded file', desc: 'Find peermesh-extension.zip in your Downloads. Right-click it → Extract All (Windows) or double-click (Mac). You\'ll get a folder called peermesh-extension.' },
               { icon: '🔧', title: 'Open Chrome Extensions & enable Developer Mode', desc: 'Copy the URL below and paste it in your Chrome address bar. Toggle "Developer mode" in the top-right corner.' },
-              { icon: '📂', title: 'Click “Load unpacked” → select the folder', desc: 'Click “Load unpacked”, then select the peermesh-extension folder you just unzipped. The PeerMesh icon will appear in your toolbar.' },
+              { icon: '📂', title: 'Click "Load unpacked" → select the folder', desc: 'Click "Load unpacked", then select the peermesh-extension folder you just unzipped. The PeerMesh icon will appear in your toolbar.' },
             ].map((s, i) => (
               <div key={i} style={{ display: 'flex', gap: '14px', ...card }}>
                 <div style={{ fontSize: '24px', flexShrink: 0 }}>{s.icon}</div>
-                <div>
+                <div style={{ flex: 1 }}>
                   <div style={{ fontWeight: 600, marginBottom: '4px', fontSize: '13px' }}>{s.title}</div>
                   <div style={{ color: 'var(--muted)', fontSize: '12px', lineHeight: 1.6 }}>{s.desc}</div>
+                  {i === 2 && (
+                    <a href="/dashboard" style={{ display: 'inline-block', marginTop: '12px', padding: '8px 16px', background: 'var(--accent)', color: '#000', borderRadius: '7px', fontFamily: mono, fontSize: '10px', fontWeight: 700, textDecoration: 'none', letterSpacing: '0.5px' }}>
+                      GO TO DASHBOARD →
+                    </a>
+                  )}
                 </div>
               </div>
             ))}
@@ -327,32 +369,17 @@ export default function ExtensionPageClient() {
               </button>
             </div>
 
-            <a
-              href={STORE_URL}
-              target="_blank"
-              rel="noopener noreferrer"
-              style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px', padding: '15px', background: 'var(--accent)', color: '#000', borderRadius: '10px', fontFamily: mono, fontSize: '13px', fontWeight: 700, textDecoration: 'none', letterSpacing: '0.5px', marginBottom: '10px' }}
-            >
-              🧩 ADD TO CHROME — FREE
-            </a>
-
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', margin: '14px 0' }}>
-              <div style={{ flex: 1, height: '1px', background: 'var(--border)' }} />
-              <span style={{ color: 'var(--muted)', fontSize: '11px', fontFamily: mono }}>OR</span>
-              <div style={{ flex: 1, height: '1px', background: 'var(--border)' }} />
-            </div>
-
             <button
               onClick={handleDownload}
               disabled={step === 'downloading'}
-              style={{ width: '100%', padding: '14px', background: 'transparent', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: '10px', fontFamily: mono, fontSize: '12px', cursor: step === 'downloading' ? 'not-allowed' : 'pointer', letterSpacing: '0.5px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
+              style={{ width: '100%', padding: '14px', background: 'var(--accent)', color: '#000', border: 'none', borderRadius: '10px', fontFamily: mono, fontSize: '12px', fontWeight: 700, cursor: step === 'downloading' ? 'not-allowed' : 'pointer', letterSpacing: '0.5px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
             >
               {step === 'downloading' ? (
                 <>
-                  <span style={{ display: 'inline-block', width: '12px', height: '12px', border: '2px solid var(--border)', borderTopColor: 'var(--accent)', borderRadius: '50%', animation: 'spin 0.7s linear infinite' }} />
+                  <span style={{ display: 'inline-block', width: '12px', height: '12px', border: '2px solid rgba(0,0,0,0.3)', borderTopColor: '#000', borderRadius: '50%', animation: 'spin 0.7s linear infinite' }} />
                   DOWNLOADING...
                 </>
-              ) : '↓ DOWNLOAD & INSTALL MANUALLY'}
+              ) : '↓ DOWNLOAD & INSTALL EXTENSION'}
             </button>
 
             <p style={{ marginTop: '10px', color: 'var(--muted)', fontSize: '11px', textAlign: 'center' }}>

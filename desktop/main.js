@@ -998,9 +998,36 @@ ipcMain.handle('poll-device-code', async (_, { device_code }) => {
   }
 })
 
-ipcMain.handle('open-auth', (_, url) => {
+ipcMain.handle('open-auth', async (_, url) => {
   const safeUrl = url && !url.startsWith('http://localhost') ? url : `${API_BASE}/extension?activate=1`
-  shell.openExternal(safeUrl)
+
+  // Try to find a focused/last-used browser window via BrowserWindow
+  // Show a dialog: open in browser OR copy link (like VS Code device flow)
+  const { response } = await require('electron').dialog.showMessageBox(settingsWindow || BrowserWindow.getFocusedWindow(), {
+    type: 'question',
+    title: 'Sign in to PeerMesh',
+    message: 'Open sign-in page',
+    detail: `Open this URL in your browser to sign in:\n\n${safeUrl}`,
+    buttons: ['Open Browser', 'Copy Link', 'Cancel'],
+    defaultId: 0,
+    cancelId: 2,
+  })
+
+  if (response === 0) {
+    shell.openExternal(safeUrl)
+  } else if (response === 1) {
+    require('electron').clipboard.writeText(safeUrl)
+    // Show brief confirmation
+    if (settingsWindow) {
+      settingsWindow.webContents.executeJavaScript(`
+        const el = document.createElement('div')
+        el.textContent = '\u2713 Link copied — paste in your browser'
+        el.style.cssText = 'position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#1e1e2a;border:1px solid #00ff88;color:#e8e8f0;padding:10px 18px;border-radius:8px;font-family:\'Courier New\',monospace;font-size:11px;z-index:9999;pointer-events:none'
+        document.body.appendChild(el)
+        setTimeout(() => el.remove(), 2500)
+      `).catch(() => {})
+    }
+  }
 })
 
 ipcMain.handle('get-state', () => ({

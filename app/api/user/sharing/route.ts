@@ -82,6 +82,9 @@ export async function PUT(req: Request) {
     p_country: country,
   })
 
+  // Opportunistically clean up stale devices from other users
+  try { await adminClient.rpc('cleanup_stale_providers') } catch {}
+
   if (rpcError) return NextResponse.json({ error: rpcError.message }, { status: 500 })
   return NextResponse.json({ ok: true })
 }
@@ -100,6 +103,9 @@ export async function DELETE(req: Request) {
     p_user_id: userId,
     p_device_id: device_id,
   })
+
+  // Clean up any other stale devices so is_sharing never stays stale
+  try { await adminClient.rpc('cleanup_stale_providers') } catch {}
 
   return NextResponse.json({ ok: true })
 }

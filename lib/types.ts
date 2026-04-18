@@ -15,6 +15,7 @@ export type Profile = {
   total_bytes_used: number
   bandwidth_used_month: number
   bandwidth_limit: number
+  preferred_providers: Record<string, string>
   created_at: string
   updated_at: string
 }

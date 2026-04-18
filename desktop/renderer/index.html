@@ -144,7 +144,9 @@
     .stat-val { font-family: 'Courier New', monospace; font-size: 16px; color: var(--accent); display: block; margin-bottom: 3px; }
     .stat-lbl { font-size: 10px; color: var(--muted); letter-spacing: 0.5px; }
 
-    .error { color: var(--danger); font-size: 11px; text-align: center; padding: 8px; background: rgba(255,68,102,0.1); border-radius: 6px; margin-bottom: 8px; }
+    .error { color: var(--danger); font-size: 11px; padding: 8px 10px; background: rgba(255,68,102,0.1); border: 1px solid rgba(255,68,102,0.25); border-radius: 6px; margin-bottom: 8px; line-height: 1.5; }
+    .error-dismiss { float: right; background: none; border: none; color: var(--muted); cursor: pointer; font-size: 13px; line-height: 1; padding: 0; margin-left: 6px; }
+    .offline-banner { display: none; align-items: center; gap: 8px; background: rgba(255,170,0,0.08); border: 1px solid rgba(255,170,0,0.35); border-radius: 8px; padding: 8px 12px; margin-bottom: 10px; font-family: 'Courier New', monospace; font-size: 10px; color: #ffaa00; letter-spacing: 0.5px; }
 
     .divider { height: 1px; background: var(--border); margin: 12px 0; }
 
@@ -164,7 +166,8 @@
     <div style="flex:1;display:flex;flex-direction:column;justify-content:center">
       <h2 id="welcome-heading">WELCOME TO PEERMESH</h2>
       <p>Opening your browser to sign in...<br>Enter the code below when prompted.</p>
-      <div id="auth-error" class="error" style="display:none"></div>
+      <div id="offline-banner" class="offline-banner">⚠ NO INTERNET — sign-in unavailable</div>
+      <div id="auth-error" class="error" style="display:none"><button class="error-dismiss" onclick="this.parentElement.style.display='none'">✕</button><span id="auth-error-text"></span></div>
 
       <!-- Device code display -->
       <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px;margin:16px 0;text-align:center;min-height:90px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px">
@@ -177,7 +180,7 @@
         <button id="btn-copy-code" style="display:none;background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:4px 10px;font-family:'Courier New',monospace;font-size:10px;cursor:pointer">COPY CODE</button>
       </div>
 
-      <button class="btn btn-primary" id="btn-open-browser" disabled>OPENING BROWSER...</button>
+      <button class="btn btn-primary" id="btn-open-browser" disabled>SIGN IN WITH BROWSER</button>
     </div>
     <div class="mt-auto center" style="padding-bottom:8px">
       <div id="auth-status" style="font-size:10px;color:var(--muted);display:flex;align-items:center;justify-content:center;gap:6px">
@@ -189,6 +192,8 @@
 
   <!-- Main Screen -->
   <div id="main-screen" class="screen">
+    <div id="main-offline-banner" class="offline-banner">⚠ NO INTERNET — sharing paused</div>
+    <div id="main-error" class="error" style="display:none"><button class="error-dismiss" onclick="this.parentElement.style.display='none'">✕</button><span id="main-error-text"></span></div>
     <!-- Status card -->
     <div id="status-card" class="status-card">
       <div>

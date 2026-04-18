@@ -6,10 +6,9 @@ export async function GET() {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
 
-  // Clean up stale providers (heartbeat > 45s ago) before counting
+  // Always clean up stale providers before counting — fixes stale is_sharing
   try { await adminClient.rpc('cleanup_stale_providers') } catch {}
 
-  // Count distinct live devices per country, excluding current user
   const cutoff = new Date(Date.now() - 45_000).toISOString()
 
   let query = adminClient

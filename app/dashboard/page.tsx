@@ -23,60 +23,75 @@ export default function Dashboard() {
   const [desktopChecked, setDesktopChecked] = useState(false)
   const [sharingStats, setSharingStats] = useState({ bytesServed: 0, requestsHandled: 0 })
   const [connecting, setConnecting] = useState(false)
+  const [shareToggling, setShareToggling] = useState(false)
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [shareError, setShareError] = useState<string | null>(null)
+  const [connectError, setConnectError] = useState<string | null>(null)
+  const [isOnline, setIsOnline] = useState(true)
   const [latestDesktopVersion, setLatestDesktopVersion] = useState<string | null>(null)
   const [latestExtVersion, setLatestExtVersion] = useState<string | null>(null)
+  const [extInstalled, setExtInstalled] = useState(false)
+  const [extVersion, setExtVersion] = useState<string | null>(null)
+
+  // ── Network status ──────────────────────────────────────────────────────────
+  useEffect(() => {
+    const onOnline = () => setIsOnline(true)
+    const onOffline = () => setIsOnline(false)
+    setIsOnline(navigator.onLine)
+    window.addEventListener('online', onOnline)
+    window.addEventListener('offline', onOffline)
+    return () => { window.removeEventListener('online', onOnline); window.removeEventListener('offline', onOffline) }
+  }, [])
 
   // ── Load profile ────────────────────────────────────────────────────────────
   useEffect(() => {
     async function load() {
-      const { data: { user } } = await supabase.auth.getUser()
-      if (!user) { router.push('/auth?mode=login'); return }
+      try {
+        const { data: { user }, error: authError } = await supabase.auth.getUser()
+        if (authError) throw new Error('Could not verify session — please refresh')
+        if (!user) { router.push('/auth?mode=login'); return }
 
-      const { data } = await supabase.from('profiles').select('*').eq('id', user.id).single<Profile>()
-      if (!data?.is_verified) { router.push('/verify/payment'); return }
+        const { data, error: profileError } = await supabase.from('profiles').select('*').eq('id', user.id).single<Profile>()
+        if (profileError) throw new Error('Could not load your profile — please refresh')
+        if (!data?.is_verified) { router.push('/verify/payment'); return }
 
-      setProfile(data)
-      setLoading(false)
+        setProfile(data)
+        setLoading(false)
 
-      // Check for updates
-      fetch('/api/version').then(r => r.json()).then(v => {
-        setLatestDesktopVersion(v.desktop ?? null)
-        setLatestExtVersion(v.extension ?? null)
-      }).catch(() => {})
+        fetch('/api/version').then(r => r.json()).then(v => {
+          setLatestDesktopVersion(v.desktop ?? null)
+          setLatestExtVersion(v.extension ?? null)
+        }).catch(() => {})
 
-      // Check desktop helper
-      const dt = await checkDesktop()
-      setDesktop(dt)
-      setDesktopChecked(true)
-
-      // Always start polling — desktop is source of truth for sharing state
-      startPolling()
-
-      if (dt.available) {
-        // Sync auth to desktop so it has fresh token
-        const { data: { session } } = await supabase.auth.getSession()
-        if (session) {
-          await syncDesktopAuth({
-            token: session.access_token,
-            userId: user.id,
-            country: data.country_code,
-            trust: data.trust_score,
-          })
-        }
-        // Always read sharing state from desktop as source of truth
-        const desktopSharing = dt.running || dt.shareEnabled
-        setIsSharing(desktopSharing)
-        if (dt.stats) setSharingStats({ bytesServed: dt.stats.bytesServed, requestsHandled: dt.stats.requestsHandled })
+        const dt = await checkDesktop()
+        setDesktop(dt)
+        setDesktopChecked(true)
         startPolling()
-      } else if (data.is_sharing) {
-        // Desktop not available but DB says sharing — clear it
-        await fetch('/api/user/sharing', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ isSharing: false }),
-        })
+
+        if (dt.available) {
+          const { data: { session } } = await supabase.auth.getSession()
+          if (session) {
+            await syncDesktopAuth({
+              token: session.access_token,
+              userId: user.id,
+              country: data.country_code,
+              trust: data.trust_score,
+            })
+          }
+          const desktopSharing = dt.running || dt.shareEnabled
+          setIsSharing(desktopSharing)
+          if (dt.stats) setSharingStats({ bytesServed: dt.stats.bytesServed, requestsHandled: dt.stats.requestsHandled })
+        } else if (data.is_sharing) {
+          await fetch('/api/user/sharing', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ isSharing: false }),
+          }).catch(() => {})
+        }
+      } catch (err: unknown) {
+        setLoadError(err instanceof Error ? err.message : 'Something went wrong — please refresh')
+        setLoading(false)
       }
     }
     load()
@@ -84,6 +99,14 @@ export default function Dashboard() {
   }, [])
 
   // ── Load peer counts ────────────────────────────────────────────────────────
+  useEffect(() => {
+    const el = document.querySelector<HTMLElement>('[data-peermesh-extension]')
+    if (el) {
+      setExtInstalled(true)
+      setExtVersion(el.dataset.extVersion ?? null)
+    }
+  }, [])
+
   useEffect(() => {
     fetch('/api/peers/available')
       .then(r => r.json())
@@ -125,6 +148,17 @@ export default function Dashboard() {
           if (data) setProfile(data)
         }
       }
+      // Refresh peer counts every 30s so country grid stays live
+      if (tick % 10 === 0) {
+        fetch('/api/peers/available')
+          .then(r => r.json())
+          .then(({ peers }: { peers: PeerAvailability[] }) => {
+            const counts: Record<string, number> = {}
+            peers.forEach(p => { counts[p.country] = p.count })
+            setPeerCounts(counts)
+          })
+          .catch(() => {})
+      }
     }, 3000)
   }
 
@@ -134,8 +168,9 @@ export default function Dashboard() {
 
   // ── Share toggle ────────────────────────────────────────────────────────────
   const handleShareToggle = useCallback(async () => {
-    if (!profile) return
+    if (!profile || shareToggling) return
     setShareError(null)
+    setShareToggling(true)
 
     if (isSharing) {
       setIsSharing(false)
@@ -144,21 +179,32 @@ export default function Dashboard() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ isSharing: false }),
-      })
+      }).catch(() => {})
+      setShareToggling(false)
       return
     }
 
-    // Check desktop
+    if (!navigator.onLine) {
+      setShareError('No internet connection — check your network and try again')
+      setShareToggling(false)
+      return
+    }
+
     const dt = await checkDesktop()
     setDesktop(dt)
 
     if (!dt.available) {
       setShareError('desktop_required')
+      setShareToggling(false)
       return
     }
 
     const { data: { session } } = await supabase.auth.getSession()
-    if (!session) return
+    if (!session) {
+      setShareError('Session expired — please sign out and sign back in')
+      setShareToggling(false)
+      return
+    }
 
     const ok = await startDesktopSharing({
       token: session.access_token,
@@ -169,20 +215,27 @@ export default function Dashboard() {
 
     if (!ok) {
       setShareError('desktop_required')
+      setShareToggling(false)
       return
     }
 
     setIsSharing(true)
+    setShareToggling(false)
     await fetch('/api/user/sharing', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ isSharing: true }),
-    })
-  }, [profile, isSharing])
+    }).catch(() => {})
+  }, [profile, isSharing, shareToggling])
 
   // ── Connect ─────────────────────────────────────────────────────────────────
   async function handleConnect() {
     if (!selectedCountry || !profile) return
+    setConnectError(null)
+    if (!navigator.onLine) {
+      setConnectError('No internet connection — check your network and try again')
+      return
+    }
     setConnecting(true)
     try {
       const res = await fetch('/api/session/create', {
@@ -191,10 +244,11 @@ export default function Dashboard() {
         body: JSON.stringify({ country: selectedCountry }),
       })
       const data = await res.json()
-      if (data.error) throw new Error(data.error)
+      if (!res.ok || data.error) throw new Error(data.error ?? `Server error (${res.status})`)
       router.push(`/browse?relay=${encodeURIComponent(data.relayEndpoint)}&country=${selectedCountry}&userId=${profile.id}&dbSessionId=${data.sessionId}`)
     } catch (err: unknown) {
-      alert(err instanceof Error ? err.message : 'Could not connect')
+      const msg = err instanceof Error ? err.message : 'Could not connect'
+      setConnectError(msg === 'Failed to fetch' ? 'Network error — could not reach server' : msg)
     } finally {
       setConnecting(false)
     }
@@ -207,22 +261,56 @@ export default function Dashboard() {
     router.push('/')
   }
 
+  function dismissErrors() {
+    setConnectError(null)
+    setShareError(null)
+  }
+
   if (loading) {
     return (
       <main className="flex flex-1 items-center justify-center">
-        <div style={{ fontFamily: 'var(--font-geist-mono)', color: 'var(--muted)', fontSize: '12px', letterSpacing: '2px' }}>LOADING...</div>
+        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px' }}>
+          <span style={{ display: 'inline-block', width: '20px', height: '20px', border: '2px solid var(--border)', borderTopColor: 'var(--accent)', borderRadius: '50%', animation: 'spin 0.7s linear infinite' }} />
+          <div style={{ fontFamily: 'var(--font-geist-mono)', color: 'var(--muted)', fontSize: '11px', letterSpacing: '2px' }}>LOADING...</div>
+        </div>
+      </main>
+    )
+  }
+
+  if (loadError) {
+    return (
+      <main className="flex flex-1 items-center justify-center">
+        <div style={{ textAlign: 'center', padding: '24px' }}>
+          <div style={{ fontSize: '11px', color: '#ff6060', fontFamily: 'var(--font-geist-mono)', marginBottom: '16px', letterSpacing: '0.5px' }}>{loadError}</div>
+          <button onClick={() => window.location.reload()} style={{ padding: '10px 20px', background: 'var(--accent)', color: '#000', border: 'none', borderRadius: '8px', fontFamily: 'var(--font-geist-mono)', fontSize: '11px', fontWeight: 700, cursor: 'pointer', letterSpacing: '0.5px' }}>RETRY</button>
+        </div>
       </main>
     )
   }
 
   if (!profile) return null
 
-  const bandwidthPct = Math.min(100, Math.round((profile.bandwidth_used_month / profile.bandwidth_limit) * 100))
+  const bandwidthPct = profile.bandwidth_limit > 0
+    ? Math.min(100, Math.round((profile.bandwidth_used_month / profile.bandwidth_limit) * 100))
+    : 0
   const desktopAvailable = desktop?.available ?? false
   const desktopUpdateAvailable = !!(latestDesktopVersion && desktop?.version && latestDesktopVersion !== desktop.version)
+  const extUpdateAvailable = extInstalled && latestExtVersion && extVersion && latestExtVersion !== extVersion
+  // Show ext banner only when: not installed, OR installed but update available
+  // Never show when installed and up-to-date
+  const showExtBanner = !extInstalled || !!extUpdateAvailable
 
   return (
     <main style={{ maxWidth: '680px', margin: '0 auto', width: '100%', padding: '24px 20px' }}>
+
+      {/* Offline banner */}
+      {!isOnline && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', background: 'rgba(255,170,0,0.08)', border: '1px solid rgba(255,170,0,0.4)', borderRadius: '10px', padding: '10px 14px', marginBottom: '16px' }}>
+          <span style={{ fontSize: '16px' }}>⚠️</span>
+          <span style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '11px', color: '#ffaa00', letterSpacing: '0.5px' }}>NO INTERNET CONNECTION — features unavailable until reconnected</span>
+        </div>
+      )}
 
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '28px' }}>
@@ -259,8 +347,8 @@ export default function Dashboard() {
         </a>
       )}
 
-      {/* Desktop required banner */}
-      {desktopChecked && !desktopAvailable && (
+      {/* Desktop required banner — only show when not sharing and desktop not detected */}
+      {desktopChecked && !desktopAvailable && !isSharing && (
         <a
           href="/api/desktop-download"
           download
@@ -277,23 +365,25 @@ export default function Dashboard() {
         </a>
       )}
 
-      {/* Extension banner */}
-      {!selectedCountry && (
+      {/* Extension banner — only show when not installed OR update available; hide when installed+current */}
+      {showExtBanner && (
         <a
           href="/extension"
-          style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', background: 'var(--surface)', border: '1px solid var(--accent)', borderRadius: '12px', padding: '12px 16px', marginBottom: '16px', textDecoration: 'none' }}
+          style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', background: 'var(--surface)', border: `1px solid ${extUpdateAvailable ? 'rgba(255,200,0,0.5)' : 'var(--accent)'}`, borderRadius: '12px', padding: '12px 16px', marginBottom: '16px', textDecoration: 'none' }}
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
             <span style={{ fontSize: '18px' }}>🧩</span>
             <div>
-              <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--accent)', letterSpacing: '0.5px', marginBottom: '2px' }}>
-                {latestExtVersion ? `CHROME EXTENSION — v${latestExtVersion} AVAILABLE` : 'CHROME EXTENSION — RECOMMENDED'}
+              <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: extUpdateAvailable ? '#ffc800' : 'var(--accent)', letterSpacing: '0.5px', marginBottom: '2px' }}>
+                {extUpdateAvailable ? `UPDATE AVAILABLE — v${latestExtVersion}` : 'CHROME EXTENSION — RECOMMENDED'}
               </div>
-              <div style={{ fontSize: '12px', color: 'var(--muted)' }}>Routes your entire browser — YouTube, Google, Netflix all work</div>
+              <div style={{ fontSize: '12px', color: 'var(--muted)' }}>
+                {extUpdateAvailable ? `You have v${extVersion}. Update for latest features.` : 'Routes your entire browser — YouTube, Google, Netflix all work'}
+              </div>
             </div>
           </div>
-          <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '11px', color: 'var(--accent)', whiteSpace: 'nowrap', flexShrink: 0 }}>
-            {latestExtVersion ? '↑ UPDATE →' : 'GET IT →'}
+          <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '11px', color: extUpdateAvailable ? '#ffc800' : 'var(--accent)', whiteSpace: 'nowrap', flexShrink: 0 }}>
+            {extUpdateAvailable ? '↑ UPDATE →' : 'INSTALL →'}
           </div>
         </a>
       )}
@@ -335,7 +425,7 @@ export default function Dashboard() {
             return (
               <button
                 key={c.code}
-                onClick={() => setSelectedCountry(selected ? null : c.code)}
+                onClick={() => { setSelectedCountry(selected ? null : c.code); setConnectError(null) }}
                 style={{ background: selected ? 'var(--accent-dim)' : 'var(--bg)', border: `1px solid ${selected ? 'var(--accent)' : 'var(--border)'}`, borderRadius: '8px', padding: '10px 6px', cursor: 'pointer', textAlign: 'center', transition: 'all 0.15s' }}
               >
                 <div style={{ fontSize: '20px', marginBottom: '3px' }}>{c.flag}</div>
@@ -346,6 +436,14 @@ export default function Dashboard() {
           })}
         </div>
       </div>
+
+      {/* Connect error */}
+      {connectError && (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px', background: 'rgba(255,80,80,0.07)', border: '1px solid rgba(255,80,80,0.3)', borderRadius: '10px', padding: '10px 14px', marginBottom: '12px' }}>
+          <span style={{ fontSize: '12px', color: '#ff9090' }}>{connectError}</span>
+          <button onClick={dismissErrors} style={{ background: 'none', border: 'none', color: 'var(--muted)', cursor: 'pointer', fontSize: '14px', lineHeight: 1, padding: '0 2px' }}>✕</button>
+        </div>
+      )}
 
       {/* Connect buttons */}
       {selectedCountry && (
@@ -367,14 +465,15 @@ export default function Dashboard() {
 
           <button
             onClick={handleConnect}
-            disabled={connecting}
+            disabled={connecting || (!profile.is_premium && !isSharing)}
+            title={!profile.is_premium && !isSharing ? 'Enable sharing or upgrade to connect' : undefined}
             style={{
               display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '6px',
               padding: '14px 10px', background: 'var(--surface)',
-              color: connecting ? 'var(--muted)' : 'var(--text)',
+              color: (connecting || (!profile.is_premium && !isSharing)) ? 'var(--muted)' : 'var(--text)',
               border: '1px solid rgba(0,255,136,0.4)',
-              borderRadius: '10px', cursor: connecting ? 'not-allowed' : 'pointer',
-              textAlign: 'center', transition: 'all 0.2s',
+              borderRadius: '10px', cursor: (connecting || (!profile.is_premium && !isSharing)) ? 'not-allowed' : 'pointer',
+              textAlign: 'center', transition: 'all 0.2s', opacity: (!profile.is_premium && !isSharing) ? 0.5 : 1,
             }}
           >
             <span style={{ fontSize: '18px' }}>🌐</span>
@@ -396,28 +495,44 @@ export default function Dashboard() {
                 ? `${sharingStats.requestsHandled} requests · ${formatBytes(sharingStats.bytesServed)} served`
                 : desktopAvailable
                   ? 'Desktop helper ready — toggle to start sharing'
-                  : 'Desktop helper required for full-browser sharing'}
+                  : 'Install the desktop helper to share your connection'}
             </div>
           </div>
           <button
             onClick={handleShareToggle}
-            style={{ width: '44px', height: '24px', borderRadius: '12px', border: 'none', background: isSharing ? 'var(--accent)' : 'var(--border)', cursor: 'pointer', position: 'relative', transition: 'background 0.2s', flexShrink: 0 }}
+            disabled={shareToggling}
+            style={{ width: '44px', height: '24px', borderRadius: '12px', border: 'none', background: isSharing ? 'var(--accent)' : shareToggling ? 'var(--border)' : 'var(--border)', cursor: shareToggling ? 'not-allowed' : 'pointer', position: 'relative', transition: 'background 0.2s', flexShrink: 0, opacity: shareToggling ? 0.6 : 1 }}
           >
-            <div style={{ position: 'absolute', width: '18px', height: '18px', borderRadius: '50%', background: 'white', top: '3px', left: isSharing ? '23px' : '3px', transition: 'left 0.2s' }} />
+            {shareToggling
+              ? <span style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><span style={{ width: '10px', height: '10px', border: '2px solid rgba(255,255,255,0.3)', borderTopColor: 'white', borderRadius: '50%', animation: 'spin 0.7s linear infinite', display: 'inline-block' }} /></span>
+              : <div style={{ position: 'absolute', width: '18px', height: '18px', borderRadius: '50%', background: 'white', top: '3px', left: isSharing ? '23px' : '3px', transition: 'left 0.2s' }} />
+            }
           </button>
         </div>
-        {shareError === 'desktop_required' && (
-          <div style={{ marginTop: '10px', fontSize: '11px', color: '#ff6060', fontFamily: 'var(--font-geist-mono)' }}>
-            Desktop helper not running.{' '}
-            <a href="/api/desktop-download" download style={{ color: 'var(--accent)', textDecoration: 'underline' }}>Download & install</a>
-            {' '}then reopen this page.
+        {shareError && (
+          <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '8px', marginTop: '10px', padding: '8px 10px', background: 'rgba(255,80,80,0.07)', border: '1px solid rgba(255,80,80,0.2)', borderRadius: '7px' }}>
+            <div style={{ fontSize: '11px', color: '#ff6060', fontFamily: 'var(--font-geist-mono)', lineHeight: 1.5 }}>
+              {shareError === 'desktop_required' ? (
+                <>Desktop helper not running.{' '}<a href="/api/desktop-download" download style={{ color: 'var(--accent)', textDecoration: 'underline' }}>Download & install</a>{' '}then reopen this page.</>
+              ) : shareError}
+            </div>
+            <button onClick={() => setShareError(null)} style={{ background: 'none', border: 'none', color: 'var(--muted)', cursor: 'pointer', fontSize: '13px', lineHeight: 1, padding: '0', flexShrink: 0 }}>✕</button>
           </div>
         )}
       </div>
 
+      {/* Free tier must-share enforcement */}
+      {!profile.is_premium && !isSharing && selectedCountry && (
+        <div style={{ background: 'rgba(255,80,80,0.07)', border: '1px solid rgba(255,80,80,0.3)', borderRadius: '10px', padding: '12px 16px', marginBottom: '16px', fontSize: '12px', color: '#ff9090' }}>
+          <span style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', letterSpacing: '0.5px' }}>FREE TIER — </span>
+          Enable sharing above to connect, or{' '}
+          <a href="/verify/payment" style={{ color: 'var(--accent)', textDecoration: 'underline' }}>upgrade to premium</a> to browse without sharing.
+        </div>
+      )}
+
       {/* Tier / upgrade */}
       {!profile.is_premium && (
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 16px', background: 'var(--accent-dim)', border: '1px solid rgba(0,255,136,0.2)', borderRadius: '10px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 16px', background: 'var(--accent-dim)', border: '1px solid rgba(0,255,136,0.2)', borderRadius: '10px', marginBottom: '12px' }}>
           <div>
             <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '11px', color: 'var(--accent)', letterSpacing: '0.5px', marginBottom: '2px' }}>FREE TIER</div>
             <div style={{ fontSize: '12px', color: 'var(--muted)' }}>Upgrade to browse without sharing your IP</div>
@@ -425,6 +540,39 @@ export default function Dashboard() {
           <a href="/upgrade" style={{ padding: '8px 14px', background: 'var(--accent)', color: '#000', borderRadius: '7px', fontSize: '11px', fontFamily: 'var(--font-geist-mono)', fontWeight: 700, textDecoration: 'none', letterSpacing: '0.5px', whiteSpace: 'nowrap' }}>
             UPGRADE $7
           </a>
+        </div>
+      )}
+
+      {/* Premium — reserve a peer */}
+      {profile.is_premium && selectedCountry && (
+        <div style={{ padding: '14px 16px', background: 'var(--surface)', border: '1px solid rgba(0,255,136,0.2)', borderRadius: '10px', marginBottom: '12px' }}>
+          <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--accent)', letterSpacing: '0.5px', marginBottom: '6px' }}>PREMIUM — PEER RESERVATION</div>
+          {(profile.preferred_providers as Record<string, string>)?.[selectedCountry] ? (
+            <>
+              <div style={{ fontSize: '12px', color: 'var(--muted)', marginBottom: '10px' }}>
+                Reserved peer for <strong style={{ color: 'var(--text)' }}>{selectedCountry}</strong> — they will be matched first on every connection.
+              </div>
+              <button
+                onClick={async () => {
+                  const { data: { user } } = await supabase.auth.getUser()
+                  if (!user) return
+                  await supabase.from('profiles').update({
+                    preferred_providers: { ...(profile.preferred_providers as Record<string, string>), [selectedCountry]: undefined }
+                  }).eq('id', user.id)
+                  const { data } = await supabase.from('profiles').select('preferred_providers').eq('id', profile.id).single()
+                  if (data) setProfile(p => p ? { ...p, preferred_providers: data.preferred_providers } : p)
+                }}
+                style={{ padding: '7px 14px', background: 'none', border: '1px solid var(--border)', color: 'var(--muted)', borderRadius: '7px', fontFamily: 'var(--font-geist-mono)', fontSize: '10px', cursor: 'pointer' }}
+              >
+                CLEAR RESERVATION
+              </button>
+            </>
+          ) : (
+            <div style={{ fontSize: '12px', color: 'var(--muted)', lineHeight: 1.6 }}>
+              No reserved peer for <strong style={{ color: 'var(--text)' }}>{selectedCountry}</strong> yet.<br />
+              <span style={{ fontSize: '11px' }}>Connect to a peer and they will be auto-reserved so you always get the same IP.</span>
+            </div>
+          )}
         </div>
       )}
     </main>

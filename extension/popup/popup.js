@@ -21,6 +21,7 @@ let state = {
   user: null,
   session: null,
   isSharing: false,
+  shareToggling: false,
   helper: null,
   selectedCountry: null,
   peerCounts: {},
@@ -28,7 +29,11 @@ let state = {
   error: null,
   extId: null,
   supabaseToken: null,
+  isOnline: navigator.onLine,
 }
+
+window.addEventListener('online', () => { state.isOnline = true; render() })
+window.addEventListener('offline', () => { state.isOnline = false; render() })
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 
@@ -110,7 +115,7 @@ function startPeerPolling() {
     }, 3000)
   }
 
-  // Poll fresh profile stats from DB every 30s
+  // Poll fresh profile stats from DB every 10s (matches dashboard refresh rate)
   setInterval(async () => {
     if (!state.user || !state.supabaseToken) return
     try {
@@ -135,7 +140,7 @@ function startPeerPolling() {
         if (lbl === 'TRUST') val.textContent = String(state.user.trustScore || 50)
       })
     } catch {}
-  }, 30000)
+  }, 10000)
 }
 
 function startAuthPolling() {
@@ -179,6 +184,9 @@ function render() {
 }
 
 function renderAuth(app) {
+  const offlineBanner = !state.isOnline
+    ? `<div style="display:flex;align-items:center;gap:8px;background:rgba(255,170,0,0.08);border:1px solid rgba(255,170,0,0.35);border-radius:8px;padding:8px 12px;margin-bottom:12px;font-family:'Courier New',monospace;font-size:10px;color:#ffaa00">⚠ NO INTERNET — sign-in unavailable</div>`
+    : ''
   app.innerHTML = `
     <div class="header">
       <span class="logo">PEERMESH</span>
@@ -186,11 +194,12 @@ function renderAuth(app) {
     <div class="auth-screen">
       <h2>Welcome</h2>
       <p>Sign in to start browsing.</p>
+      ${offlineBanner}
       <div style="margin:20px 0;display:flex;align-items:center;justify-content:center;gap:8px;color:#666680;font-size:11px;font-family:'Courier New',monospace">
         <span style="display:inline-block;width:8px;height:8px;border:2px solid #1e1e2a;border-top-color:#00ff88;border-radius:50%;animation:spin 0.8s linear infinite"></span>
         WAITING FOR SIGN IN...
       </div>
-      <button class="btn-primary" id="openDashboard" style="margin-top:4px">SIGN IN</button>
+      <button class="btn-primary" id="openDashboard" style="margin-top:4px" ${!state.isOnline ? 'disabled' : ''}>SIGN IN</button>
       <style>@keyframes spin{to{transform:rotate(360deg)}}</style>
     </div>`
 
@@ -206,6 +215,16 @@ function renderDashboard(app) {
     ? (isSharing ? 'Desktop helper active — full-browser sharing enabled.' : 'Desktop helper detected — ready to share.')
     : 'Desktop helper required for full-browser sharing.'
 
+  const offlineBanner = !state.isOnline
+    ? `<div style="display:flex;align-items:center;gap:8px;background:rgba(255,170,0,0.08);border:1px solid rgba(255,170,0,0.35);border-radius:8px;padding:8px 12px;margin:0 16px 8px;font-family:'Courier New',monospace;font-size:10px;color:#ffaa00">⚠ NO INTERNET — features unavailable</div>`
+    : ''
+  const errorBanner = state.error
+    ? `<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:6px;background:rgba(255,68,102,0.08);border:1px solid rgba(255,68,102,0.25);border-radius:8px;padding:8px 12px;margin:0 16px 8px;font-size:11px;color:#ff6060;line-height:1.5">
+        <span>${state.error}</span>
+        <button id="dismissErrorBtn" style="background:none;border:none;color:#666680;cursor:pointer;font-size:13px;line-height:1;padding:0;flex-shrink:0">✕</button>
+       </div>`
+    : ''
+
   app.innerHTML = `
     <div class="header">
       <span class="logo">PEERMESH</span>
@@ -214,6 +233,8 @@ function renderDashboard(app) {
         ${session ? `VIA ${session.country}` : 'DISCONNECTED'}
       </div>
     </div>
+    ${offlineBanner}
+    ${errorBanner}
 
     ${session ? `
     <div class="section">
@@ -240,10 +261,14 @@ function renderDashboard(app) {
       </div>
     </div>
     <div class="section">
-      <button class="connect-btn" id="connectBtn" ${!selectedCountry ? 'disabled' : ''}>
-        ${selectedCountry ? `CONNECT ${getFlagForCountry(selectedCountry)} ${selectedCountry}` : 'SELECT A COUNTRY'}
+      <button class="connect-btn" id="connectBtn" ${!selectedCountry || !state.isOnline ? 'disabled' : ''}>
+        ${!state.isOnline ? 'NO INTERNET' : selectedCountry ? `CONNECT ${getFlagForCountry(selectedCountry)} ${selectedCountry}` : 'SELECT A COUNTRY'}
       </button>
-      ${state.error ? `<div class="error-msg">${state.error} <button id="retryBtn" style="background:none;border:none;color:#00ff88;font-family:'Courier New',monospace;font-size:11px;cursor:pointer;text-decoration:underline">RETRY</button></div>` : ''}
+      ${state.error && !state.session ? `
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:6px;margin-top:8px;padding:8px 10px;background:rgba(255,68,102,0.08);border:1px solid rgba(255,68,102,0.25);border-radius:8px;font-size:11px;color:#ff6060;line-height:1.5">
+          <span>${state.error}</span>
+          <button id="retryConnectBtn" style="background:none;border:none;color:#00ff88;font-family:'Courier New',monospace;font-size:10px;cursor:pointer;white-space:nowrap;padding:0;flex-shrink:0">RETRY</button>
+        </div>` : ''}
     </div>
     `}
 
@@ -251,10 +276,10 @@ function renderDashboard(app) {
       <div class="share-row">
         <div class="share-info">
           <h4>Share my connection</h4>
-          <p>${isSharing ? 'Sharing active — earning credits' : 'Help others browse. Stay free.'}</p>
+          <p>${isSharing ? 'Sharing active — earning credits' : helperLabel}</p>
         </div>
         <label class="toggle">
-          <input type="checkbox" id="shareToggle" ${isSharing ? 'checked' : ''}>
+          <input type="checkbox" id="shareToggle" ${isSharing ? 'checked' : ''} ${!helperReady || !state.isOnline || state.shareToggling ? 'disabled style="opacity:0.4;cursor:not-allowed"' : ''}>
           <span class="toggle-slider"></span>
         </label>
       </div>
@@ -262,7 +287,7 @@ function renderDashboard(app) {
 
     <div class="stats">
       <div class="stat">
-        <span class="val">${formatBytes(user.totalShared || 0)}</span>
+        <span class="val">${isSharing && state.helper?.stats?.bytesServed > 0 ? formatBytes(state.helper.stats.bytesServed) : formatBytes(user.totalShared || 0)}</span>
         <span class="lbl">SHARED</span>
       </div>
       <div class="stat">
@@ -280,14 +305,11 @@ function renderDashboard(app) {
       <button id="signOutBtn" style="background:none;border:none;color:var(--muted);font-size:10px;cursor:pointer;font-family:'Courier New',monospace">SIGN OUT</button>
     </div>`
 
-  const shareInfo = app.querySelector('.share-info p')
-  if (shareInfo) shareInfo.textContent = helperLabel
-
   if (!helperReady) {
-    const shareSection = shareInfo?.closest('.section')
+    const shareSection = app.querySelector('.share-info')?.closest('.section')
     if (shareSection) {
       const helperNotice = document.createElement('div')
-      helperNotice.className = 'error-msg'
+      helperNotice.style.cssText = 'font-size:11px;color:#ff6060;padding:6px 0 2px'
       helperNotice.innerHTML = 'Desktop helper not installed. <a id="installHelperBtn" href="#" style="color:#00ff88;font-family:\'Courier New\',monospace;font-size:11px;text-decoration:underline">DOWNLOAD & INSTALL</a>'
       shareSection.appendChild(helperNotice)
     }
@@ -295,6 +317,8 @@ function renderDashboard(app) {
     if (toggle) { toggle.disabled = true; toggle.style.opacity = '0.4'; toggle.style.cursor = 'not-allowed' }
   }
 
+  document.getElementById('dismissErrorBtn')?.addEventListener('click', () => { state.error = null; render() })
+  document.getElementById('retryConnectBtn')?.addEventListener('click', () => { state.error = null; connectSession() })
   document.querySelectorAll('.country-btn').forEach(btn => {
     btn.onclick = () => {
       state.selectedCountry = btn.dataset.code
@@ -305,7 +329,6 @@ function renderDashboard(app) {
   })
 
   document.getElementById('connectBtn')?.addEventListener('click', connectSession)
-  document.getElementById('retryBtn')?.addEventListener('click', () => { state.error = null; render(); connectSession() })
   document.getElementById('disconnectBtn')?.addEventListener('click', disconnectSession)
   document.getElementById('shareToggle')?.addEventListener('change', e => toggleSharing(e.target.checked))
   document.getElementById('signOutBtn')?.addEventListener('click', signOut)
@@ -320,9 +343,14 @@ function renderDashboard(app) {
 async function connectSession() {
   if (!state.selectedCountry || !state.user) return
 
+  if (!state.isOnline) {
+    state.error = 'No internet connection — check your network and try again'
+    render()
+    return
+  }
+
   const btn = document.getElementById('connectBtn')
-  btn.disabled = true
-  btn.textContent = 'CONNECTING...'
+  if (btn) { btn.disabled = true; btn.textContent = 'CONNECTING...' }
   state.error = null
 
   try {
@@ -336,7 +364,7 @@ async function connectSession() {
     })
 
     const data = await res.json()
-    if (data.error) throw new Error(data.error)
+    if (!res.ok || data.error) throw new Error(data.error ?? `Server error (${res.status})`)
 
     const response = await chrome.runtime.sendMessage({
       type: 'CONNECT',
@@ -350,16 +378,12 @@ async function connectSession() {
 
     if (!response?.success) throw new Error(response?.error || 'Connection failed')
 
-    state.session = {
-      id: data.sessionId,
-      country: state.selectedCountry,
-      relayEndpoint: data.relayEndpoint,
-    }
+    state.session = { id: data.sessionId, country: state.selectedCountry, relayEndpoint: data.relayEndpoint }
     await chrome.storage.local.set({ session: state.session })
     render()
 
   } catch (err) {
-    state.error = err.message
+    state.error = err.message === 'Failed to fetch' ? 'Network error — could not reach server' : err.message
     render()
   }
 }
@@ -385,11 +409,27 @@ async function disconnectSession() {
 }
 
 async function toggleSharing(on) {
+  if (state.shareToggling) return
+  state.shareToggling = true
+  render()
+
+  if (on && !state.isOnline) {
+    state.error = 'No internet connection — sharing requires an active network'
+    state.shareToggling = false
+    render()
+    return
+  }
+
   if (on && !state.helper?.available) {
     await refreshRuntimeStatus()
     if (!state.helper?.available) {
-      state.error = `Desktop helper required. <a href="${API}/api/desktop-download" style="color:#00ff88">Download & install</a> then reopen.`
+      state.error = 'Desktop helper required — <a href="#" id="dlHelperLink" style="color:#00ff88">download & install</a> then reopen'
+      state.shareToggling = false
       render()
+      document.getElementById('dlHelperLink')?.addEventListener('click', e => {
+        e.preventDefault()
+        chrome.tabs.create({ url: `${API}/api/desktop-download` })
+      })
       return
     }
   }
@@ -411,13 +451,17 @@ async function toggleSharing(on) {
   if (!response?.success) {
     state.isSharing = previous
     state.helper = response?.helper || state.helper
-    state.error = response?.error || 'Desktop helper is required'
+    state.shareToggling = false
+    state.error = response?.error === 'Failed to fetch'
+      ? 'Network error — could not reach desktop helper'
+      : (response?.error || 'Desktop helper is required')
     render()
     return
   }
 
   state.error = null
   state.isSharing = on
+  state.shareToggling = false
   state.helper = response.helper || state.helper
   await chrome.storage.local.set({ isSharing: on, helper: state.helper })
 
@@ -510,6 +554,7 @@ chrome.runtime.onMessage.addListener((msg) => {
   // Provider dropped and relay gave up finding a replacement
   if (msg.type === 'SESSION_ENDED') {
     state.session = null
+    state.error = 'Connection lost — your peer disconnected. Select a country to reconnect.'
     chrome.storage.local.set({ session: null })
     render()
   }
