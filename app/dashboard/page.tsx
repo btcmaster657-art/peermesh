@@ -375,7 +375,7 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Desktop update banner */}
+      {/* Desktop update banner — only when desktop helper is running */}
       {desktopChecked && desktopAvailable && !isCLI && desktopUpdateAvailable && (
         <a
           href="/api/desktop-download"
@@ -390,6 +390,24 @@ export default function Dashboard() {
             </div>
           </div>
           <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '11px', color: 'var(--accent)', whiteSpace: 'nowrap', flexShrink: 0 }}>↓ UPDATE</div>
+        </a>
+      )}
+
+      {/* Desktop install nudge — shown when CLI is active but desktop is not installed */}
+      {desktopChecked && isCLI && latestDesktopVersion && (
+        <a
+          href="/api/desktop-download"
+          download
+          style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '12px', padding: '12px 16px', marginBottom: '16px', textDecoration: 'none' }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <span style={{ fontSize: '18px' }}>🖥️</span>
+            <div>
+              <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--muted)', letterSpacing: '0.5px', marginBottom: '2px' }}>DESKTOP APP — v{latestDesktopVersion}</div>
+              <div style={{ fontSize: '12px', color: 'var(--muted)' }}>Optional GUI with tray icon — runs in the background automatically</div>
+            </div>
+          </div>
+          <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '11px', color: 'var(--muted)', whiteSpace: 'nowrap', flexShrink: 0 }}>↓ INSTALL</div>
         </a>
       )}
 

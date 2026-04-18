@@ -130,13 +130,17 @@ export default function ExtensionPageClient() {
   useEffect(() => {
     if (isActivate) return
 
-    // Always check auth first — show spinner until resolved
-    fetch('/api/extension-auth', { method: 'GET' })
-      .then(r => { setIsLoggedIn(r.ok); setAuthChecked(true) })
-      .catch(() => { setIsLoggedIn(false); setAuthChecked(true) })
-
     if (window.location.hash === '#share') {
       document.title = 'PeerMesh — Install to Share'
+    }
+
+    // If ext_id present, check auth so we can auto sign-in to the extension
+    if (urlExtId) {
+      fetch('/api/extension-auth', { method: 'GET' })
+        .then(r => { setIsLoggedIn(r.ok); setAuthChecked(true) })
+        .catch(() => { setIsLoggedIn(false); setAuthChecked(true) })
+    } else {
+      setAuthChecked(true)
     }
 
     // Detect extension presence
@@ -233,8 +237,8 @@ export default function ExtensionPageClient() {
     marginBottom: '16px',
   }
 
-  // ── Auth gate — show spinner while checking, not the page content ────────────
-  if (!isActivate && !authChecked) {
+  // ── Auth gate — only block when ext_id is present and auth hasn't resolved ──
+  if (!isActivate && urlExtId && !authChecked) {
     return (
       <main className="flex flex-1 items-center justify-center">
         <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
@@ -246,9 +250,9 @@ export default function ExtensionPageClient() {
     )
   }
 
-  if (!isActivate && authChecked && !isLoggedIn) {
+  if (!isActivate && urlExtId && authChecked && !isLoggedIn) {
     if (typeof window !== 'undefined') {
-      window.location.href = `/auth?mode=login&source=extension${urlExtId ? `&ext_id=${urlExtId}` : ''}`
+      window.location.href = `/auth?mode=login&source=extension&ext_id=${urlExtId}`
     }
     return (
       <main className="flex flex-1 items-center justify-center">
