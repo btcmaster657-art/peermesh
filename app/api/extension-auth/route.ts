@@ -11,8 +11,6 @@ const CORS = {
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? 'https://peermesh-beta.vercel.app'
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
 function generateDeviceCode(): string {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
   return Array.from({ length: 32 }, () => chars[Math.floor(Math.random() * chars.length)]).join('')
@@ -95,7 +93,6 @@ export async function PATCH(req: Request) {
     return NextResponse.json({ error: 'Invalid request' }, { status: 400, headers: CORS })
   }
 
-  // Normalize: accept both "XXXXyyyy" and "XXXX-YYYY"
   const normalized = (user_code as string).toUpperCase().trim().replace(/[^A-Z0-9]/g, '')
   const formatted = normalized.length === 8 ? `${normalized.slice(0, 4)}-${normalized.slice(4)}` : normalized
 
@@ -115,7 +112,6 @@ export async function PATCH(req: Request) {
     return NextResponse.json({ ok: true }, { headers: CORS })
   }
 
-  // Approve — issue desktop token
   const token = issueDesktopToken(session.user.id)
   await adminClient.from('device_codes').update({
     status: 'approved',
@@ -170,7 +166,7 @@ export async function GET(req: Request) {
     if (row.status === 'approved' && row.token && row.user_id) {
       const { data: profile } = await adminClient
         .from('profiles')
-        .select('username, country_code, trust_score, is_verified')
+        .select('username, country_code, trust_score, is_verified, has_accepted_provider_terms')
         .eq('id', row.user_id)
         .single()
 
@@ -186,6 +182,7 @@ export async function GET(req: Request) {
           username: profile.username,
           country: profile.country_code,
           trustScore: profile.trust_score,
+          hasAcceptedProviderTerms: profile.has_accepted_provider_terms ?? false,
         },
       }, { headers: CORS })
     }
@@ -214,16 +211,13 @@ export async function GET(req: Request) {
 
   const { data: profile } = await adminClient
     .from('profiles')
-    .select('username, country_code, trust_score, is_verified, total_bytes_shared, total_bytes_used, is_sharing')
+    .select('username, country_code, trust_score, is_verified, total_bytes_shared, total_bytes_used, is_sharing, has_accepted_provider_terms')
     .eq('id', row.user_id)
     .single()
 
   if (!profile?.is_verified) {
     return NextResponse.json({ error: 'Account not verified' }, { status: 403, headers: CORS })
   }
-
-  // Don't mark as used — allow re-auth if popup is reopened
-  // await adminClient.from('extension_auth_tokens').update({ used: true }).eq('ext_id', ext_id)
 
   return NextResponse.json({
     user: {
@@ -236,6 +230,7 @@ export async function GET(req: Request) {
       totalShared: profile.total_bytes_shared,
       totalUsed: profile.total_bytes_used,
       isSharing: profile.is_sharing,
+      hasAcceptedProviderTerms: profile.has_accepted_provider_terms ?? false,
     },
   }, { headers: CORS })
 }

@@ -31,7 +31,7 @@ export async function GET(req: Request) {
 
   const { data, error } = await adminClient
     .from('profiles')
-    .select('total_bytes_shared, total_bytes_used, bandwidth_used_month, bandwidth_limit, trust_score, is_sharing, daily_share_limit_mb')
+    .select('total_bytes_shared, total_bytes_used, bandwidth_used_month, bandwidth_limit, trust_score, is_sharing, daily_share_limit_mb, has_accepted_provider_terms')
     .eq('id', userId)
     .single()
 
@@ -48,6 +48,14 @@ export async function POST(req: Request) {
     const userId = await resolveUserId(req)
     if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     await adminClient.rpc('increment_bytes_shared', { p_user_id: userId, p_bytes: body.bytes })
+    return NextResponse.json({ ok: true })
+  }
+
+  // Accept provider terms — works for all clients (Bearer token or cookie)
+  if (body.acceptProviderTerms === true) {
+    const userId = await resolveUserId(req)
+    if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    await adminClient.from('profiles').update({ has_accepted_provider_terms: true }).eq('id', userId)
     return NextResponse.json({ ok: true })
   }
 

@@ -117,6 +117,7 @@
       flex-shrink: 0;
     }
     .toggle.on { background: var(--accent); }
+    .toggle.on::after { left: 23px; }
     .toggle::after {
       content: '';
       position: absolute;
@@ -125,6 +126,7 @@
       border-radius: 50%;
       top: 3px; left: 3px;
       transition: left 0.2s;
+      z-index: 1;
     }
     .toggle.loading { background: var(--border); cursor: not-allowed; }
     .toggle.loading::after { display: none; }

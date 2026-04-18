@@ -28,7 +28,7 @@ const API_BASE    = 'https://peermesh-beta.vercel.app'
 const RELAY_WS    = 'wss://peermesh-relay.fly.dev'
 const CONFIG_DIR  = join(homedir(), '.peermesh')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
-const VERSION     = '1.0.7'
+const VERSION     = '1.0.10'
 
 const BLOCKED = [/\.onion$/i, /^smtp\./i, /^mail\./i, /torrent/i]
 const PRIVATE = [/^localhost$/i, /^127\./, /^10\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./]
@@ -669,6 +669,53 @@ async function main() {
   console.log(`  Daily limit: ${limitMb ? `${limitMb}MB` : 'none (set with --limit <MB>)'}`)
   if (config.todaySharedBytes > 0) console.log(`  Used today:  ${formatBytes(config.todaySharedBytes)}`)
   console.log('')
+
+  // ── Before-sharing confirmation ─────────────────────────────────────────
+  if (!serveFlag) {
+    // Check DB for accepted terms — skip prompt if already accepted
+    const alreadyAccepted = profile?.has_accepted_provider_terms === true
+    if (!alreadyAccepted) {
+      console.log('')
+      console.log('  ┌─────────────────────────────────────────┐')
+      console.log('  │  BEFORE YOU SHARE                       │')
+      console.log('  │                                         │')
+      console.log('  │  🌐 Your IP will be used by other users │')
+      console.log('  │  🔒 All sessions are logged             │')
+      console.log('  │  🚫 Blocked: .onion, SMTP, torrents     │')
+      console.log('  │  ⚡ You can stop at any time (Ctrl+C)   │')
+      console.log('  │  💸 Sharing earns you free credits      │')
+      console.log('  │                                         │')
+      console.log('  └─────────────────────────────────────────┘')
+      console.log('')
+
+      const confirmed = await new Promise(resolve => {
+        process.stdout.write('  Start sharing? [Y/n]: ')
+        process.stdin.setEncoding('utf8')
+        process.stdin.resume()
+        process.stdin.once('data', data => {
+          process.stdin.pause()
+          const answer = data.toString().trim().toLowerCase()
+          resolve(answer === '' || answer === 'y')
+        })
+      })
+
+      if (!confirmed) {
+        console.log('')
+        console.log('  Cancelled.')
+        console.log('')
+        process.exit(0)
+      }
+      console.log('')
+      // Save acceptance to DB
+      try {
+        await fetch(`${API_BASE}/api/user/sharing`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
+          body: JSON.stringify({ acceptProviderTerms: true }),
+        })
+      } catch {}
+    }
+  }
 
   // ── Start control server so dashboard/extension can detect CLI ─────────────
   _controlLimitBytes = limitBytes

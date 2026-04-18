@@ -377,9 +377,11 @@ document.getElementById('btn-dashboard').addEventListener('click', async () => {
 
 document.getElementById('btn-signout').addEventListener('click', async () => {
   stopDevicePoll()
+  deviceFlowActive = false
   resetAuthUI()
   await window.peermesh.signOut()
   await pollState()
+  startDeviceFlow()
 })
 
 // On load: apply network state then auto-start device flow if not signed in

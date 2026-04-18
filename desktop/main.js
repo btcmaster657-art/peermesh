@@ -870,6 +870,12 @@ const controlServer = http.createServer((req, res) => {
     })
     return
   }
+  if (req.method === 'POST' && url.pathname === '/quit') {
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ ok: true }))
+    setTimeout(() => app.quit(), 500)
+    return
+  }
   if (req.method === 'POST' && url.pathname === '/stop') {
     stopRelay()
     res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -1053,6 +1059,7 @@ ipcMain.handle('open-auth', async (_, url) => {
 
 ipcMain.handle('get-state', () => ({
   ...getPublicState(),
+  config: { ...getPublicState().config, hasAcceptedProviderTerms: config.hasAcceptedProviderTerms ?? false },
 }))
 
 ipcMain.handle('sign-in', async (_, { token, userId, country, trust }) => {
@@ -1071,9 +1078,19 @@ ipcMain.handle('sign-in', async (_, { token, userId, country, trust }) => {
   } catch (e) {
     log('sign-in verify error (offline?):', e.message)
   }
-  config = { ...config, token, userId, country, trust, shareEnabled: true }
+  config = { ...config, token, userId, country, trust }
+  // Fetch hasAcceptedProviderTerms from DB once on sign-in
+  try {
+    const res = await fetch(`${API_BASE}/api/user/sharing`, {
+      headers: { 'Authorization': `Bearer ${token}` },
+      signal: AbortSignal.timeout(4000),
+    })
+    if (res.ok) {
+      const data = await res.json()
+      config.hasAcceptedProviderTerms = data.has_accepted_provider_terms ?? false
+    }
+  } catch {}
   saveConfig()
-  connectRelay()
   updateTray()
   showWindow()
   log('sign-in success — userId:', userId)
@@ -1106,9 +1123,19 @@ ipcMain.handle('open-dashboard', () => {
   shell.openExternal(`${API_BASE}/dashboard`)
 })
 
-ipcMain.handle('accept-provider-terms', () => {
-  config.hasAcceptedProviderTerms = true
-  saveConfig()
+ipcMain.handle('accept-provider-terms', async () => {
+  if (!config.token) return { success: false }
+  try {
+    const res = await fetch(`${API_BASE}/api/user/sharing`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
+      body: JSON.stringify({ acceptProviderTerms: true }),
+    })
+    if (res.ok) {
+      config.hasAcceptedProviderTerms = true
+      saveConfig()
+    }
+  } catch {}
   return { success: true }
 })
 
@@ -1185,6 +1212,7 @@ app.on('before-quit', () => {
   try { localProxyServer.close() } catch {}
   // Synchronously mark sharing as stopped in DB before process exits
   if (config.token && config.userId && config.extId) {
+    fetch(`${API_BASE}/api/user/sharing`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
       body: JSON.stringify({ device_id: config.extId }),

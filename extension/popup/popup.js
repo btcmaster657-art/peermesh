@@ -58,7 +58,7 @@ async function handleExpiredSession() {
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 async function init() {
-  const stored = await chrome.storage.local.get(['user', 'session', 'isSharing', 'helper', 'selectedCountry', 'extId', 'supabaseToken', 'hasAcceptedProviderTerms'])
+  const stored = await chrome.storage.local.get(['user', 'session', 'isSharing', 'helper', 'selectedCountry', 'extId', 'supabaseToken'])
 
   if (!stored.extId) {
     stored.extId = crypto.randomUUID()
@@ -87,6 +87,16 @@ async function init() {
         return
       }
     } catch {} // offline — allow through with cached credentials
+    // Fetch hasAcceptedProviderTerms from DB
+    try {
+      const res = await fetch(`${API}/api/user/sharing`, {
+        headers: { 'Authorization': `Bearer ${state.supabaseToken || state.user.token}` },
+      })
+      if (res.ok) {
+        const data = await res.json()
+        state.hasAcceptedProviderTerms = data.has_accepted_provider_terms ?? false
+      }
+    } catch {}
     await refreshRuntimeStatus()
     startPeerPolling()
   }
@@ -166,6 +176,7 @@ function startPeerPolling() {
         trustScore: data.trust_score ?? state.user.trustScore,
         dailyLimitMb: data.daily_share_limit_mb ?? state.user.dailyLimitMb ?? null,
       }
+      if (data.has_accepted_provider_terms === true) state.hasAcceptedProviderTerms = true
       await chrome.storage.local.set({ user: state.user })
       document.querySelectorAll('.stat').forEach(el => {
         const lbl = el.querySelector('.lbl')?.textContent
@@ -180,7 +191,7 @@ function startPeerPolling() {
 }
 
 function startAuthPolling() {
-  if (authPollInterval) return
+  if (authPollInterval) { clearInterval(authPollInterval); authPollInterval = null }
   authPollInterval = setInterval(async () => {
     try {
       const res = await fetch(`${API}/api/extension-auth?ext_id=${state.extId}`)
@@ -191,6 +202,7 @@ function startAuthPolling() {
         authPollInterval = null
         state.user = data.user
         state.supabaseToken = data.user.supabaseToken ?? null
+        state.hasAcceptedProviderTerms = data.user.hasAcceptedProviderTerms ?? false
         state.loading = false
         await chrome.storage.local.set({ user: data.user, supabaseToken: state.supabaseToken, desktopToken: data.user.token })
         await refreshRuntimeStatus()
@@ -423,7 +435,13 @@ function renderDashboard(app) {
     document.getElementById('pm-disclose-accept').onclick = async () => {
       state.showDisclosure = false
       state.hasAcceptedProviderTerms = true
-      await chrome.storage.local.set({ hasAcceptedProviderTerms: true })
+      try {
+        await fetch(`${API}/api/user/sharing`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.supabaseToken || state.user?.token}` },
+          body: JSON.stringify({ acceptProviderTerms: true }),
+        })
+      } catch {}
       overlay.remove()
       toggleSharing(true)
     }
@@ -593,7 +611,10 @@ async function signOut() {
   state.isSharing = false
   state.helper = null
   await chrome.storage.local.clear()
+  // Preserve extId so auth polling can resume
+  await chrome.storage.local.set({ extId: state.extId })
   render()
+  startAuthPolling()
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

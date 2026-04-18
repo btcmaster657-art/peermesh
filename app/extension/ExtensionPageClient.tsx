@@ -115,8 +115,7 @@ export default function ExtensionPageClient() {
   const isActivate = searchParams.get('activate') === '1' || !!searchParams.get('code')
   const urlExtId = searchParams.get('ext_id') ?? ''
 
-  // Start as unchecked when ext_id is present so spinner shows immediately
-  const [authChecked, setAuthChecked] = useState(() => !urlExtId || isActivate)
+  const [authChecked, setAuthChecked] = useState(false)
   const [isLoggedIn, setIsLoggedIn] = useState(false)
   const [step, setStep] = useState<'idle' | 'downloading' | 'guide' | 'done'>('idle')
   const [desktopDownloading, setDesktopDownloading] = useState(false)
@@ -131,7 +130,7 @@ export default function ExtensionPageClient() {
   }
 
   useEffect(() => {
-    if (isActivate) return
+    if (isActivate) { setAuthChecked(true); return }
 
     if (window.location.hash === '#share') {
       document.title = 'PeerMesh — Install to Share'
@@ -162,6 +161,7 @@ export default function ExtensionPageClient() {
   // Only runs after authChecked so we never call it before knowing login state
   useEffect(() => {
     if (!urlExtId || isActivate || !authChecked || !isLoggedIn) return
+    setSending(true)
     sendAuthToExtension()
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [urlExtId, authChecked, isLoggedIn])
@@ -242,8 +242,9 @@ export default function ExtensionPageClient() {
     marginBottom: '16px',
   }
 
-  // ── Auth gate — show spinner immediately when ext_id is present ──
-  if (!isActivate && urlExtId && !authChecked) {
+  // Show spinner until auth check completes (prevents flash of page content before hydration)
+  // Also keep spinner while auto sign-in to extension is in progress
+  if (!authChecked || (urlExtId && !isActivate && sending)) {
     return (
       <main className="flex flex-1 items-center justify-center">
         <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
