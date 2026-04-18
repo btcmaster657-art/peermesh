@@ -78,11 +78,14 @@ function findProvider(country, requesterId, requestingUserId, {
     log('AFFINITY', `MISS preferred provider userId=${preferredUserId.slice(0,8)} offline/busy — falling back`)
   }
 
-  // Second pass — any eligible provider
+  // Second pass — any eligible provider, sorted by trust score descending
+  const eligible = []
   for (const [, peer] of peers) {
-    if (isEligible(peer)) return peer
+    if (isEligible(peer)) eligible.push(peer)
   }
-  return null
+  if (eligible.length === 0) return null
+  eligible.sort((a, b) => (b.trustScore ?? 50) - (a.trustScore ?? 50))
+  return eligible[0]
 }
 
 // ── Create a new relay session between an existing requester WS and a provider ─

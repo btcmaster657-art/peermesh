@@ -129,6 +129,7 @@ function startPeerPolling() {
         totalShared: data.total_bytes_shared ?? state.user.totalShared,
         totalUsed: data.total_bytes_used ?? state.user.totalUsed,
         trustScore: data.trust_score ?? state.user.trustScore,
+        dailyLimitMb: data.daily_share_limit_mb ?? state.user.dailyLimitMb ?? null,
       }
       await chrome.storage.local.set({ user: state.user })
       document.querySelectorAll('.stat').forEach(el => {
@@ -211,9 +212,10 @@ function renderAuth(app) {
 function renderDashboard(app) {
   const { session, isSharing, selectedCountry, user, helper } = state
   const helperReady = !!helper?.available
+  const helperSource = helper?.source === 'cli' ? 'CLI' : 'Desktop'
   const helperLabel = helperReady
-    ? (isSharing ? 'Desktop helper active — full-browser sharing enabled.' : 'Desktop helper detected — ready to share.')
-    : 'Desktop helper required for full-browser sharing.'
+    ? (isSharing ? `${helperSource} helper active — full-browser sharing enabled.` : `${helperSource} helper detected — ready to share.`)
+    : 'Desktop app or CLI required for full-browser sharing.'
 
   const offlineBanner = !state.isOnline
     ? `<div style="display:flex;align-items:center;gap:8px;background:rgba(255,170,0,0.08);border:1px solid rgba(255,170,0,0.35);border-radius:8px;padding:8px 12px;margin:0 16px 8px;font-family:'Courier New',monospace;font-size:10px;color:#ffaa00">⚠ NO INTERNET — features unavailable</div>`
@@ -277,6 +279,7 @@ function renderDashboard(app) {
         <div class="share-info">
           <h4>Share my connection</h4>
           <p>${isSharing ? 'Sharing active — earning credits' : helperLabel}</p>
+          ${state.user?.dailyLimitMb ? `<p style="font-size:10px;color:var(--muted);margin-top:2px">${formatBytes((state.user.dailyLimitMb ?? 0) * 1024 * 1024)} daily limit</p>` : ''}
         </div>
         <label class="toggle">
           <input type="checkbox" id="shareToggle" ${isSharing ? 'checked' : ''} ${!helperReady || !state.isOnline || state.shareToggling ? 'disabled style="opacity:0.4;cursor:not-allowed"' : ''}>
@@ -310,7 +313,7 @@ function renderDashboard(app) {
     if (shareSection) {
       const helperNotice = document.createElement('div')
       helperNotice.style.cssText = 'font-size:11px;color:#ff6060;padding:6px 0 2px'
-      helperNotice.innerHTML = 'Desktop helper not installed. <a id="installHelperBtn" href="#" style="color:#00ff88;font-family:\'Courier New\',monospace;font-size:11px;text-decoration:underline">DOWNLOAD & INSTALL</a>'
+      helperNotice.innerHTML = 'No helper detected. <a id="installHelperBtn" href="#" style="color:#00ff88;font-family:\'Courier New\',monospace;font-size:11px;text-decoration:underline">INSTALL DESKTOP</a> or run <code style="font-family:\'Courier New\',monospace;font-size:10px;color:#00ff88">npx peermesh-provider</code>'
       shareSection.appendChild(helperNotice)
     }
     const toggle = document.getElementById('shareToggle')
@@ -423,7 +426,7 @@ async function toggleSharing(on) {
   if (on && !state.helper?.available) {
     await refreshRuntimeStatus()
     if (!state.helper?.available) {
-      state.error = 'Desktop helper required — <a href="#" id="dlHelperLink" style="color:#00ff88">download & install</a> then reopen'
+      state.error = 'No helper detected — <a href="#" id="dlHelperLink" style="color:#00ff88">install desktop</a> or run <code style="font-family:\'Courier New\',monospace;font-size:10px">npx peermesh-provider</code>'
       state.shareToggling = false
       render()
       document.getElementById('dlHelperLink')?.addEventListener('click', e => {

@@ -16,6 +16,8 @@ export type Profile = {
   bandwidth_used_month: number
   bandwidth_limit: number
   preferred_providers: Record<string, string>
+  has_accepted_provider_terms: boolean
+  daily_share_limit_mb: number | null
   created_at: string
   updated_at: string
 }

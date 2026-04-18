@@ -10,6 +10,24 @@ import type { DesktopState } from '@/lib/agent-client'
 
 const RELAY = process.env.NEXT_PUBLIC_RELAY_ENDPOINT ?? 'ws://localhost:8080'
 
+function CliSection({ label, cmd }: { label: string; cmd: string }) {
+  const [copied, setCopied] = useState(false)
+  return (
+    <div>
+      <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '9px', color: 'var(--muted)', letterSpacing: '0.5px', marginBottom: '5px', textTransform: 'uppercase' }}>{label}</div>
+      <div style={{ position: 'relative', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '7px', padding: '10px 40px 10px 12px' }}>
+        <pre style={{ margin: 0, fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--accent)', whiteSpace: 'pre-wrap', wordBreak: 'break-all', lineHeight: 1.6 }}>{cmd}</pre>
+        <button
+          onClick={() => { navigator.clipboard.writeText(cmd).catch(() => {}); setCopied(true); setTimeout(() => setCopied(false), 1500) }}
+          style={{ position: 'absolute', top: '8px', right: '8px', background: 'none', border: 'none', color: copied ? 'var(--accent)' : 'var(--muted)', cursor: 'pointer', fontFamily: 'var(--font-geist-mono)', fontSize: '9px', padding: '2px 4px' }}
+        >
+          {copied ? '✓' : 'COPY'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
 export default function Dashboard() {
   const router = useRouter()
   const supabase = createClient()
@@ -24,6 +42,7 @@ export default function Dashboard() {
   const [sharingStats, setSharingStats] = useState({ bytesServed: 0, requestsHandled: 0 })
   const [connecting, setConnecting] = useState(false)
   const [shareToggling, setShareToggling] = useState(false)
+  const [showDisclosure, setShowDisclosure] = useState(false)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [shareError, setShareError] = useState<string | null>(null)
@@ -33,6 +52,8 @@ export default function Dashboard() {
   const [latestExtVersion, setLatestExtVersion] = useState<string | null>(null)
   const [extInstalled, setExtInstalled] = useState(false)
   const [extVersion, setExtVersion] = useState<string | null>(null)
+  const [showCliDocs, setShowCliDocs] = useState(false)
+  const [cliDocTab, setCliDocTab] = useState<'windows' | 'mac' | 'linux'>('windows')
 
   // ── Network status ──────────────────────────────────────────────────────────
   useEffect(() => {
@@ -170,9 +191,10 @@ export default function Dashboard() {
   const handleShareToggle = useCallback(async () => {
     if (!profile || shareToggling) return
     setShareError(null)
-    setShareToggling(true)
 
+    // If turning OFF — no disclosure needed
     if (isSharing) {
+      setShareToggling(true)
       setIsSharing(false)
       await stopDesktopSharing()
       await fetch('/api/user/sharing', {
@@ -183,6 +205,19 @@ export default function Dashboard() {
       setShareToggling(false)
       return
     }
+
+    // First-time share — show disclosure modal first
+    if (!profile.has_accepted_provider_terms) {
+      setShowDisclosure(true)
+      return
+    }
+
+    await startSharing()
+  }, [profile, isSharing, shareToggling])
+
+  async function startSharing() {
+    setShareToggling(true)
+    setShareError(null)
 
     if (!navigator.onLine) {
       setShareError('No internet connection — check your network and try again')
@@ -208,9 +243,9 @@ export default function Dashboard() {
 
     const ok = await startDesktopSharing({
       token: session.access_token,
-      userId: profile.id,
-      country: profile.country_code,
-      trust: profile.trust_score,
+      userId: profile!.id,
+      country: profile!.country_code,
+      trust: profile!.trust_score,
     })
 
     if (!ok) {
@@ -226,7 +261,7 @@ export default function Dashboard() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ isSharing: true }),
     }).catch(() => {})
-  }, [profile, isSharing, shareToggling])
+  }
 
   // ── Connect ─────────────────────────────────────────────────────────────────
   async function handleConnect() {
@@ -295,6 +330,14 @@ export default function Dashboard() {
     ? Math.min(100, Math.round((profile.bandwidth_used_month / profile.bandwidth_limit) * 100))
     : 0
   const desktopAvailable = desktop?.available ?? false
+  const isCLI = desktop?.source === 'cli'
+
+  // Detect OS for CLI docs default tab
+  const detectedOS: 'windows' | 'mac' | 'linux' = typeof navigator !== 'undefined'
+    ? navigator.userAgent.includes('Win') ? 'windows'
+      : navigator.userAgent.includes('Mac') ? 'mac'
+      : 'linux'
+    : 'linux'
   const desktopUpdateAvailable = !!(latestDesktopVersion && desktop?.version && latestDesktopVersion !== desktop.version)
   const extUpdateAvailable = extInstalled && latestExtVersion && extVersion && latestExtVersion !== extVersion
   // Show ext banner only when: not installed, OR installed but update available
@@ -321,7 +364,7 @@ export default function Dashboard() {
           )}
           {desktopChecked && (
             <span style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: desktopAvailable ? 'var(--accent)' : 'var(--muted)', letterSpacing: '1px' }}>
-              {desktopAvailable ? '● DESKTOP' : '○ NO DESKTOP'}
+              {desktopAvailable ? `● ${isCLI ? 'CLI' : 'DESKTOP'}` : '○ NO HELPER'}
             </span>
           )}
           <span style={{ fontSize: '13px', color: 'var(--muted)' }}>{profile.username ?? 'user'}</span>
@@ -347,22 +390,20 @@ export default function Dashboard() {
         </a>
       )}
 
-      {/* Desktop required banner — only show when not sharing and desktop not detected */}
+      {/* Desktop / CLI required banner — only show when not sharing and neither detected */}
       {desktopChecked && !desktopAvailable && !isSharing && (
-        <a
-          href="/api/desktop-download"
-          download
-          style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', background: 'rgba(255,80,80,0.07)', border: '1px solid rgba(255,80,80,0.3)', borderRadius: '12px', padding: '12px 16px', marginBottom: '16px', textDecoration: 'none' }}
+        <div
+          style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', background: 'rgba(255,80,80,0.07)', border: '1px solid rgba(255,80,80,0.3)', borderRadius: '12px', padding: '12px 16px', marginBottom: '16px' }}
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
             <span style={{ fontSize: '18px' }}>🖥️</span>
             <div>
-              <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: '#ff6060', letterSpacing: '0.5px', marginBottom: '2px' }}>DESKTOP HELPER REQUIRED</div>
-              <div style={{ fontSize: '12px', color: 'var(--muted)' }}>Install the desktop app to share your connection and enable full-browser routing</div>
+              <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: '#ff6060', letterSpacing: '0.5px', marginBottom: '2px' }}>DESKTOP OR CLI REQUIRED</div>
+              <div style={{ fontSize: '12px', color: 'var(--muted)' }}>Install the desktop app or run <code style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '11px' }}>npx @btcmaster1000/peermesh-provider</code> to share</div>
             </div>
           </div>
-          <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '11px', color: '#ff6060', whiteSpace: 'nowrap', flexShrink: 0 }}>↓ INSTALL</div>
-        </a>
+          <a href="/api/desktop-download" download style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '11px', color: '#ff6060', whiteSpace: 'nowrap', flexShrink: 0, textDecoration: 'none' }}>↓ DESKTOP</a>
+        </div>
       )}
 
       {/* Extension banner — only show when not installed OR update available; hide when installed+current */}
@@ -494,14 +535,14 @@ export default function Dashboard() {
               {isSharing
                 ? `${sharingStats.requestsHandled} requests · ${formatBytes(sharingStats.bytesServed)} served`
                 : desktopAvailable
-                  ? 'Desktop helper ready — toggle to start sharing'
-                  : 'Install the desktop helper to share your connection'}
+                  ? `${isCLI ? 'CLI' : 'Desktop'} helper ready — toggle to start sharing`
+                  : 'Install the desktop app or run the CLI to share your connection'}
             </div>
           </div>
           <button
             onClick={handleShareToggle}
             disabled={shareToggling}
-            style={{ width: '44px', height: '24px', borderRadius: '12px', border: 'none', background: isSharing ? 'var(--accent)' : shareToggling ? 'var(--border)' : 'var(--border)', cursor: shareToggling ? 'not-allowed' : 'pointer', position: 'relative', transition: 'background 0.2s', flexShrink: 0, opacity: shareToggling ? 0.6 : 1 }}
+            style={{ width: '44px', height: '24px', borderRadius: '12px', border: 'none', background: isSharing ? 'var(--accent)' : 'var(--border)', cursor: shareToggling ? 'not-allowed' : 'pointer', position: 'relative', transition: 'background 0.2s', flexShrink: 0, opacity: shareToggling ? 0.6 : 1 }}
           >
             {shareToggling
               ? <span style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><span style={{ width: '10px', height: '10px', border: '2px solid rgba(255,255,255,0.3)', borderTopColor: 'white', borderRadius: '50%', animation: 'spin 0.7s linear infinite', display: 'inline-block' }} /></span>
@@ -509,11 +550,45 @@ export default function Dashboard() {
             }
           </button>
         </div>
+
+        {/* Daily limit setter — always visible so user can set before sharing */}
+        <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px' }}>
+          <div>
+            <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--muted)', letterSpacing: '0.5px', marginBottom: '2px' }}>DAILY SHARE LIMIT</div>
+            <div style={{ fontSize: '11px', color: 'var(--muted)' }}>
+              {profile.daily_share_limit_mb ? `${profile.daily_share_limit_mb}MB/day — auto-stops when reached` : 'No limit set'}
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexShrink: 0 }}>
+            <select
+              defaultValue={profile.daily_share_limit_mb ?? ''}
+              onChange={async (e) => {
+                const val = e.target.value === '' ? null : parseInt(e.target.value)
+                await fetch('/api/user/sharing', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ dailyLimitMb: val }),
+                })
+                setProfile(p => p ? { ...p, daily_share_limit_mb: val } : p)
+              }}
+              style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: '6px', padding: '4px 8px', fontFamily: 'var(--font-geist-mono)', fontSize: '10px', cursor: 'pointer' }}
+            >
+              <option value=''>No limit</option>
+              <option value='100'>100 MB</option>
+              <option value='250'>250 MB</option>
+              <option value='500'>500 MB</option>
+              <option value='1024'>1 GB</option>
+              <option value='2048'>2 GB</option>
+              <option value='5120'>5 GB</option>
+            </select>
+          </div>
+        </div>
+
         {shareError && (
           <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '8px', marginTop: '10px', padding: '8px 10px', background: 'rgba(255,80,80,0.07)', border: '1px solid rgba(255,80,80,0.2)', borderRadius: '7px' }}>
             <div style={{ fontSize: '11px', color: '#ff6060', fontFamily: 'var(--font-geist-mono)', lineHeight: 1.5 }}>
               {shareError === 'desktop_required' ? (
-                <>Desktop helper not running.{' '}<a href="/api/desktop-download" download style={{ color: 'var(--accent)', textDecoration: 'underline' }}>Download & install</a>{' '}then reopen this page.</>
+                <>Desktop or CLI not running.{' '}<a href="/api/desktop-download" download style={{ color: 'var(--accent)', textDecoration: 'underline' }}>Download desktop</a>{' '}or run <code style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px' }}>npx @btcmaster1000/peermesh-provider</code> then reopen this page.</>
               ) : shareError}
             </div>
             <button onClick={() => setShareError(null)} style={{ background: 'none', border: 'none', color: 'var(--muted)', cursor: 'pointer', fontSize: '13px', lineHeight: 1, padding: '0', flexShrink: 0 }}>✕</button>
@@ -573,6 +648,167 @@ export default function Dashboard() {
               <span style={{ fontSize: '11px' }}>Connect to a peer and they will be auto-reserved so you always get the same IP.</span>
             </div>
           )}
+        </div>
+      )}
+
+      {/* CLI provider banner — shows detected state */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', background: 'var(--surface)', border: `1px solid ${isCLI && desktopAvailable ? 'rgba(0,255,136,0.3)' : 'var(--border)'}`, borderRadius: '10px', marginBottom: '12px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <span style={{ fontSize: '16px' }}>⌨️</span>
+          <div>
+            <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: isCLI && desktopAvailable ? 'var(--accent)' : 'var(--muted)', letterSpacing: '0.5px', marginBottom: '2px' }}>
+              {isCLI && desktopAvailable ? '● CLI DETECTED — SHARING ACTIVE' : 'SHARE FROM ANY MACHINE'}
+            </div>
+            <div style={{ fontSize: '11px', color: 'var(--muted)' }}>{isCLI && desktopAvailable ? 'CLI is running and in sync with this dashboard' : 'No desktop app needed — just Node.js'}</div>
+          </div>
+        </div>
+        <button
+          onClick={() => { setCliDocTab(detectedOS); setShowCliDocs(true) }}
+          style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--accent)', background: 'var(--bg)', border: '1px solid rgba(0,255,136,0.3)', padding: '5px 10px', borderRadius: '5px', cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0 }}
+        >
+          CLI DOCS →
+        </button>
+      </div>
+
+      {/* CLI Docs modal */}
+      {showCliDocs && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: '20px' }}>
+          <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '16px', padding: '24px', maxWidth: '520px', width: '100%', maxHeight: '90vh', overflowY: 'auto' }}>
+
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px' }}>
+              <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '11px', color: 'var(--accent)', letterSpacing: '1px' }}>CLI INSTALL GUIDE</div>
+              <button onClick={() => setShowCliDocs(false)} style={{ background: 'none', border: 'none', color: 'var(--muted)', cursor: 'pointer', fontSize: '16px', lineHeight: 1, padding: 0 }}>✕</button>
+            </div>
+
+            <div style={{ fontSize: '13px', color: 'var(--muted)', marginBottom: '16px', lineHeight: 1.5 }}>
+              Run the CLI on any machine to share your connection. It works as a drop-in alternative to the desktop app — the dashboard detects it automatically.
+            </div>
+
+            {/* OS tabs */}
+            <div style={{ display: 'flex', gap: '6px', marginBottom: '20px' }}>
+              {(['windows', 'mac', 'linux'] as const).map(os => (
+                <button
+                  key={os}
+                  onClick={() => setCliDocTab(os)}
+                  style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', padding: '5px 12px', borderRadius: '6px', border: `1px solid ${cliDocTab === os ? 'var(--accent)' : 'var(--border)'}`, background: cliDocTab === os ? 'rgba(0,255,136,0.1)' : 'var(--bg)', color: cliDocTab === os ? 'var(--accent)' : 'var(--muted)', cursor: 'pointer', letterSpacing: '0.5px', textTransform: 'uppercase' }}
+                >
+                  {os === 'windows' ? '🪟 Windows' : os === 'mac' ? '🍎 macOS' : '🐧 Linux'}
+                </button>
+              ))}
+            </div>
+
+            {cliDocTab === 'windows' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                <CliSection label="Option 1 — npx (no install needed)" cmd="npx @btcmaster1000/peermesh-provider" />
+                <CliSection label="Option 2 — install globally" cmd="npm install -g @btcmaster1000/peermesh-provider" />
+                <CliSection label="Install Node.js first (cmd / winglet)" cmd={`curl -fsSL https://nodejs.org/dist/v20.11.0/node-v20.11.0-x64.msi -o node.msi
+msiexec /i node.msi /quiet`} />
+                <CliSection label="Install Node.js first (PowerShell / Invoke)" cmd={`Invoke-WebRequest https://nodejs.org/dist/v20.11.0/node-v20.11.0-x64.msi -OutFile node.msi
+Start-Process msiexec -ArgumentList '/i node.msi /quiet' -Wait`} />
+                <CliSection label="Run at startup (Task Scheduler)" cmd={`$action = New-ScheduledTaskAction -Execute "$(where.exe peermesh-provider)"
+$trigger = New-ScheduledTaskTrigger -AtLogOn
+Register-ScheduledTask -TaskName "PeerMesh" -Action $action -Trigger $trigger -RunLevel Highest -Force`} />
+              </div>
+            )}
+
+            {cliDocTab === 'mac' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                <CliSection label="Option 1 — npx (no install needed)" cmd="npx @btcmaster1000/peermesh-provider" />
+                <CliSection label="Option 2 — install globally" cmd="npm install -g @btcmaster1000/peermesh-provider" />
+                <CliSection label="Install Node.js via Homebrew" cmd="brew install node" />
+                <CliSection label="Install Node.js via built-in curl" cmd={`curl -fsSL https://nodejs.org/dist/v20.11.0/node-v20.11.0.pkg -o node.pkg
+sudo installer -pkg node.pkg -target /`} />
+                <CliSection label="Run at startup (launchd — built-in)" cmd={`cat > ~/Library/LaunchAgents/app.peermesh.provider.plist <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>app.peermesh.provider</string>
+  <key>ProgramArguments</key><array><string>$(which peermesh-provider)</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+</dict></plist>
+EOF
+launchctl load ~/Library/LaunchAgents/app.peermesh.provider.plist`} />
+              </div>
+            )}
+
+            {cliDocTab === 'linux' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                <CliSection label="Option 1 — npx (no install needed)" cmd="npx @btcmaster1000/peermesh-provider" />
+                <CliSection label="Option 2 — install globally" cmd="npm install -g @btcmaster1000/peermesh-provider" />
+                <CliSection label="Install Node.js via built-in curl (Debian/Ubuntu)" cmd={`curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt-get install -y nodejs`} />
+                <CliSection label="Install Node.js via built-in curl (RHEL/Fedora)" cmd={`curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -
+sudo dnf install -y nodejs`} />
+                <CliSection label="Run at startup (systemd — built-in)" cmd={`sudo tee /etc/systemd/system/peermesh.service <<EOF
+[Unit]
+Description=PeerMesh Provider
+After=network.target
+
+[Service]
+ExecStart=$(which peermesh-provider)
+Restart=always
+User=$USER
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl enable --now peermesh.service`} />
+              </div>
+            )}
+
+            <div style={{ marginTop: '20px', paddingTop: '16px', borderTop: '1px solid var(--border)', fontSize: '11px', color: 'var(--muted)', lineHeight: 1.6 }}>
+              <span style={{ fontFamily: 'var(--font-geist-mono)', color: 'var(--accent)' }}>OPTIONS: </span>
+              <code style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px' }}>--limit 500</code> · daily MB cap &nbsp;·&nbsp;
+              <code style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px' }}>--country NG</code> · override country &nbsp;·&nbsp;
+              <code style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px' }}>--status</code> · show usage &nbsp;·&nbsp;
+              <code style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px' }}>--reset</code> · re-auth
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Provider disclosure modal */}
+      {showDisclosure && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.75)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: '20px' }}>
+          <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '16px', padding: '28px', maxWidth: '440px', width: '100%' }}>
+            <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '11px', color: 'var(--accent)', letterSpacing: '1px', marginBottom: '12px' }}>BEFORE YOU SHARE</div>
+            <div style={{ fontSize: '15px', fontWeight: 600, marginBottom: '16px', lineHeight: 1.3 }}>What sharing your connection means</div>
+            {([
+              ['🌐', 'Your IP address will be used by other PeerMesh users to browse the web.'],
+              ['🔒', 'All sessions are logged with signed receipts. You can see what passed through in your session history.'],
+              ['🚫', 'Blocked automatically: .onion sites, SMTP/mail servers, torrent trackers, and private network addresses.'],
+              ['⚡', 'You can stop sharing at any time by toggling the switch off.'],
+              ['💸', 'Sharing earns you free browsing credits on the free tier.'],
+            ] as [string, string][]).map(([icon, text]) => (
+              <div key={text} style={{ display: 'flex', gap: '12px', marginBottom: '12px', fontSize: '13px', color: 'var(--muted)', lineHeight: 1.5 }}>
+                <span style={{ flexShrink: 0 }}>{icon}</span>
+                <span>{text}</span>
+              </div>
+            ))}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginTop: '20px' }}>
+              <button
+                onClick={() => setShowDisclosure(false)}
+                style={{ padding: '12px', background: 'none', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--muted)', cursor: 'pointer', fontFamily: 'var(--font-geist-mono)', fontSize: '11px' }}
+              >
+                CANCEL
+              </button>
+              <button
+                onClick={async () => {
+                  setShowDisclosure(false)
+                  const { data: { user } } = await supabase.auth.getUser()
+                  if (user) {
+                    await supabase.from('profiles').update({ has_accepted_provider_terms: true }).eq('id', user.id)
+                    setProfile(p => p ? { ...p, has_accepted_provider_terms: true } : p)
+                  }
+                  await startSharing()
+                }}
+                style={{ padding: '12px', background: 'var(--accent)', border: 'none', borderRadius: '8px', color: '#000', cursor: 'pointer', fontFamily: 'var(--font-geist-mono)', fontSize: '11px', fontWeight: 700 }}
+              >
+                I UNDERSTAND — SHARE
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </main>

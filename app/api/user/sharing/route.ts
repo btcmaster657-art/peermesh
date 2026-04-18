@@ -31,7 +31,7 @@ export async function GET(req: Request) {
 
   const { data, error } = await adminClient
     .from('profiles')
-    .select('total_bytes_shared, total_bytes_used, bandwidth_used_month, bandwidth_limit, trust_score, is_sharing')
+    .select('total_bytes_shared, total_bytes_used, bandwidth_used_month, bandwidth_limit, trust_score, is_sharing, daily_share_limit_mb')
     .eq('id', userId)
     .single()
 
@@ -51,10 +51,20 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: true })
   }
 
-  // Web dashboard: { isSharing: boolean }
+  // Web dashboard: { isSharing: boolean } or { dailyLimitMb: number | null }
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  // Setting daily share limit
+  if ('dailyLimitMb' in body) {
+    const limitMb = body.dailyLimitMb === null ? null : parseInt(body.dailyLimitMb)
+    if (body.dailyLimitMb !== null && (isNaN(limitMb!) || limitMb! < 0)) {
+      return NextResponse.json({ error: 'dailyLimitMb must be a positive number or null' }, { status: 400 })
+    }
+    await adminClient.from('profiles').update({ daily_share_limit_mb: limitMb ?? null }).eq('id', user.id)
+    return NextResponse.json({ ok: true, daily_share_limit_mb: limitMb ?? null })
+  }
 
   if (typeof body.isSharing !== 'boolean') {
     return NextResponse.json({ error: 'isSharing must be boolean' }, { status: 400 })

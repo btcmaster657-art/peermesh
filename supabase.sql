@@ -64,7 +64,9 @@ create table profiles (
   total_bytes_used bigint default 0,
   bandwidth_used_month bigint default 0,
   bandwidth_limit bigint default 5368709120, -- 5GB free tier
-  preferred_providers jsonb default '{}'::jsonb -- { "NG": "provider-user-id", ... }
+  preferred_providers jsonb default '{}'::jsonb, -- { "NG": "provider-user-id", ... }
+  has_accepted_provider_terms boolean default false,
+  daily_share_limit_mb integer default null, -- null = no limit
 
   created_at timestamptz default now(),
   updated_at timestamptz default now()
@@ -392,3 +394,13 @@ alter table device_codes enable row level security;
 create policy "Service role only device codes"
   on device_codes for all
   using (false);
+
+-- ================================
+-- Migration: add has_accepted_provider_terms (run on existing DBs)
+-- ================================
+alter table profiles add column if not exists has_accepted_provider_terms boolean default false;
+
+-- ================================
+-- Migration: add daily_share_limit_mb (run on existing DBs)
+-- ================================
+alter table profiles add column if not exists daily_share_limit_mb integer default null;

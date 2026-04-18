@@ -21,6 +21,7 @@ export type DesktopState = {
   country: string | null
   userId: string | null
   version: string | null
+  source?: 'desktop' | 'cli'
   stats?: AgentHealth['stats']
 }
 
