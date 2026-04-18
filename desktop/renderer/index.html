@@ -126,7 +126,16 @@
       top: 3px; left: 3px;
       transition: left 0.2s;
     }
-    .toggle.on::after { left: 23px; }
+    .toggle.loading { background: var(--border); cursor: not-allowed; }
+    .toggle.loading::after { display: none; }
+    .toggle-spinner {
+      position: absolute;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+    }
+    .toggle.loading .toggle-spinner { display: flex; }
 
     .stats-grid {
       display: grid;
@@ -210,7 +219,7 @@
         <h4>Share my connection</h4>
         <p id="toggle-desc">Help others browse. Stay free.</p>
       </div>
-      <button class="toggle" id="share-toggle"></button>
+      <button class="toggle" id="share-toggle"><span class="toggle-spinner"><span style="width:10px;height:10px;border:2px solid rgba(255,255,255,0.3);border-top-color:white;border-radius:50%;animation:spin 0.7s linear infinite;display:inline-block"></span></span></button>
     </div>
 
     <!-- Stats -->

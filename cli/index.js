@@ -29,7 +29,7 @@ const API_BASE    = 'https://peermesh-beta.vercel.app'
 const RELAY_WS    = 'wss://peermesh-relay.fly.dev'
 const CONFIG_DIR  = join(homedir(), '.peermesh')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
-const VERSION     = '1.0.5'
+const VERSION     = '1.0.6'
 
 const BLOCKED = [/\.onion$/i, /^smtp\./i, /^mail\./i, /torrent/i]
 const PRIVATE = [/^localhost$/i, /^127\./, /^10\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./]
@@ -47,7 +47,8 @@ const resetFlag   = args.includes('--reset')
 const statusFlag  = args.includes('--status')
 const serveFlag   = args.includes('--serve')
 
-const CONTROL_PORT = 7654
+const CONTROL_PORT = 7654  // primary — whoever starts first owns this
+const PEER_PORT    = 7656  // secondary — the other process registers here
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -183,7 +184,7 @@ function sendHeartbeat(limitBytes) {
   fetch(`${API_BASE}/api/user/sharing`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
-    body: JSON.stringify({ device_id: DEVICE_ID, country: config.country }),
+    body: JSON.stringify({ device_id: DEVICE_ID }),
   })
     .then(r => r.ok ? r.json() : null)
     .then(data => {
@@ -263,10 +264,15 @@ async function handleFetch(request, limitBytes) {
   }
 }
 
-// ── Control server (drop-in desktop alternative on port 7654) ───────────────
+// ── Control server ────────────────────────────────────────────────────────────
+// Tries to own CONTROL_PORT (7654). If desktop already owns it, falls back to
+// PEER_PORT (7656) so the two can coexist and cross-notify each other.
 
-function startControlServer() {
-  const server = http.createServer((req, res) => {
+let myPort = null   // the port this CLI process actually bound
+let peerPort = null // the port the other process is on (for cross-notify)
+
+function buildHandler(port) {
+  return http.createServer((req, res) => {
     const origin = req.headers.origin || ''
     res.setHeader('Access-Control-Allow-Origin',
       origin.includes('peermesh') || origin.includes('localhost') || origin.startsWith('chrome-extension://') ? origin : '')
@@ -274,7 +280,7 @@ function startControlServer() {
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
     if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return }
 
-    const url = new URL(req.url, `http://localhost:${CONTROL_PORT}`)
+    const url = new URL(req.url, `http://localhost:${port}`)
 
     function state() {
       return {
@@ -282,12 +288,18 @@ function startControlServer() {
         running,
         shareEnabled: running,
         configured: !!(config.token && config.userId),
-        country: config.country ?? null,
         userId: config.userId ?? null,
         version: VERSION,
-        source: 'cli',
+        where: 'cli',
         stats: { bytesServed: sessionBytes, requestsHandled: 0, connectedAt: null, peerId: null },
       }
+    }
+
+    function notifyPeer(path, body) {
+      if (!peerPort) return
+      const init = { method: 'POST', signal: AbortSignal.timeout(1500) }
+      if (body) { init.headers = { 'Content-Type': 'application/json' }; init.body = JSON.stringify(body) }
+      fetch(`http://127.0.0.1:${peerPort}${path}`, init).catch(() => {})
     }
 
     if (req.method === 'GET' && url.pathname === '/native/state') {
@@ -302,12 +314,12 @@ function startControlServer() {
       req.on('end', () => {
         try {
           const data = JSON.parse(body || '{}')
-          if (data.token)  config.token   = data.token
-          if (data.userId) config.userId  = data.userId
-          if (data.country) config.country = data.country
-          if (data.trust)  config.trust   = data.trust
+          if (data.token)  config.token  = data.token
+          if (data.userId) config.userId = data.userId
+          if (data.trust)  config.trust  = data.trust
           saveConfig(config)
           if (!running) connectRelay(_controlLimitBytes)
+          notifyPeer('/native/share/start', { token: config.token, userId: config.userId })
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify(state()))
         } catch (e) { res.writeHead(400); res.end(JSON.stringify({ error: e.message })) }
@@ -317,21 +329,59 @@ function startControlServer() {
 
     if (req.method === 'POST' && url.pathname === '/native/share/stop') {
       stopRelay()
+      notifyPeer('/native/share/stop')
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(state()))
       return
     }
 
+    // Peer registration — the other process tells us its port
+    if (req.method === 'POST' && url.pathname === '/native/peer/register') {
+      let body = ''
+      req.on('data', d => body += d)
+      req.on('end', () => {
+        try { peerPort = JSON.parse(body).port } catch {}
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: true }))
+      })
+      return
+    }
+
     res.writeHead(404); res.end()
   })
+}
 
-  server.listen(CONTROL_PORT, '127.0.0.1', () => {
-    log(`Control server listening on port ${CONTROL_PORT} — dashboard and extension can detect this CLI`)
+function startControlServer() {
+  const primary = buildHandler(CONTROL_PORT)
+  primary.listen(CONTROL_PORT, '127.0.0.1', () => {
+    myPort = CONTROL_PORT
+    log('Control server on port ' + CONTROL_PORT)
+    // Check if a peer is already on PEER_PORT and register with it
+    registerWithPeer(PEER_PORT)
   })
-  server.on('error', e => {
-    if (e.code === 'EADDRINUSE') log(`Port ${CONTROL_PORT} already in use — desktop app may be running`, 'warn')
-    else log(`Control server error: ${e.message}`, 'error')
+  primary.on('error', e => {
+    if (e.code !== 'EADDRINUSE') { log('Control server error: ' + e.message, 'error'); return }
+    // Desktop owns 7654 — bind to PEER_PORT instead
+    const secondary = buildHandler(PEER_PORT)
+    secondary.listen(PEER_PORT, '127.0.0.1', () => {
+      myPort = PEER_PORT
+      log('Desktop detected on port ' + CONTROL_PORT + ' — CLI running as peer on port ' + PEER_PORT)
+      // Register our port with the desktop so it can cross-notify us
+      registerWithPeer(CONTROL_PORT)
+    })
+    secondary.on('error', e2 => log('Could not bind peer port: ' + e2.message, 'error'))
   })
+}
+
+function registerWithPeer(targetPort) {
+  fetch(`http://127.0.0.1:${targetPort}/native/peer/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ port: myPort, where: 'cli' }),
+    signal: AbortSignal.timeout(1500),
+  })
+    .then(() => { peerPort = targetPort })
+    .catch(() => {}) // peer not running — that's fine
 }
 
 let _controlLimitBytes = null
@@ -373,7 +423,7 @@ function connectRelay(limitBytes) {
       const msg = JSON.parse(data.toString())
       switch (msg.type) {
         case 'registered':
-          log(`Sharing active — country: ${config.country}`)
+          log(`Sharing active — country: auto-detected from IP`)
           printStatus(limitBytes)
           break
 
@@ -456,7 +506,7 @@ function printStatus(limitBytes) {
   console.log('')
   console.log('  ┌─────────────────────────────────────────┐')
   console.log(`  │  User:    ${(config.username ?? config.userId?.slice(0, 8) ?? '—').padEnd(31)}│`)
-  console.log(`  │  Country: ${(config.country ?? '—').padEnd(31)}│`)
+  console.log(`  │  Country: auto-detected from IP${' '.repeat(12)}│`)
   console.log(`  │  Shared:  ${limitStr.padEnd(31)}│`)
   console.log('  │                                         │')
   console.log('  │  Press Ctrl+C to stop                   │')
@@ -621,7 +671,6 @@ async function main() {
   }
 
   // ── Show config ───────────────────────────────────────────────────────────
-  console.log(`  Country:     ${config.country}`)
   console.log(`  Daily limit: ${limitMb ? `${limitMb}MB` : 'none (set with --limit <MB>)'}`)
   if (config.todaySharedBytes > 0) console.log(`  Used today:  ${formatBytes(config.todaySharedBytes)}`)
   console.log('')

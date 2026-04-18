@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import { useSearchParams } from 'next/navigation'
+import { createClient } from '@/lib/supabase/client'
 
 const mono = "'Courier New', monospace"
 
@@ -136,9 +137,11 @@ export default function ExtensionPageClient() {
 
     // If ext_id present, check auth so we can auto sign-in to the extension
     if (urlExtId) {
-      fetch('/api/extension-auth', { method: 'GET' })
-        .then(r => { setIsLoggedIn(r.ok); setAuthChecked(true) })
-        .catch(() => { setIsLoggedIn(false); setAuthChecked(true) })
+      const supabase = createClient()
+      supabase.auth.getSession().then(({ data: { session } }) => {
+        setIsLoggedIn(!!session)
+        setAuthChecked(true)
+      }).catch(() => { setIsLoggedIn(false); setAuthChecked(true) })
     } else {
       setAuthChecked(true)
     }
@@ -275,9 +278,11 @@ export default function ExtensionPageClient() {
       ) : (
         <main style={{ maxWidth: '520px', margin: '0 auto', width: '100%', padding: '40px 20px' }}>
 
-        {/* Header with back button */}
+        {/* Header */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '28px' }}>
-          <a href="/dashboard" style={{ color: 'var(--muted)', fontFamily: mono, fontSize: '11px', textDecoration: 'none', letterSpacing: '0.5px' }}>← BACK</a>
+          {step !== 'guide' && (
+            <a href="/dashboard" style={{ color: 'var(--muted)', fontFamily: mono, fontSize: '11px', textDecoration: 'none', letterSpacing: '0.5px' }}>← BACK</a>
+          )}
           <span style={{ fontFamily: mono, color: 'var(--accent)', fontSize: '12px', letterSpacing: '4px' }}>PEERMESH</span>
         </div>
 

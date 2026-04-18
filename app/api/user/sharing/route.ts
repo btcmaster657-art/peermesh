@@ -77,14 +77,27 @@ export async function POST(req: Request) {
 // ── PUT: provider heartbeat ───────────────────────────────────────────────────
 export async function PUT(req: Request) {
   const body = await req.json().catch(() => ({}))
-  const { device_id, country, user_id } = body
+  const { device_id, user_id } = body
 
-  if (!device_id || !country) {
-    return NextResponse.json({ error: 'device_id and country required' }, { status: 400 })
+  if (!device_id) {
+    return NextResponse.json({ error: 'device_id required' }, { status: 400 })
   }
 
   const userId = await resolveUserId(req, user_id)
   if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  // Detect country from the request IP — never trust client-supplied value
+  let country = 'XX'
+  try {
+    const ip =
+      req.headers.get('x-forwarded-for')?.split(',')[0].trim() ||
+      req.headers.get('x-real-ip') ||
+      ''
+    if (ip) {
+      const geo = await fetch(`https://ipapi.co/${ip}/country/`, { signal: AbortSignal.timeout(3000) })
+      if (geo.ok) country = (await geo.text()).trim().slice(0, 2).toUpperCase()
+    }
+  } catch {}
 
   const { error: rpcError } = await adminClient.rpc('upsert_provider_heartbeat', {
     p_user_id: userId,

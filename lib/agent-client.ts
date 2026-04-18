@@ -1,4 +1,5 @@
 const AGENT_URL = 'http://localhost:7654'
+const PEER_URL  = 'http://localhost:7656'
 
 export type AgentHealth = {
   running: boolean
@@ -21,8 +22,15 @@ export type DesktopState = {
   country: string | null
   userId: string | null
   version: string | null
-  source?: 'desktop' | 'cli'
+  where?: 'desktop' | 'cli'
+  source?: 'desktop' | 'cli'  // legacy compat
   stats?: AgentHealth['stats']
+  peer?: {                     // the other process if both are running
+    available: boolean
+    running: boolean
+    where: 'desktop' | 'cli'
+    version: string | null
+  } | null
 }
 
 export async function checkAgent(): Promise<AgentHealth | null> {
@@ -35,15 +43,28 @@ export async function checkAgent(): Promise<AgentHealth | null> {
   }
 }
 
-/** Check if the desktop app is running via its control server */
+/** Check if the desktop app or CLI is running via its control server.
+ *  Also probes port 7656 for the peer process (the other one). */
 export async function checkDesktop(): Promise<DesktopState> {
+  const notAvailable: DesktopState = { available: false, running: false, shareEnabled: false, configured: false, country: null, userId: null, version: null, peer: null }
+  let primary: DesktopState = notAvailable
   try {
     const res = await fetch(`${AGENT_URL}/native/state`, { signal: AbortSignal.timeout(1500) })
-    if (!res.ok) return { available: false, running: false, shareEnabled: false, configured: false, country: null, userId: null, version: null }
-    return { available: true, ...(await res.json()) }
-  } catch {
-    return { available: false, running: false, shareEnabled: false, configured: false, country: null, userId: null, version: null }
-  }
+    if (res.ok) primary = { available: true, peer: null, ...(await res.json()) }
+  } catch {}
+
+  // Also probe peer port for the second process
+  let peer: DesktopState['peer'] = null
+  try {
+    const res2 = await fetch(`${PEER_URL}/native/state`, { signal: AbortSignal.timeout(1000) })
+    if (res2.ok) {
+      const d = await res2.json()
+      peer = { available: true, running: !!d.running, where: d.where ?? 'cli', version: d.version ?? null }
+    }
+  } catch {}
+
+  if (!primary.available) return notAvailable
+  return { ...primary, peer }
 }
 
 /** Push auth credentials to the running desktop app */

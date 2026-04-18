@@ -41,6 +41,7 @@ export default function Dashboard() {
   const [desktopChecked, setDesktopChecked] = useState(false)
   const [sharingStats, setSharingStats] = useState({ bytesServed: 0, requestsHandled: 0 })
   const [connecting, setConnecting] = useState(false)
+  const [disconnecting, setDisconnecting] = useState(false)
   const [shareToggling, setShareToggling] = useState(false)
   const [showDisclosure, setShowDisclosure] = useState(false)
   const [loading, setLoading] = useState(true)
@@ -333,8 +334,24 @@ export default function Dashboard() {
     ? Math.min(100, Math.round((profile.bandwidth_used_month / profile.bandwidth_limit) * 100))
     : profile.bandwidth_used_month > 0 ? 100 : 0
   const desktopAvailable = desktop?.available ?? false
-  const isCLI = desktop?.source === 'cli'
-  const cliUpdateAvailable = isCLI && !!(latestCliVersion && desktop?.version && latestCliVersion !== desktop.version)
+  const primaryWhere = desktop?.where ?? desktop?.source ?? null  // 'desktop' | 'cli' | null
+  const isCLI = primaryWhere === 'cli'
+  const isDesktopApp = primaryWhere === 'desktop'
+
+  // Peer = the second process (if both running)
+  const peerRunning = desktop?.peer?.available ?? false
+  const peerWhere = desktop?.peer?.where ?? null
+
+  // Per-process version info
+  const desktopProcessVersion = isDesktopApp ? desktop?.version : (peerWhere === 'desktop' ? desktop?.peer?.version : null)
+  const cliProcessVersion     = isCLI        ? desktop?.version : (peerWhere === 'cli'     ? desktop?.peer?.version : null)
+  const desktopRunning = isDesktopApp || peerWhere === 'desktop'
+  const cliRunning     = isCLI        || peerWhere === 'cli'
+
+  const desktopUpdateAvailable = !!(desktopRunning && latestDesktopVersion && desktopProcessVersion && latestDesktopVersion !== desktopProcessVersion)
+  const cliUpdateAvailable     = !!(cliRunning     && latestCliVersion     && cliProcessVersion     && latestCliVersion     !== cliProcessVersion)
+  const extUpdateAvailable     = !!(extInstalled   && latestExtVersion     && extVersion            && latestExtVersion     !== extVersion)
+  const showExtBanner          = !extInstalled || extUpdateAvailable
 
   // Detect OS for CLI docs default tab
   const detectedOS: 'windows' | 'mac' | 'linux' = typeof navigator !== 'undefined'
@@ -342,10 +359,6 @@ export default function Dashboard() {
       : navigator.userAgent.includes('Mac') ? 'mac'
       : 'linux'
     : 'linux'
-  const desktopUpdateAvailable = !!(latestDesktopVersion && desktop?.version && latestDesktopVersion !== desktop.version)
-  const extUpdateAvailable = !!(extInstalled && latestExtVersion && extVersion && latestExtVersion !== extVersion)
-  // Show ext banner only when not installed OR update available
-  const showExtBanner = !extInstalled || extUpdateAvailable
 
   return (
     <main style={{ maxWidth: '680px', margin: '0 auto', width: '100%', padding: '24px 20px' }}>
@@ -366,8 +379,15 @@ export default function Dashboard() {
             <span style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--accent)', border: '1px solid var(--accent)', padding: '3px 8px', borderRadius: '4px', letterSpacing: '1px' }}>PREMIUM</span>
           )}
           {desktopChecked && (
-            <span style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: desktopAvailable ? 'var(--accent)' : 'var(--muted)', letterSpacing: '1px' }}>
-              {desktopAvailable ? `● ${isCLI ? 'CLI' : 'DESKTOP'}` : '○ NO HELPER'}
+            <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              {[{ label: 'CLI', green: cliRunning }, { label: 'DSK', green: desktopRunning }]
+                .filter(s => s.green || (!cliRunning && !desktopRunning))
+                .map(s => (
+                  <span key={s.label} style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: s.green ? 'var(--accent)' : '#ff6060', letterSpacing: '0.5px' }}>
+                    {s.green ? '●' : '○'} {s.label}
+                  </span>
+                ))
+              }
             </span>
           )}
           <span style={{ fontSize: '13px', color: 'var(--muted)' }}>{profile.username ?? 'user'}</span>
@@ -375,59 +395,35 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Desktop update banner — only when desktop helper is running */}
-      {desktopChecked && desktopAvailable && !isCLI && desktopUpdateAvailable && (
-        <a
-          href="/api/desktop-download"
-          download
-          style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', background: 'rgba(0,255,136,0.05)', border: '1px solid rgba(0,255,136,0.3)', borderRadius: '12px', padding: '12px 16px', marginBottom: '16px', textDecoration: 'none' }}
-        >
+      {/* Desktop update banner */}
+      {desktopChecked && desktopRunning && desktopUpdateAvailable && (
+        <a href="/api/desktop-download" download style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', background: 'rgba(0,255,136,0.05)', border: '1px solid rgba(0,255,136,0.3)', borderRadius: '12px', padding: '12px 16px', marginBottom: '16px', textDecoration: 'none' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
             <span style={{ fontSize: '18px' }}>⬆️</span>
             <div>
               <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--accent)', letterSpacing: '0.5px', marginBottom: '2px' }}>DESKTOP UPDATE AVAILABLE — v{latestDesktopVersion}</div>
-              <div style={{ fontSize: '12px', color: 'var(--muted)' }}>You have v{desktop?.version}. Download the latest for best performance.</div>
+              <div style={{ fontSize: '12px', color: 'var(--muted)' }}>You have v{desktopProcessVersion}. Download the latest for best performance.</div>
             </div>
           </div>
           <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '11px', color: 'var(--accent)', whiteSpace: 'nowrap', flexShrink: 0 }}>↓ UPDATE</div>
         </a>
       )}
 
-      {/* Desktop install nudge — shown when CLI is active but desktop is not installed */}
-      {desktopChecked && isCLI && latestDesktopVersion && (
-        <a
-          href="/api/desktop-download"
-          download
-          style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '12px', padding: '12px 16px', marginBottom: '16px', textDecoration: 'none' }}
-        >
+      {/* Desktop install banner — neither running */}
+      {desktopChecked && !desktopRunning && !cliRunning && (
+        <a href="/api/desktop-download" download style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', background: 'rgba(255,80,80,0.07)', border: '1px solid rgba(255,80,80,0.3)', borderRadius: '12px', padding: '12px 16px', marginBottom: '16px', textDecoration: 'none' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
             <span style={{ fontSize: '18px' }}>🖥️</span>
             <div>
-              <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--muted)', letterSpacing: '0.5px', marginBottom: '2px' }}>DESKTOP APP — v{latestDesktopVersion}</div>
-              <div style={{ fontSize: '12px', color: 'var(--muted)' }}>Optional GUI with tray icon — runs in the background automatically</div>
+              <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: '#ff6060', letterSpacing: '0.5px', marginBottom: '2px' }}>DESKTOP OR CLI REQUIRED TO SHARE</div>
+              <div style={{ fontSize: '12px', color: 'var(--muted)' }}>Install the desktop app or run <code style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '11px' }}>npx @btcmaster1000/peermesh-provider</code></div>
             </div>
           </div>
-          <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '11px', color: 'var(--muted)', whiteSpace: 'nowrap', flexShrink: 0 }}>↓ INSTALL</div>
+          <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '11px', color: '#ff6060', whiteSpace: 'nowrap', flexShrink: 0 }}>↓ DESKTOP</div>
         </a>
       )}
 
-      {/* Desktop / CLI required banner — only show when not sharing and neither detected */}
-      {desktopChecked && !desktopAvailable && !isSharing && (
-        <div
-          style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', background: 'rgba(255,80,80,0.07)', border: '1px solid rgba(255,80,80,0.3)', borderRadius: '12px', padding: '12px 16px', marginBottom: '16px' }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <span style={{ fontSize: '18px' }}>🖥️</span>
-            <div>
-              <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: '#ff6060', letterSpacing: '0.5px', marginBottom: '2px' }}>DESKTOP OR CLI REQUIRED</div>
-              <div style={{ fontSize: '12px', color: 'var(--muted)' }}>Install the desktop app or run <code style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '11px' }}>npx @btcmaster1000/peermesh-provider</code> to share</div>
-            </div>
-          </div>
-          <a href="/api/desktop-download" download style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '11px', color: '#ff6060', whiteSpace: 'nowrap', flexShrink: 0, textDecoration: 'none' }}>↓ DESKTOP</a>
-        </div>
-      )}
-
-      {/* Extension banner — only show when not installed OR update available; hide when installed+current */}
+      {/* Extension banner */}
       {showExtBanner && (
         <a
           href="/extension"
@@ -478,7 +474,7 @@ export default function Dashboard() {
       </div>
 
       {/* Country picker */}
-      <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '12px', padding: '16px', marginBottom: '16px' }}>
+      <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '12px', padding: '16px', marginBottom: '16px', opacity: connecting ? 0.5 : 1, pointerEvents: connecting ? 'none' : 'auto' }}>
         <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--muted)', letterSpacing: '1px', marginBottom: '14px' }}>BROWSE AS...</div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '8px' }}>
           {COUNTRIES.map(c => {
@@ -538,7 +534,10 @@ export default function Dashboard() {
               textAlign: 'center', transition: 'all 0.2s', opacity: (!profile.is_premium && !isSharing) ? 0.5 : 1,
             }}
           >
-            <span style={{ fontSize: '18px' }}>🌐</span>
+            {connecting
+              ? <span style={{ display: 'inline-block', width: '18px', height: '18px', border: '2px solid var(--border)', borderTopColor: 'var(--accent)', borderRadius: '50%', animation: 'spin 0.7s linear infinite' }} />
+              : <span style={{ fontSize: '18px' }}>🌐</span>
+            }
             <span style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', fontWeight: 700, letterSpacing: '0.5px' }}>
               {connecting ? 'CONNECTING...' : 'WEB BROWSER'}
             </span>
@@ -555,9 +554,11 @@ export default function Dashboard() {
             <div style={{ fontSize: '12px', color: isSharing ? 'var(--accent)' : 'var(--muted)' }}>
               {isSharing
                 ? `${sharingStats.requestsHandled} requests · ${formatBytes(sharingStats.bytesServed)} served`
-                : desktopAvailable
-                  ? `${isCLI ? 'CLI' : 'Desktop'} helper ready — toggle to start sharing`
-                  : 'Install the desktop app or run the CLI to share your connection'}
+                : shareToggling
+                  ? 'Connecting...'
+                  : desktopAvailable
+                    ? `${cliRunning && desktopRunning ? 'CLI + Desktop' : cliRunning ? 'CLI' : 'Desktop'} ready — toggle to start sharing`
+                    : 'Install the desktop app or run the CLI to share your connection'}
             </div>
           </div>
           <button
@@ -671,31 +672,6 @@ export default function Dashboard() {
           )}
         </div>
       )}
-
-      {/* CLI provider banner — shows detected state */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', background: 'var(--surface)', border: `1px solid ${isCLI && desktopAvailable ? (cliUpdateAvailable ? 'rgba(255,200,0,0.5)' : 'rgba(0,255,136,0.3)') : 'var(--border)'}`, borderRadius: '10px', marginBottom: '12px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-          <span style={{ fontSize: '16px' }}>⌨️</span>
-          <div>
-            <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: isCLI && desktopAvailable ? (cliUpdateAvailable ? '#ffc800' : 'var(--accent)') : 'var(--muted)', letterSpacing: '0.5px', marginBottom: '2px' }}>
-              {isCLI && desktopAvailable
-                ? cliUpdateAvailable ? `CLI UPDATE AVAILABLE — v${latestCliVersion}` : '● CLI DETECTED — SHARING ACTIVE'
-                : 'SHARE FROM ANY MACHINE'}
-            </div>
-            <div style={{ fontSize: '11px', color: 'var(--muted)' }}>
-              {isCLI && desktopAvailable
-                ? cliUpdateAvailable ? `You have v${desktop?.version}. Run: npm install -g @btcmaster1000/peermesh-provider@latest` : `v${desktop?.version} — in sync with this dashboard`
-                : latestCliVersion ? `Latest: v${latestCliVersion} — no desktop app needed` : 'No desktop app needed — just Node.js'}
-            </div>
-          </div>
-        </div>
-        <button
-          onClick={() => { setCliDocTab(detectedOS); setShowCliDocs(true) }}
-          style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: cliUpdateAvailable ? '#ffc800' : 'var(--accent)', background: 'var(--bg)', border: `1px solid ${cliUpdateAvailable ? 'rgba(255,200,0,0.4)' : 'rgba(0,255,136,0.3)'}`, padding: '5px 10px', borderRadius: '5px', cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0 }}
-        >
-          {cliUpdateAvailable ? '↑ UPDATE →' : 'CLI DOCS →'}
-        </button>
-      </div>
 
       {/* CLI Docs modal */}
       {showCliDocs && (

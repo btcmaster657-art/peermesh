@@ -75,6 +75,10 @@ function updateUI(state) {
 
   if (running) {
     dot.className = 'status-dot on'
+    dot.style.animation = ''
+    dot.style.background = ''
+    dot.style.border = ''
+    dot.style.borderTopColor = ''
     label.textContent = `SHARING — ${config.country}`
     label.style.color = 'var(--accent)'
     country.textContent = getFlagForCountry(config.country)
@@ -82,6 +86,10 @@ function updateUI(state) {
     card.className = 'status-card active'
   } else {
     dot.className = 'status-dot'
+    dot.style.animation = ''
+    dot.style.background = ''
+    dot.style.border = ''
+    dot.style.borderTopColor = ''
     label.textContent = 'NOT SHARING'
     label.style.color = 'var(--muted)'
     country.textContent = ''
@@ -270,16 +278,33 @@ document.getElementById('share-toggle').addEventListener('click', async () => {
   }
   clearMainError()
   const toggle = document.getElementById('share-toggle')
-  toggle.style.opacity = '0.5'
-  toggle.style.pointerEvents = 'none'
+  const label = document.getElementById('status-label')
+  const dot = document.getElementById('status-dot')
+  const card = document.getElementById('status-card')
+  const desc = document.getElementById('toggle-desc')
+
+  toggle.classList.add('loading')
+  label.textContent = 'CONNECTING...'
+  label.style.color = 'var(--muted)'
+  dot.className = 'status-dot'
+  dot.style.animation = 'spin 0.7s linear infinite'
+  dot.style.background = 'transparent'
+  dot.style.border = '2px solid var(--border)'
+  dot.style.borderTopColor = 'var(--accent)'
+  card.className = 'status-card'
+  desc.textContent = 'Please wait...'
+
   try {
     const result = await window.peermesh.toggleSharing()
     if (result && result.error) showMainError(result.error)
   } catch {
     showMainError('Could not toggle sharing — please try again')
   } finally {
-    toggle.style.opacity = ''
-    toggle.style.pointerEvents = ''
+    toggle.classList.remove('loading')
+    dot.style.animation = ''
+    dot.style.background = ''
+    dot.style.border = ''
+    dot.style.borderTopColor = ''
   }
   await pollState()
 })

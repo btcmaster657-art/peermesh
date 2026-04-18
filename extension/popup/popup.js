@@ -22,6 +22,8 @@ let state = {
   session: null,
   isSharing: false,
   shareToggling: false,
+  connecting: false,
+  disconnecting: false,
   helper: null,
   selectedCountry: null,
   peerCounts: {},
@@ -276,12 +278,16 @@ function renderDashboard(app) {
         <div class="via">Browsing via peer</div>
         <div class="country-display">${getFlagForCountry(session.country)} ${session.country}</div>
       </div>
-      <button class="connect-btn disconnect" id="disconnectBtn">DISCONNECT</button>
+      <button class="connect-btn disconnect" id="disconnectBtn" ${state.disconnecting ? 'disabled' : ''}>
+        ${state.disconnecting
+          ? `<span style="display:inline-flex;align-items:center;gap:8px"><span style="width:10px;height:10px;border:2px solid rgba(255,68,102,0.3);border-top-color:#ff4466;border-radius:50%;animation:spin 0.7s linear infinite;display:inline-block"></span>DISCONNECTING...</span>`
+          : 'DISCONNECT'}
+      </button>
     </div>
     ` : `
     <div class="section">
       <div class="section-label">Browse as...</div>
-      <div class="country-grid" id="countryGrid">
+      <div class="country-grid" id="countryGrid" style="${state.connecting ? 'pointer-events:none;opacity:0.5' : ''}">
         ${COUNTRIES.map(c => {
           const count = state.peerCounts[c.code] ?? 0
           return `
@@ -295,8 +301,12 @@ function renderDashboard(app) {
       </div>
     </div>
     <div class="section">
-      <button class="connect-btn" id="connectBtn" ${!selectedCountry || !state.isOnline ? 'disabled' : ''}>
-        ${!state.isOnline ? 'NO INTERNET' : selectedCountry ? `CONNECT ${getFlagForCountry(selectedCountry)} ${selectedCountry}` : 'SELECT A COUNTRY'}
+      <button class="connect-btn" id="connectBtn" ${!selectedCountry || !state.isOnline || state.connecting ? 'disabled' : ''}>
+        ${state.connecting
+          ? `<span style="display:inline-flex;align-items:center;gap:8px"><span style="width:10px;height:10px;border:2px solid rgba(0,0,0,0.2);border-top-color:#000;border-radius:50%;animation:spin 0.7s linear infinite;display:inline-block"></span>CONNECTING...</span>`
+          : !state.isOnline ? 'NO INTERNET'
+          : selectedCountry ? `CONNECT ${getFlagForCountry(selectedCountry)} ${selectedCountry}`
+          : 'SELECT A COUNTRY'}
       </button>
       ${state.error && !state.session ? `
         <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:6px;margin-top:8px;padding:8px 10px;background:rgba(255,68,102,0.08);border:1px solid rgba(255,68,102,0.25);border-radius:8px;font-size:11px;color:#ff6060;line-height:1.5">
@@ -313,10 +323,15 @@ function renderDashboard(app) {
           <p>${isSharing ? 'Sharing active — earning credits' : helperLabel}</p>
           ${state.user?.dailyLimitMb ? `<p style="font-size:10px;color:var(--muted);margin-top:2px">${formatBytes((state.user.dailyLimitMb ?? 0) * 1024 * 1024)} daily limit</p>` : ''}
         </div>
-        <label class="toggle">
-          <input type="checkbox" id="shareToggle" ${isSharing ? 'checked' : ''} ${!helperReady || !state.isOnline || state.shareToggling ? 'disabled style="opacity:0.4;cursor:not-allowed"' : ''}>
-          <span class="toggle-slider"></span>
-        </label>
+        ${state.shareToggling
+          ? `<div style="width:44px;height:24px;border-radius:12px;background:var(--border);display:flex;align-items:center;justify-content:center;flex-shrink:0">
+               <span style="width:10px;height:10px;border:2px solid rgba(255,255,255,0.2);border-top-color:#00ff88;border-radius:50%;animation:spin 0.7s linear infinite;display:inline-block"></span>
+             </div>`
+          : `<label class="toggle">
+               <input type="checkbox" id="shareToggle" ${isSharing ? 'checked' : ''} ${!helperReady || !state.isOnline ? 'disabled style="opacity:0.4;cursor:not-allowed"' : ''}>
+               <span class="toggle-slider"></span>
+             </label>`
+        }
       </div>
     </div>
 
@@ -376,7 +391,7 @@ function renderDashboard(app) {
 // ── Actions ───────────────────────────────────────────────────────────────────
 
 async function connectSession() {
-  if (!state.selectedCountry || !state.user) return
+  if (!state.selectedCountry || !state.user || state.connecting) return
 
   if (!state.isOnline) {
     state.error = 'No internet connection — check your network and try again'
@@ -384,9 +399,9 @@ async function connectSession() {
     return
   }
 
-  const btn = document.getElementById('connectBtn')
-  if (btn) { btn.disabled = true; btn.textContent = 'CONNECTING...' }
+  state.connecting = true
   state.error = null
+  render()
 
   try {
     const res = await fetch(`${API}/api/session/create`, {
@@ -399,7 +414,7 @@ async function connectSession() {
     })
 
     const data = await res.json()
-    if (res.status === 401 || res.status === 403) { await handleExpiredSession(); return }
+    if (res.status === 401 || res.status === 403) { state.connecting = false; await handleExpiredSession(); return }
     if (!res.ok || data.error) throw new Error(data.error ?? `Server error (${res.status})`)
 
     const response = await chrome.runtime.sendMessage({
@@ -416,15 +431,19 @@ async function connectSession() {
 
     state.session = { id: data.sessionId, country: state.selectedCountry, relayEndpoint: data.relayEndpoint }
     await chrome.storage.local.set({ session: state.session })
-    render()
-
   } catch (err) {
     state.error = err.message === 'Failed to fetch' ? 'Network error — could not reach server' : err.message
+  } finally {
+    state.connecting = false
     render()
   }
 }
 
 async function disconnectSession() {
+  if (state.disconnecting) return
+  state.disconnecting = true
+  render()
+
   if (state.session) {
     await chrome.runtime.sendMessage({ type: 'DISCONNECT' })
     try {
@@ -440,6 +459,7 @@ async function disconnectSession() {
   }
 
   state.session = null
+  state.disconnecting = false
   await chrome.storage.local.set({ session: null })
   render()
 }
