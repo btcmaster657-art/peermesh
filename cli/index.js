@@ -29,7 +29,7 @@ const API_BASE    = 'https://peermesh-beta.vercel.app'
 const RELAY_WS    = 'wss://peermesh-relay.fly.dev'
 const CONFIG_DIR  = join(homedir(), '.peermesh')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
-const VERSION     = '1.0.2'
+const VERSION     = '1.0.3'
 
 const BLOCKED = [/\.onion$/i, /^smtp\./i, /^mail\./i, /torrent/i]
 const PRIVATE = [/^localhost$/i, /^127\./, /^10\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./]
@@ -482,7 +482,7 @@ async function authenticate() {
   if (result.error) { console.error(`  ✗  ${result.error}`); process.exit(1) }
 
   const { device_code, user_code, interval = 3 } = result
-  const verification_uri = `${API_BASE}/extension`
+  const verification_uri = `${API_BASE}/extension?activate=1`
 
   console.log('  ┌─────────────────────────────────────────┐')
   console.log('  │  Sign in to PeerMesh                    │')
