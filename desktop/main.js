@@ -1489,12 +1489,15 @@ function legacyLog(...args) {
 }
 // Named aliases used throughout the file
 const logState = (label) => {
+  const activeSlots = slotStates.filter(slot => slot.running).length
   _write('DEBUG', 'STATE', `[${label}]`, {
-    running,
+    running: activeSlots > 0,
     shareEnabled: config.shareEnabled,
     peerSharing,
     peerPort,
-    wsState: ws ? ws.readyState : 'null',
+    configuredSlots: config.connectionSlots ?? 1,
+    activeSlots,
+    wsStates: slotStates.map(slot => `${slot.index}:${slot.ws ? slot.ws.readyState : 'null'}`).join(','),
     tunnels: activeTunnels.size,
   })
 }
@@ -1543,31 +1546,161 @@ function notifyPeer(p, body) {
 
 let tray = null
 let settingsWindow = null
-let ws = null
 let running = false
-let config = { token: '', userId: '', country: 'RW', trust: 50, extId: '', shareEnabled: false }
+let config = { token: '', userId: '', country: 'RW', trust: 50, extId: '', baseDeviceId: '', shareEnabled: false, connectionSlots: 1, todaySharedBytes: 0, todaySharedBytesDate: null, dailyShareLimitMb: null }
 let stats = { bytesServed: 0, requestsHandled: 0, connectedAt: null }
-let reconnectTimer = null
-let reconnectDelay = 2000
 const activeTunnels = new Map()
+const SLOT_CAP = 32
+let slotStates = []
+let _userStopped = false
+let limitHit = false
 
-function sendRelayMessage(data) {
-  if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data))
+function clampSlots(value) {
+  const parsed = parseInt(value, 10)
+  if (!Number.isInteger(parsed)) return 1
+  return Math.max(1, Math.min(SLOT_CAP, parsed))
 }
 
-function closeTunnel(tunnelId, notifyRelay = false) {
-  const tunnel = activeTunnels.get(tunnelId)
+function slotPrefix(slot) {
+  return `[slot-${slot.index}]`
+}
+
+function createSlotState(index) {
+  return {
+    index,
+    deviceId: `${config.baseDeviceId}_slot_${index}`,
+    ws: null,
+    running: false,
+    reconnectTimer: null,
+    reconnectDelay: 2000,
+    heartbeatTimer: null,
+    sessionBytes: 0,
+    requestsHandled: 0,
+    connectedAt: null,
+    activeTunnels: new Map(),
+  }
+}
+
+function ensureSlotStates() {
+  const desired = clampSlots(config.connectionSlots ?? 1)
+  while (slotStates.length < desired) slotStates.push(createSlotState(slotStates.length))
+  if (slotStates.length > desired) slotStates = slotStates.slice(0, desired)
+  for (const slot of slotStates) slot.deviceId = `${config.baseDeviceId}_slot_${slot.index}`
+  return slotStates
+}
+
+function activeSlotCount() {
+  return slotStates.filter(slot => slot.running).length
+}
+
+function getAggregateStats() {
+  return slotStates.reduce((acc, slot) => {
+    acc.bytesServed += slot.sessionBytes
+    acc.requestsHandled += slot.requestsHandled
+    return acc
+  }, { bytesServed: 0, requestsHandled: 0 })
+}
+
+function getSlotSummary() {
+  return slotStates.map(slot => ({
+    index: slot.index,
+    deviceId: slot.deviceId,
+    running: slot.running,
+    requestsHandled: slot.requestsHandled,
+    bytesServed: slot.sessionBytes,
+    connectedAt: slot.connectedAt,
+  }))
+}
+
+function syncAggregateState() {
+  const aggregate = getAggregateStats()
+  running = activeSlotCount() > 0
+  stats = {
+    bytesServed: aggregate.bytesServed,
+    requestsHandled: aggregate.requestsHandled,
+    connectedAt: slotStates.find(slot => slot.connectedAt)?.connectedAt ?? null,
+  }
+}
+
+function getSlotWarning(slots) {
+  if (slots > 16) return 'Very high resource usage - recommended for servers or dedicated machines only.'
+  if (slots > 8) return 'High resource usage - ensure a stable connection.'
+  return null
+}
+
+function syncTodaySharedBytesDay() {
+  const today = new Date().toISOString().slice(0, 10)
+  if (config.todaySharedBytesDate !== today) {
+    config.todaySharedBytesDate = today
+    config.todaySharedBytes = 0
+    limitHit = false
+  }
+}
+
+function getDailyLimitBytes() {
+  if (config.dailyShareLimitMb == null) return null
+  return config.dailyShareLimitMb * 1024 * 1024
+}
+
+function enforceLocalLimit() {
+  syncTodaySharedBytesDay()
+  const limitBytes = getDailyLimitBytes()
+  if (!limitBytes || limitHit || config.todaySharedBytes == null) return
+  const totalToday = (config.todaySharedBytes ?? 0) + getAggregateStats().bytesServed
+  if (totalToday < limitBytes) return
+
+  limitHit = true
+  log.warn('LIMIT', 'daily limit reached', { totalToday, limitBytes })
+  showNotification('PeerMesh paused', `Daily share limit reached (${formatBytes(limitBytes)})`)
+  stopRelay()
+}
+
+async function pollTodayBytes() {
+  if (!config.token) return null
+  syncTodaySharedBytesDay()
+  logRequest('GET', `${API_BASE}/api/user/sharing`)
+  try {
+    const res = await fetch(`${API_BASE}/api/user/sharing`, {
+      headers: { Authorization: `Bearer ${config.token}` },
+      signal: AbortSignal.timeout(4000),
+    })
+    logResponse('GET', `${API_BASE}/api/user/sharing`, res.status)
+    if (!res.ok) return null
+    const data = await res.json()
+    config.todaySharedBytes = data.total_bytes_today ?? 0
+    config.todaySharedBytesDate = new Date().toISOString().slice(0, 10)
+    config.dailyShareLimitMb = data.daily_share_limit_mb ?? null
+    limitHit = data.daily_limit_bytes == null
+      ? false
+      : ((config.todaySharedBytes ?? 0) + getAggregateStats().bytesServed) >= data.daily_limit_bytes
+    saveConfig()
+    if (limitHit && config.shareEnabled) enforceLocalLimit()
+    return data
+  } catch (e) {
+    log.warn('API', 'pollTodayBytes failed', { err: e.message })
+    return null
+  }
+}
+
+function sendRelayMessage(slot, data) {
+  if (slot.ws?.readyState === WebSocket.OPEN) slot.ws.send(JSON.stringify(data))
+}
+
+function closeTunnel(slot, tunnelId, notifyRelay = false) {
+  const tunnel = slot.activeTunnels.get(tunnelId)
   if (!tunnel || tunnel.closed) return
   tunnel.closed = true
+  slot.activeTunnels.delete(tunnelId)
   activeTunnels.delete(tunnelId)
-  if (notifyRelay) sendRelayMessage({ type: 'tunnel_close', tunnelId })
+  if (notifyRelay) sendRelayMessage(slot, { type: 'tunnel_close', tunnelId })
   if (!tunnel.socket.destroyed) tunnel.socket.destroy()
-  logTunnel('CLOSED', tunnelId, { notifyRelay, remaining: activeTunnels.size })
+  syncAggregateState()
+  logTunnel('CLOSED', tunnelId, { notifyRelay, remaining: activeTunnels.size, slot: slot.index })
 }
 
-function closeAllTunnels(notifyRelay = false) {
-  const count = activeTunnels.size
-  for (const tunnelId of [...activeTunnels.keys()]) closeTunnel(tunnelId, notifyRelay)
+function closeAllTunnels(slot, notifyRelay = false) {
+  const count = slot.activeTunnels.size
+  for (const tunnelId of [...slot.activeTunnels.keys()]) closeTunnel(slot, tunnelId, notifyRelay)
   if (count > 0) log.info('TUNNEL', `closeAllTunnels — closed ${count} tunnels`)
 }
 
@@ -1584,9 +1717,12 @@ function loadConfig() {
   } catch (e) { log.error('CONFIG', 'loadConfig error', { err: e.message }) }
   if (!config.extId) {
     config.extId = require('crypto').randomUUID()
-    saveConfig()
     log.info('CONFIG', 'generated new extId', { extId: config.extId })
   }
+  if (!config.baseDeviceId) config.baseDeviceId = config.extId
+  config.connectionSlots = clampSlots(config.connectionSlots ?? 1)
+  ensureSlotStates()
+  saveConfig()
 }
 
 function saveConfig() {
@@ -1594,10 +1730,19 @@ function saveConfig() {
 }
 
 function getPublicState() {
+  syncAggregateState()
   return {
     running,
     shareEnabled: !!config.shareEnabled,
     config: { ...config, token: config.token ? '***' : '' },
+    baseDeviceId: config.baseDeviceId || null,
+    connectionSlots: clampSlots(config.connectionSlots ?? 1),
+    slots: {
+      configured: clampSlots(config.connectionSlots ?? 1),
+      active: activeSlotCount(),
+      statuses: getSlotSummary(),
+      warning: getSlotWarning(clampSlots(config.connectionSlots ?? 1)),
+    },
     stats,
     version: DESKTOP_VERSION,
   }
@@ -1732,13 +1877,20 @@ function isAllowed(hostname) {
 
 // ── Fetch handler ─────────────────────────────────────────────────────────────
 
-async function handleFetch(request) {
+function addBytes(slot, bytes) {
+  slot.sessionBytes += bytes
+  syncAggregateState()
+  flushStats(bytes)
+  enforceLocalLimit()
+}
+
+async function handleFetch(slot, request) {
   const { requestId, url, method = 'GET', headers = {}, body = null } = request
-  log.info('PROXY', `fetch request`, { requestId: requestId?.slice(0,8), method, url })
+  log.info('PROXY', `${slotPrefix(slot)} fetch request`, { requestId: requestId?.slice(0,8), method, url })
   try {
     const parsed = new URL(url)
     if (!isAllowed(parsed.hostname)) {
-      log.warn('PROXY', 'blocked URL', { hostname: parsed.hostname, requestId: requestId?.slice(0,8) })
+      log.warn('PROXY', 'blocked URL', { hostname: parsed.hostname, requestId: requestId?.slice(0,8), slot: slot.index })
       return { requestId, status: 403, headers: {}, body: '', error: 'URL not allowed' }
     }
     const res = await fetch(url, {
@@ -1759,14 +1911,11 @@ async function handleFetch(request) {
     res.headers.forEach((v, k) => {
       if (!['content-encoding', 'transfer-encoding', 'connection', 'keep-alive'].includes(k)) responseHeaders[k] = v
     })
-    const bodyLen = responseBody.length
-    stats.bytesServed += bodyLen
-    stats.requestsHandled++
-    log.info('PROXY', `fetch response`, { requestId: requestId?.slice(0,8), status: res.status, bytes: bodyLen, finalUrl: res.url !== url ? res.url : undefined })
-    flushStats(bodyLen)
+    addBytes(slot, responseBody.length)
+    log.info('PROXY', `${slotPrefix(slot)} fetch response`, { requestId: requestId?.slice(0,8), status: res.status, bytes: responseBody.length, finalUrl: res.url !== url ? res.url : undefined })
     return { requestId, status: res.status, headers: responseHeaders, body: responseBody, finalUrl: res.url }
   } catch (err) {
-    log.error('PROXY', 'fetch error', { requestId: requestId?.slice(0,8), url, err: err.message })
+    log.error('PROXY', `${slotPrefix(slot)} fetch error`, { requestId: requestId?.slice(0,8), url, err: err.message })
     return { requestId, status: 502, headers: {}, body: '', error: err.message }
   }
 }
@@ -1971,6 +2120,199 @@ function stopRelay() {
 
 // ── Local HTTP proxy server ───────────────────────────────────────────────────
 
+// Slot-aware relay runtime overrides the legacy single-socket flow above.
+function stopHeartbeat(slot) {
+  if (slot?.heartbeatTimer) { clearInterval(slot.heartbeatTimer); slot.heartbeatTimer = null }
+  if (!slot || !config.token || !config.userId) return
+  log.debug('HEARTBEAT', 'heartbeat timer stopped', { slot: slot.index })
+  logRequest('DELETE', `${API_BASE}/api/user/sharing`, { device_id: slot.deviceId })
+  fetch(`${API_BASE}/api/user/sharing`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
+    body: JSON.stringify({ device_id: slot.deviceId }),
+  })
+    .then(r => logResponse('DELETE', `${API_BASE}/api/user/sharing`, r.status))
+    .catch(e => log.warn('API', 'stopHeartbeat DELETE failed', { err: e.message, slot: slot.index }))
+}
+
+function sendHeartbeat(slot) {
+  if (!slot || !config.token || !config.userId) return
+  logRequest('PUT', `${API_BASE}/api/user/sharing`, { device_id: slot.deviceId })
+  fetch(`${API_BASE}/api/user/sharing`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
+    body: JSON.stringify({ device_id: slot.deviceId }),
+  })
+    .then(r => { logResponse('PUT', `${API_BASE}/api/user/sharing`, r.status); if (!r.ok) r.json().then(b => log.warn('HEARTBEAT', 'PUT failed', { status: r.status, body: b, slot: slot.index })) })
+    .catch(e => log.warn('HEARTBEAT', 'PUT error', { err: e.message, slot: slot.index }))
+}
+
+function connectSlot(slot) {
+  if (!config.token || !config.userId) return
+  if (slot.ws && (slot.ws.readyState === WebSocket.OPEN || slot.ws.readyState === WebSocket.CONNECTING)) return
+  log.info('RELAY', `${slotPrefix(slot)} connecting`, { deviceId: slot.deviceId, relay: RELAY_WS })
+  slot.ws = new WebSocket(RELAY_WS)
+
+  slot.ws.on('open', () => {
+    slot.reconnectDelay = 2000
+    if (!config.shareEnabled) {
+      log.warn('RELAY', `${slotPrefix(slot)} shareEnabled=false after open`)
+      slot.ws.close(1000)
+      return
+    }
+    const reg = {
+      type: 'register_provider',
+      userId: config.userId,
+      country: config.country,
+      trustScore: config.trust,
+      agentMode: true,
+      providerKind: 'desktop',
+      supportsHttp: true,
+      supportsTunnel: true,
+      deviceId: slot.deviceId,
+      baseDeviceId: config.baseDeviceId,
+    }
+    logRelay('SEND', 'register_provider', { slot: slot.index, deviceId: slot.deviceId })
+    slot.ws.send(JSON.stringify(reg))
+    if (slot.heartbeatTimer) clearInterval(slot.heartbeatTimer)
+    slot.heartbeatTimer = setInterval(() => {
+      sendHeartbeat(slot)
+      if (slot.index === 0) pollTodayBytes()
+    }, 30_000)
+    sendHeartbeat(slot)
+    if (slot.index === 0) pollTodayBytes()
+    updateTray()
+  })
+
+  slot.ws.on('ping', () => { try { slot.ws.pong() } catch {} })
+
+  slot.ws.on('message', async (data) => {
+    try {
+      const msg = JSON.parse(data.toString())
+      if (msg.type === 'tunnel_data' || msg.type === 'proxy_ws_data') {
+        log.debug('RELAY', `RECV ${msg.type}`, { slot: slot.index, tunnelId: msg.tunnelId?.slice(0,8), sessionId: msg.sessionId?.slice(0,8), bytes: msg.data?.length })
+      } else {
+        logRelay('RECV', msg.type, { slot: slot.index, sessionId: msg.sessionId?.slice(0,8), tunnelId: msg.tunnelId?.slice(0,8), message: msg.message, hostname: msg.hostname, port: msg.port })
+      }
+
+      if (msg.type === 'registered') {
+        slot.running = true
+        slot.connectedAt = new Date().toISOString()
+        syncAggregateState()
+        if (slot.index === 0) {
+          persistSharingState(true)
+          showNotification('PeerMesh Active', `Sharing your ${config.country} connection`)
+        }
+        updateTray()
+      } else if (msg.type === 'error') {
+        log.error('RELAY', `${slotPrefix(slot)} relay error`, { message: msg.message })
+        if (msg.message?.includes('Replaced')) {
+          slot.ws.removeAllListeners('close')
+          slot.ws.close(1000)
+          slot.running = false
+          slot.connectedAt = null
+          syncAggregateState()
+          updateTray()
+        }
+      } else if (msg.type === 'proxy_ws_data') {
+        const tunnel = activeTunnels.get(`ws_${msg.sessionId}`)
+        if (tunnel?.socket && !tunnel.socket.destroyed) tunnel.socket.write(Buffer.from(msg.data, 'base64'))
+      } else if (msg.type === 'proxy_ws_close') {
+        const tunnel = activeTunnels.get(`ws_${msg.sessionId}`)
+        if (tunnel) { if (!tunnel.socket.destroyed) tunnel.socket.destroy(); activeTunnels.delete(`ws_${msg.sessionId}`) }
+      } else if (msg.type === 'session_request') {
+        sendRelayMessage(slot, { type: 'agent_ready', sessionId: msg.sessionId })
+      } else if (msg.type === 'proxy_request') {
+        slot.requestsHandled++
+        syncAggregateState()
+        const response = await handleFetch(slot, msg.request)
+        sendRelayMessage(slot, { type: 'proxy_response', sessionId: msg.sessionId, response })
+      } else if (msg.type === 'open_tunnel') {
+        slot.requestsHandled++
+        syncAggregateState()
+        const socket = net.connect(msg.port, msg.hostname)
+        const tunnel = { socket, closed: false, sessionId: msg.sessionId ?? null, slotIndex: slot.index }
+        slot.activeTunnels.set(msg.tunnelId, tunnel)
+        activeTunnels.set(msg.tunnelId, tunnel)
+        socket.on('connect', () => sendRelayMessage(slot, { type: 'tunnel_ready', tunnelId: msg.tunnelId }))
+        socket.on('data', (chunk) => {
+          sendRelayMessage(slot, { type: 'tunnel_data', tunnelId: msg.tunnelId, data: chunk.toString('base64') })
+          addBytes(slot, chunk.length)
+        })
+        socket.on('end', () => closeTunnel(slot, msg.tunnelId, true))
+        socket.on('close', () => { slot.activeTunnels.delete(msg.tunnelId); activeTunnels.delete(msg.tunnelId); syncAggregateState() })
+        socket.on('error', () => closeTunnel(slot, msg.tunnelId, true))
+      } else if (msg.type === 'tunnel_data') {
+        const tunnel = slot.activeTunnels.get(msg.tunnelId)
+        if (tunnel?.socket && !tunnel.socket.destroyed) tunnel.socket.write(Buffer.from(msg.data, 'base64'))
+      } else if (msg.type === 'tunnel_close') {
+        closeTunnel(slot, msg.tunnelId, false)
+      } else if (msg.type === 'session_ended') {
+        closeAllTunnels(slot, false)
+        updateTray()
+      }
+    } catch (e) {
+      log.error('RELAY', `${slotPrefix(slot)} message handler exception`, { err: e.message })
+    }
+  })
+
+  slot.ws.on('close', (code, reason) => {
+    slot.running = false
+    slot.connectedAt = null
+    closeAllTunnels(slot, false)
+    slot.ws = null
+    syncAggregateState()
+    updateTray()
+    if (code !== 1000 && !_userStopped && config.shareEnabled) {
+      slot.reconnectTimer = setTimeout(() => connectSlot(slot), slot.reconnectDelay)
+      slot.reconnectDelay = Math.min(slot.reconnectDelay * 2, 30000)
+    } else {
+      log.info('RELAY', `${slotPrefix(slot)} no reconnect`, { code, reason: reason?.toString() || '(none)' })
+    }
+  })
+
+  slot.ws.on('error', (e) => log.error('RELAY', `${slotPrefix(slot)} WebSocket error`, { code: e.code, err: e.message }))
+}
+
+function connectRelay() {
+  if (!config.token || !config.userId) { log.warn('RELAY', 'connectRelay skipped - no token/userId'); return }
+  syncTodaySharedBytesDay()
+  if (limitHit) {
+    log.warn('RELAY', 'connectRelay skipped - daily limit already reached')
+    config.shareEnabled = false
+    saveConfig()
+    updateTray()
+    return
+  }
+  _userStopped = false
+  ensureSlotStates().forEach(slot => connectSlot(slot))
+  syncAggregateState()
+  log.info('RELAY', 'connectRelay START', { userId: config.userId, country: config.country, relay: RELAY_WS, slots: config.connectionSlots })
+  logState('pre-connect')
+}
+
+function stopRelay() {
+  log.info('RELAY', 'stopRelay called')
+  logState('pre-stop')
+  _userStopped = true
+  config.shareEnabled = false
+  saveConfig()
+  for (const slot of slotStates) {
+    if (slot.reconnectTimer) { clearTimeout(slot.reconnectTimer); slot.reconnectTimer = null }
+    stopHeartbeat(slot)
+    if (slot.ws) { slot.ws.removeAllListeners('close'); slot.ws.close(1000); slot.ws = null }
+    closeAllTunnels(slot, false)
+    slot.running = false
+    slot.connectedAt = null
+    slot.sessionBytes = 0
+    slot.requestsHandled = 0
+  }
+  syncAggregateState()
+  persistSharingState(false)
+  logState('post-stop')
+  updateTray()
+}
+
 let proxySession = null
 
 function openTunnelWs(hostname, port, onOpen) {
@@ -2123,12 +2465,14 @@ const controlServer = http.createServer((req, res) => {
   logControl(req.method, url.pathname, { origin: origin.slice(0, 40) || undefined })
 
   if (req.method === 'GET' && url.pathname === '/health') {
+    syncAggregateState()
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ running, shareEnabled: !!config.shareEnabled, country: config.country, userId: config.userId?.slice(0, 8), proxyPort: RELAY_PROXY_PORT, stats, version: DESKTOP_VERSION }))
     return
   }
   if (req.method === 'GET' && url.pathname === '/native/state') {
-    const state = { available: true, running, shareEnabled: !!config.shareEnabled, configured: !!(config.token && config.userId), country: config.country, userId: config.userId, version: DESKTOP_VERSION, where: 'desktop', stats }
+    const publicState = getPublicState()
+    const state = { available: true, configured: !!(config.token && config.userId), country: config.country, userId: config.userId, where: 'desktop', ...publicState }
     log.debug('CONTROL', '/native/state response', { running, shareEnabled: state.shareEnabled, peerSharing })
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify(state))
@@ -2149,10 +2493,11 @@ const controlServer = http.createServer((req, res) => {
           } catch (e) { log.warn('CONTROL', '/native/auth verify error (offline?)', { err: e.message }) }
         }
         config = { ...config, token: data.token ?? config.token, userId: data.userId ?? config.userId, country: data.country ?? config.country, trust: data.trust ?? config.trust }
+        await pollTodayBytes()
         saveConfig(); updateTray()
         log.info('CONTROL', '/native/auth — config updated', { userId: config.userId, country: config.country })
         res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ available: true, running, shareEnabled: !!config.shareEnabled, configured: !!(config.token && config.userId), country: config.country, userId: config.userId, version: DESKTOP_VERSION }))
+        res.end(JSON.stringify({ available: true, configured: !!(config.token && config.userId), country: config.country, userId: config.userId, where: 'desktop', ...getPublicState() }))
       } catch (e) { log.error('CONTROL', '/native/auth error', { err: e.message }); res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: e.message })) }
     })
     return
@@ -2160,17 +2505,22 @@ const controlServer = http.createServer((req, res) => {
   if (req.method === 'POST' && url.pathname === '/native/share/start') {
     let body = ''
     req.on('data', d => body += d)
-    req.on('end', () => {
+    req.on('end', async () => {
       try {
         const data = JSON.parse(body || '{}')
         log.info('CONTROL', '/native/share/start', { userId: data.userId || config.userId, country: data.country || config.country })
-        config = { ...config, token: data.token ?? config.token, userId: data.userId ?? config.userId, country: data.country ?? config.country, trust: data.trust ?? config.trust, shareEnabled: true }
+        config = { ...config, token: data.token ?? config.token, userId: data.userId ?? config.userId, country: data.country ?? config.country, trust: data.trust ?? config.trust, connectionSlots: clampSlots(data.slots ?? data.connectionSlots ?? config.connectionSlots), shareEnabled: true }
+        ensureSlotStates()
+        await pollTodayBytes()
         saveConfig()
         logState('share/start')
-        if (!running) connectRelay()
+        if (running) stopRelay()
+        config.shareEnabled = true
+        saveConfig()
+        connectRelay()
         updateTray()
         res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ available: true, running: true, shareEnabled: true, configured: !!(config.token && config.userId), country: config.country, userId: config.userId, version: DESKTOP_VERSION }))
+        res.end(JSON.stringify({ available: true, configured: !!(config.token && config.userId), country: config.country, userId: config.userId, where: 'desktop', ...getPublicState() }))
       } catch (e) { log.error('CONTROL', '/native/share/start error', { err: e.message }); res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: e.message })) }
     })
     return
@@ -2180,7 +2530,7 @@ const controlServer = http.createServer((req, res) => {
     stopRelay()
     persistSharingState(false)
     res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ available: true, running: false, shareEnabled: false, configured: !!(config.token && config.userId), country: config.country, userId: config.userId, version: DESKTOP_VERSION }))
+    res.end(JSON.stringify({ available: true, configured: !!(config.token && config.userId), country: config.country, userId: config.userId, where: 'desktop', ...getPublicState() }))
     return
   }
   if (req.method === 'POST' && url.pathname === '/native/peer/register') {
@@ -2203,7 +2553,7 @@ const controlServer = http.createServer((req, res) => {
     log.info('CONTROL', '/native/show — opening window')
     showWindow()
     res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ available: true, running, shareEnabled: !!config.shareEnabled, configured: !!(config.token && config.userId), country: config.country, userId: config.userId, version: DESKTOP_VERSION }))
+    res.end(JSON.stringify({ available: true, configured: !!(config.token && config.userId), country: config.country, userId: config.userId, where: 'desktop', ...getPublicState() }))
     return
   }
   if (req.method === 'POST' && url.pathname === '/start') {
@@ -2213,7 +2563,7 @@ const controlServer = http.createServer((req, res) => {
       try {
         const data = JSON.parse(body)
         log.info('CONTROL', '/start called', { userId: data.userId || config.userId })
-        config = { ...config, ...data, shareEnabled: true }
+        config = { ...config, ...data, connectionSlots: clampSlots(data.slots ?? data.connectionSlots ?? config.connectionSlots), shareEnabled: true }
         saveConfig(); stopRelay(); config.shareEnabled = true; saveConfig(); connectRelay()
         res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: true }))
       } catch (e) { log.error('CONTROL', '/start error', { err: e.message }); res.writeHead(400); res.end(JSON.stringify({ error: e.message })) }
@@ -2327,6 +2677,66 @@ function updateTray() {
 
 // ── Settings window ───────────────────────────────────────────────────────────
 
+function updateTray() {
+  if (!tray) return
+  syncAggregateState()
+  const configuredSlots = clampSlots(config.connectionSlots ?? 1)
+  const activeSlots = activeSlotCount()
+  const slotWarning = getSlotWarning(configuredSlots)
+  const menuItems = [
+    { label: 'PeerMesh', enabled: false },
+    { type: 'separator' },
+    { label: running ? `Sharing - ${config.country} (${configuredSlots} slots)` : (peerSharing ? 'Sharing (via CLI)' : 'Not sharing'), enabled: false },
+    { label: running ? `${activeSlots} / ${configuredSlots} slots active - ${stats.requestsHandled} requests - ${formatBytes(stats.bytesServed)} served` : (peerSharing ? 'CLI is the active provider' : 'Click to start sharing'), enabled: false },
+  ]
+  if (slotWarning) menuItems.push({ label: slotWarning, enabled: false })
+  menuItems.push(
+    { type: 'separator' },
+    {
+      label: running ? 'Stop Sharing' : (peerSharing ? 'Stop Sharing (CLI)' : 'Start Sharing'),
+      click: async () => {
+        if (_sharingToggleBusy) { log.warn('TRAY', 'toggle click ignored - busy'); return }
+        _sharingToggleBusy = true
+        if (peerPort) {
+          try {
+            const r = await fetch(`http://127.0.0.1:${peerPort}/native/state`, { signal: AbortSignal.timeout(1500) })
+            if (r.ok) { const d = await r.json(); peerSharing = !!d.running }
+          } catch {}
+        }
+        const wasRunning = running
+        const wasPeerSharing = peerSharing
+        if (wasRunning || wasPeerSharing) {
+          peerSharing = false
+          if (_cliWatchTimer) { clearInterval(_cliWatchTimer); _cliWatchTimer = null }
+          stopRelay()
+          if (peerPort && wasPeerSharing) {
+            try { await fetch(`http://127.0.0.1:${peerPort}/native/share/stop`, { method: 'POST', signal: AbortSignal.timeout(2000) }) } catch {}
+          }
+          peerPort = null
+          updateTray()
+        } else if (config.token && config.userId) {
+          config.shareEnabled = true
+          saveConfig()
+          connectRelay()
+        } else {
+          shell.openExternal(`${API_BASE}/dashboard`)
+          showWindow()
+        }
+        _sharingToggleBusy = false
+        logState('post-toggle')
+      },
+    },
+    { type: 'separator' },
+    { label: 'Settings', click: showWindow },
+    { label: 'Open Dashboard', click: () => shell.openExternal(`${API_BASE}/dashboard`) },
+    { label: 'Open Debug Log', click: () => shell.openPath(LOG_FILE) },
+    { type: 'separator' },
+    { label: 'Quit', click: () => { stopRelay(); if (settingsWindow) { settingsWindow.removeAllListeners('close'); settingsWindow.destroy() } app.quit() } },
+  )
+  tray.setContextMenu(Menu.buildFromTemplate(menuItems))
+  tray.setToolTip(running ? `PeerMesh - Sharing (${config.country}, ${configuredSlots} slots)` : 'PeerMesh - Inactive')
+}
+
 function showWindow() {
   if (settingsWindow) {
     if (settingsWindow.isMinimized()) settingsWindow.restore()
@@ -2421,6 +2831,23 @@ ipcMain.handle('get-state', () => {
   return state
 })
 
+ipcMain.handle('set-connection-slots', async (_, slots) => {
+  const nextSlots = clampSlots(slots)
+  const restart = running
+  config.connectionSlots = nextSlots
+  ensureSlotStates()
+  saveConfig()
+  if (restart) {
+    stopRelay()
+    config.shareEnabled = true
+    saveConfig()
+    connectRelay()
+  } else {
+    updateTray()
+  }
+  return { success: true, slots: nextSlots, state: getPublicState() }
+})
+
 ipcMain.handle('sign-in', async (_, { token, userId, country, trust }) => {
   logIpc('sign-in attempt', { userId, country })
   try {
@@ -2438,7 +2865,14 @@ ipcMain.handle('sign-in', async (_, { token, userId, country, trust }) => {
     logRequest('GET', `${API_BASE}/api/user/sharing`)
     const res = await fetch(`${API_BASE}/api/user/sharing`, { headers: { 'Authorization': `Bearer ${token}` }, signal: AbortSignal.timeout(4000) })
     logResponse('GET', `${API_BASE}/api/user/sharing`, res.status)
-    if (res.ok) { const data = await res.json(); config.hasAcceptedProviderTerms = data.has_accepted_provider_terms ?? false }
+    if (res.ok) {
+      const data = await res.json()
+      config.hasAcceptedProviderTerms = data.has_accepted_provider_terms ?? false
+      config.todaySharedBytes = data.total_bytes_today ?? 0
+      config.todaySharedBytesDate = new Date().toISOString().slice(0, 10)
+      config.dailyShareLimitMb = data.daily_share_limit_mb ?? null
+      limitHit = data.daily_limit_bytes == null ? false : (config.todaySharedBytes ?? 0) >= data.daily_limit_bytes
+    }
   } catch {}
   saveConfig(); updateTray(); showWindow()
   log.info('IPC', 'sign-in success', { userId, country })
@@ -2483,7 +2917,7 @@ ipcMain.handle('toggle-sharing', async () => {
 ipcMain.handle('sign-out', () => {
   logIpc('sign-out', { userId: config.userId })
   stopRelay()
-  config = { token: '', userId: '', country: 'RW', trust: 50, extId: config.extId, shareEnabled: false }
+  config = { token: '', userId: '', country: 'RW', trust: 50, extId: config.extId, baseDeviceId: config.baseDeviceId, shareEnabled: false, connectionSlots: clampSlots(config.connectionSlots ?? 1), hasAcceptedProviderTerms: false }
   saveConfig(); persistSharingState(false); updateTray()
   log.info('IPC', 'signed out')
   return { success: true }

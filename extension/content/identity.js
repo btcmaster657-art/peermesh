@@ -1,101 +1,240 @@
-// identity.js — PeerMesh identity spoofing
-// Injected as MAIN world script when a session is active
-// Spoofs: timezone, language, WebRTC ICE policy, UA hints, canvas noise
+// identity.js - PeerMesh identity spoofing
+// Injected into the MAIN world while a PeerMesh session is active.
 
 ;(function () {
-  const tz = document.currentScript?.dataset?.tz || ''
-  const lang = document.currentScript?.dataset?.lang || 'en-US'
-  if (!tz) return
+  const rawProfile = document.currentScript?.dataset?.profile || ''
+  if (!rawProfile) return
 
-  // 1. Timezone
-  const _DTF = Intl.DateTimeFormat
-  Intl.DateTimeFormat = function (locales, opts = {}) {
-    opts.timeZone = opts.timeZone || tz
-    return new _DTF(locales, opts)
+  let profile
+  try {
+    profile = JSON.parse(rawProfile)
+  } catch {
+    return
   }
-  Intl.DateTimeFormat.prototype = _DTF.prototype
-  Intl.DateTimeFormat.supportedLocalesOf = _DTF.supportedLocalesOf.bind(_DTF)
+
+  const seedSource = `${profile.country}:${profile.tz}:${profile.platform}:${profile.userAgent}`
+  const seed = Array.from(seedSource).reduce((sum, char, index) => sum + (char.charCodeAt(0) * (index + 1)), 0)
+
+  function defineGetter(target, property, getter) {
+    try {
+      Object.defineProperty(target, property, { get: getter, configurable: true })
+    } catch {}
+  }
+
+  function seededOffset(value, spread) {
+    return ((((seed * (value + 3)) % (spread * 2 + 1)) - spread) || 0) / 1000
+  }
+
+  function deterministicNoise(index, scale) {
+    return ((((seed + index * 17) % 11) - 5) / 5) * scale
+  }
+
+  function makePluginArray() {
+    const pdfPlugin = {
+      name: 'Chrome PDF Viewer',
+      filename: 'internal-pdf-viewer',
+      description: 'Portable Document Format',
+      length: 1,
+      0: { type: 'application/pdf', suffixes: 'pdf', description: 'Portable Document Format' },
+      item(i) { return this[i] ?? null },
+      namedItem(name) { return name === 'application/pdf' ? this[0] : null },
+    }
+    const plugins = {
+      0: pdfPlugin,
+      length: 1,
+      item(i) { return this[i] ?? null },
+      namedItem(name) { return name === 'Chrome PDF Viewer' ? this[0] : null },
+      refresh() {},
+      [Symbol.iterator]: function* iterator() { yield this[0] },
+    }
+    const mimeTypes = {
+      0: pdfPlugin[0],
+      length: 1,
+      item(i) { return this[i] ?? null },
+      namedItem(name) { return name === 'application/pdf' ? this[0] : null },
+      [Symbol.iterator]: function* iterator() { yield this[0] },
+    }
+    return { plugins, mimeTypes }
+  }
+
+  const pluginData = makePluginArray()
+
+  // Timezone
+  const NativeDTF = Intl.DateTimeFormat
+  Intl.DateTimeFormat = function DateTimeFormat(locales, options = {}) {
+    return new NativeDTF(locales, { ...options, timeZone: options.timeZone || profile.tz })
+  }
+  Intl.DateTimeFormat.prototype = NativeDTF.prototype
+  Intl.DateTimeFormat.supportedLocalesOf = NativeDTF.supportedLocalesOf.bind(NativeDTF)
 
   const tzOffset = (() => {
     try {
       const now = new Date()
       const utc = new Date(now.toLocaleString('en-US', { timeZone: 'UTC' }))
-      const peer = new Date(now.toLocaleString('en-US', { timeZone: tz }))
+      const peer = new Date(now.toLocaleString('en-US', { timeZone: profile.tz }))
       return (utc - peer) / 60000
-    } catch { return 0 }
+    } catch {
+      return 0
+    }
   })()
-  Date.prototype.getTimezoneOffset = function () { return tzOffset }
+  Date.prototype.getTimezoneOffset = function getTimezoneOffset() {
+    return tzOffset
+  }
 
-  // 2. Language
-  Object.defineProperty(navigator, 'language', { get: () => lang, configurable: true })
-  Object.defineProperty(navigator, 'languages', { get: () => [lang, lang.split('-')[0]], configurable: true })
+  // Navigator identity
+  defineGetter(Navigator.prototype, 'language', () => profile.lang)
+  defineGetter(Navigator.prototype, 'languages', () => [profile.lang, profile.lang.split('-')[0]])
+  defineGetter(Navigator.prototype, 'userAgent', () => profile.userAgent)
+  defineGetter(Navigator.prototype, 'appVersion', () => profile.userAgent.replace(/^Mozilla\//, '5.0 '))
+  defineGetter(Navigator.prototype, 'platform', () => profile.platform)
+  defineGetter(Navigator.prototype, 'vendor', () => 'Google Inc.')
+  defineGetter(Navigator.prototype, 'hardwareConcurrency', () => profile.hardwareConcurrency)
+  defineGetter(Navigator.prototype, 'deviceMemory', () => profile.deviceMemory)
+  defineGetter(Navigator.prototype, 'maxTouchPoints', () => profile.maxTouchPoints)
+  defineGetter(Navigator.prototype, 'plugins', () => pluginData.plugins)
+  defineGetter(Navigator.prototype, 'mimeTypes', () => pluginData.mimeTypes)
 
-  // 3. WebRTC — relay-only ICE so no local IP leaks
-  const _RPC = window.RTCPeerConnection
-  if (_RPC) {
-    window.RTCPeerConnection = function (cfg = {}) {
-      cfg.iceTransportPolicy = 'relay'
-      cfg.iceServers = (cfg.iceServers || []).filter(s =>
-        [].concat(s.urls).some(u => u.startsWith('turn:') || u.startsWith('turns:'))
+  const brands = [
+    { brand: 'Google Chrome', version: '124' },
+    { brand: 'Chromium', version: '124' },
+    { brand: 'Not-A.Brand', version: '99' },
+  ]
+  defineGetter(Navigator.prototype, 'userAgentData', () => ({
+    brands,
+    mobile: profile.mobile,
+    platform: profile.platformLabel,
+    getHighEntropyValues: async () => ({
+      architecture: profile.mobile ? 'arm' : 'x86',
+      bitness: profile.mobile ? '64' : '64',
+      brands,
+      fullVersionList: [{ brand: 'Google Chrome', version: '124.0.0.0' }],
+      mobile: profile.mobile,
+      model: profile.mobile ? 'Pixel 7' : '',
+      platform: profile.platformLabel,
+      platformVersion: profile.mobile ? '14.0.0' : '10.0.0',
+      uaFullVersion: '124.0.0.0',
+    }),
+  }))
+
+  // Connection
+  const connection = {
+    effectiveType: profile.connection.effectiveType,
+    downlink: profile.connection.downlink,
+    rtt: profile.connection.rtt,
+    saveData: profile.connection.saveData,
+    onchange: null,
+    addEventListener() {},
+    removeEventListener() {},
+    dispatchEvent() { return false },
+  }
+  defineGetter(Navigator.prototype, 'connection', () => connection)
+
+  // Screen and viewport
+  defineGetter(Screen.prototype, 'width', () => profile.screen.width)
+  defineGetter(Screen.prototype, 'height', () => profile.screen.height)
+  defineGetter(Screen.prototype, 'availWidth', () => profile.screen.availWidth)
+  defineGetter(Screen.prototype, 'availHeight', () => profile.screen.availHeight)
+  defineGetter(Screen.prototype, 'colorDepth', () => profile.colorDepth)
+  defineGetter(Screen.prototype, 'pixelDepth', () => profile.pixelDepth)
+  defineGetter(window, 'innerWidth', () => profile.screen.innerWidth)
+  defineGetter(window, 'innerHeight', () => profile.screen.innerHeight)
+  defineGetter(window, 'outerWidth', () => profile.screen.width)
+  defineGetter(window, 'outerHeight', () => profile.screen.height)
+
+  // WebRTC - relay only
+  const NativeRTCPeerConnection = window.RTCPeerConnection
+  if (NativeRTCPeerConnection) {
+    window.RTCPeerConnection = function RTCPeerConnection(config = {}) {
+      const safeConfig = { ...config }
+      safeConfig.iceTransportPolicy = 'relay'
+      safeConfig.iceServers = (safeConfig.iceServers || []).filter(server =>
+        [].concat(server.urls).some(url => String(url).startsWith('turn:') || String(url).startsWith('turns:'))
       )
-      return new _RPC(cfg)
+      return new NativeRTCPeerConnection(safeConfig)
     }
-    window.RTCPeerConnection.prototype = _RPC.prototype
+    window.RTCPeerConnection.prototype = NativeRTCPeerConnection.prototype
   }
 
-  // 4. UA client hints — Windows Chrome 124
-  try {
-    const brands = [
-      { brand: 'Google Chrome', version: '124' },
-      { brand: 'Chromium', version: '124' },
-      { brand: 'Not-A.Brand', version: '99' },
-    ]
-    Object.defineProperty(navigator, 'userAgentData', {
-      get: () => ({
-        brands,
-        mobile: false,
-        platform: 'Windows',
-        getHighEntropyValues: async () => ({
-          architecture: 'x86', bitness: '64', brands,
-          fullVersionList: [{ brand: 'Google Chrome', version: '124.0.0.0' }],
-          mobile: false, model: '', platform: 'Windows',
-          platformVersion: '10.0.0', uaFullVersion: '124.0.0.0',
-        }),
-      }),
-      configurable: true,
-    })
-  } catch {}
+  // Canvas + font metrics
+  const nativeGetImageData = CanvasRenderingContext2D.prototype.getImageData
+  const nativeToDataURL = HTMLCanvasElement.prototype.toDataURL
+  const nativeToBlob = HTMLCanvasElement.prototype.toBlob
+  const nativeMeasureText = CanvasRenderingContext2D.prototype.measureText
 
-  // 5. Canvas fingerprint noise — deterministic per timezone so consistent
-  const seed = tz.split('').reduce((a, c) => a + c.charCodeAt(0), 0)
-  const _getImageData = CanvasRenderingContext2D.prototype.getImageData
-  const _toDataURL = HTMLCanvasElement.prototype.toDataURL
-  const _toBlob = HTMLCanvasElement.prototype.toBlob
-
-  function noise(data) {
+  function applyCanvasNoise(data) {
     for (let i = 0; i < data.length; i += 4) {
-      const n = ((seed * (i + 1)) % 3) - 1
-      data[i] = Math.max(0, Math.min(255, data[i] + n))
+      const delta = ((seed + i) % 3) - 1
+      data[i] = Math.max(0, Math.min(255, data[i] + delta))
+      data[i + 1] = Math.max(0, Math.min(255, data[i + 1] - delta))
     }
   }
 
-  HTMLCanvasElement.prototype.toDataURL = function (...a) {
-    const ctx = this.getContext('2d')
-    if (ctx && this.width && this.height) {
-      const img = _getImageData.call(ctx, 0, 0, this.width, this.height)
-      noise(img.data)
-      ctx.putImageData(img, 0, 0)
+  function mutateCanvas(canvas, callback, args) {
+    const ctx = canvas.getContext && canvas.getContext('2d')
+    if (ctx && canvas.width && canvas.height) {
+      try {
+        const image = nativeGetImageData.call(ctx, 0, 0, canvas.width, canvas.height)
+        applyCanvasNoise(image.data)
+        ctx.putImageData(image, 0, 0)
+      } catch {}
     }
-    return _toDataURL.apply(this, a)
+    return callback.apply(canvas, args)
   }
 
-  HTMLCanvasElement.prototype.toBlob = function (cb, ...a) {
-    const ctx = this.getContext('2d')
-    if (ctx && this.width && this.height) {
-      const img = _getImageData.call(ctx, 0, 0, this.width, this.height)
-      noise(img.data)
-      ctx.putImageData(img, 0, 0)
+  HTMLCanvasElement.prototype.toDataURL = function toDataURL(...args) {
+    return mutateCanvas(this, nativeToDataURL, args)
+  }
+
+  HTMLCanvasElement.prototype.toBlob = function toBlob(callback, ...args) {
+    return mutateCanvas(this, nativeToBlob, [callback, ...args])
+  }
+
+  CanvasRenderingContext2D.prototype.measureText = function measureText(text) {
+    const metrics = nativeMeasureText.call(this, text)
+    const width = metrics.width + seededOffset(String(text).length, 3)
+    return new Proxy(metrics, {
+      get(target, property) {
+        if (property === 'width') return width
+        return Reflect.get(target, property)
+      },
+    })
+  }
+
+  // Audio fingerprinting
+  const NativeAudioContext = window.AudioContext || window.webkitAudioContext
+  const NativeOfflineAudioContext = window.OfflineAudioContext || window.webkitOfflineAudioContext
+  const NativeGetChannelData = AudioBuffer.prototype.getChannelData
+
+  function patchAudioContext(ContextCtor) {
+    if (!ContextCtor) return ContextCtor
+    function WrappedAudioContext(...args) {
+      const ctx = new ContextCtor(...args)
+      try {
+        defineGetter(ctx, 'sampleRate', () => profile.sampleRate)
+      } catch {}
+      return ctx
     }
-    return _toBlob.call(this, cb, ...a)
+    WrappedAudioContext.prototype = ContextCtor.prototype
+    return WrappedAudioContext
+  }
+
+  if (NativeAudioContext) {
+    window.AudioContext = patchAudioContext(NativeAudioContext)
+    if (window.webkitAudioContext) window.webkitAudioContext = window.AudioContext
+  }
+
+  if (NativeOfflineAudioContext) {
+    window.OfflineAudioContext = patchAudioContext(NativeOfflineAudioContext)
+    if (window.webkitOfflineAudioContext) window.webkitOfflineAudioContext = window.OfflineAudioContext
+  }
+
+  AudioBuffer.prototype.getChannelData = function getChannelData(channel) {
+    const data = NativeGetChannelData.call(this, channel)
+    const copy = new Float32Array(data.length)
+    copy.set(data)
+    for (let i = 0; i < copy.length; i += 128) {
+      copy[i] = copy[i] + deterministicNoise(i + channel, 0.00002)
+    }
+    return copy
   }
 })()

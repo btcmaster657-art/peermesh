@@ -33,6 +33,10 @@ let state = {
   supabaseToken: null,
   isOnline: navigator.onLine,
   showDisclosure: false,
+  privateCodeInput: '',
+  privateShare: null,
+  privateExpiryHours: '24',
+  privateShareSaving: false,
 }
 
 window.addEventListener('online', () => { state.isOnline = true; render() })
@@ -58,7 +62,7 @@ async function handleExpiredSession() {
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 async function init() {
-  const stored = await chrome.storage.local.get(['user', 'session', 'isSharing', 'helper', 'selectedCountry', 'extId', 'supabaseToken'])
+  const stored = await chrome.storage.local.get(['user', 'session', 'isSharing', 'helper', 'selectedCountry', 'privateCodeInput', 'extId', 'supabaseToken'])
 
   if (!stored.extId) {
     stored.extId = crypto.randomUUID()
@@ -98,6 +102,7 @@ async function init() {
       }
     } catch {}
     await refreshRuntimeStatus()
+    await loadPrivateShareState(state.helper?.baseDeviceId ?? null)
     startPeerPolling()
   }
 
@@ -130,6 +135,72 @@ async function refreshRuntimeStatus() {
   } catch {}
 }
 
+function getPrivateShareExpiryPreset(expiresAt) {
+  if (!expiresAt) return 'none'
+  const hours = Math.max(0, Math.round((new Date(expiresAt).getTime() - Date.now()) / 3600000))
+  if (hours <= 2) return '1'
+  if (hours <= 30) return '24'
+  if (hours <= 24 * 8) return '168'
+  return 'none'
+}
+
+async function loadPrivateShareState(baseDeviceId) {
+  if (!state.user || !baseDeviceId) {
+    state.privateShare = null
+    return
+  }
+  try {
+    const res = await fetch(`${API}/api/user/sharing?baseDeviceId=${encodeURIComponent(baseDeviceId)}`, {
+      headers: { 'Authorization': `Bearer ${state.supabaseToken || state.user.token}` },
+    })
+    if (!res.ok) return
+    const data = await res.json()
+    state.privateShare = data.private_share ?? null
+    state.privateExpiryHours = getPrivateShareExpiryPreset(state.privateShare?.expires_at ?? null)
+  } catch {}
+}
+
+async function savePrivateShareState(input) {
+  const baseDeviceId = state.helper?.baseDeviceId
+  if (!state.user || !baseDeviceId) {
+    state.error = 'A local desktop app or CLI device is required to manage private sharing'
+    render()
+    return
+  }
+  state.privateShareSaving = true
+  state.error = null
+  render()
+  try {
+    const expiryHours = input.expiryHours === undefined
+      ? undefined
+      : (input.expiryHours === 'none' ? null : parseInt(input.expiryHours, 10))
+    const res = await fetch(`${API}/api/user/sharing`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${state.supabaseToken || state.user.token}`,
+      },
+      body: JSON.stringify({
+        privateSharing: {
+          baseDeviceId,
+          enabled: input.enabled,
+          refresh: input.refresh === true,
+          expiryHours,
+        },
+      }),
+    })
+    const data = await res.json()
+    if (!res.ok || data.error) throw new Error(data.error || 'Could not update private sharing')
+    state.privateShare = data.private_share ?? null
+    if (input.expiryHours !== undefined) state.privateExpiryHours = input.expiryHours
+  } catch (err) {
+    state.error = err.message || 'Could not update private sharing'
+  } finally {
+    state.privateShareSaving = false
+    render()
+  }
+}
+
 function startPeerPolling() {
   if (peerPollInterval) return
   peerPollInterval = setInterval(async () => {
@@ -141,7 +212,7 @@ function startPeerPolling() {
       state.peerCounts = updated
       document.querySelectorAll('.country-btn').forEach(btn => {
         const count = state.peerCounts[btn.dataset.code] ?? 0
-        btn.querySelector('.peers').textContent = count > 0 ? count + ' peers' : 'no peers'
+        btn.querySelector('.peers').textContent = count > 0 ? count + ' devices' : 'no devices'
         btn.classList.toggle('no-peers', count === 0)
       })
     } catch {}
@@ -150,6 +221,7 @@ function startPeerPolling() {
   if (!statusPollInterval) {
     statusPollInterval = setInterval(async () => {
       await refreshRuntimeStatus()
+      await loadPrivateShareState(state.helper?.baseDeviceId ?? null)
       const desktopSharing = !!(state.helper?.available && state.helper?.running)
       if (state.isSharing !== desktopSharing) {
         state.isSharing = desktopSharing
@@ -206,6 +278,7 @@ function startAuthPolling() {
         state.loading = false
         await chrome.storage.local.set({ user: data.user, supabaseToken: state.supabaseToken, desktopToken: data.user.token })
         await refreshRuntimeStatus()
+        await loadPrivateShareState(state.helper?.baseDeviceId ?? null)
         render()
         startPeerPolling()
       }
@@ -259,6 +332,7 @@ function renderAuth(app) {
 function renderDashboard(app) {
   const { session, isSharing, selectedCountry, user, helper } = state
   const helperReady = !!helper?.available
+  const helperBaseDeviceId = helper?.baseDeviceId ?? null
   const helperSource = helper?.source === 'cli' ? 'CLI' : 'Desktop'
   const helperLabel = helperReady
     ? (isSharing ? `${helperSource} helper active — full-browser sharing enabled.` : `${helperSource} helper detected — ready to share.`)
@@ -308,10 +382,20 @@ function renderDashboard(app) {
                   data-code="${c.code}">
             <span class="flag">${c.flag}</span>
             <span class="name">${c.name}</span>
-            <span class="peers">${count > 0 ? count + ' peers' : 'no peers'}</span>
+            <span class="peers">${count > 0 ? count + ' devices' : 'no devices'}</span>
           </button>`
         }).join('')}
       </div>
+    </div>
+    <div class="section">
+      <div class="section-label">Private code</div>
+      <div style="display:grid;grid-template-columns:1fr auto;gap:8px">
+        <input id="privateCodeInput" value="${state.privateCodeInput || ''}" placeholder="9-digit code" inputmode="numeric" maxlength="9" style="padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-family:'Courier New',monospace;font-size:11px;letter-spacing:1px" />
+        <button class="connect-btn" id="connectPrivateBtn" style="padding:0 12px" ${!state.privateCodeInput || !state.isOnline || state.connecting ? 'disabled' : ''}>
+          ${state.connecting && state.privateCodeInput ? '...' : 'CODE'}
+        </button>
+      </div>
+      <div style="margin-top:6px;font-size:10px;color:var(--muted);line-height:1.5">Locks the session to one known device and its active slots only.</div>
     </div>
     <div class="section">
       <button class="connect-btn" id="connectBtn" ${!selectedCountry || !state.isOnline || state.connecting ? 'disabled' : ''}>
@@ -335,6 +419,7 @@ function renderDashboard(app) {
           <h4>Share my connection</h4>
           <p>${isSharing ? 'Sharing active — earning credits' : helperLabel}</p>
           ${state.user?.dailyLimitMb ? `<p style="font-size:10px;color:var(--muted);margin-top:2px">${formatBytes((state.user.dailyLimitMb ?? 0) * 1024 * 1024)} daily limit</p>` : ''}
+          ${helper?.slots ? `<p style="font-size:10px;color:var(--muted);margin-top:4px">${helper.slots.active} / ${helper.slots.configured} slots active${helper.slots.warning ? ` - ${helper.slots.warning}` : ''}</p>` : ''}
         </div>
         ${state.shareToggling
           ? `<div style="width:44px;height:24px;border-radius:12px;background:var(--border);display:flex;align-items:center;justify-content:center;flex-shrink:0">
@@ -347,6 +432,31 @@ function renderDashboard(app) {
         }
       </div>
     </div>
+
+    ${helperBaseDeviceId ? `
+    <div class="section">
+      <div class="share-info" style="margin-bottom:10px">
+        <h4>Private sharing</h4>
+        <p>${state.privateShare?.active ? 'Pinned to this device and all active slots.' : 'Optional device-scoped code for trusted requesters.'}</p>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr auto;gap:8px;margin-bottom:8px">
+        <div style="padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:8px;font-family:'Courier New',monospace;font-size:13px;letter-spacing:2px;color:${state.privateShare?.code ? 'var(--accent)' : 'var(--muted)'}">${state.privateShare?.code || 'CODE OFF'}</div>
+        <button id="copyPrivateCodeBtn" style="padding:0 10px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-family:'Courier New',monospace;font-size:10px;cursor:${state.privateShare?.code ? 'pointer' : 'not-allowed'}" ${!state.privateShare?.code ? 'disabled' : ''}>COPY</button>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap">
+        <select id="privateExpirySelect" style="background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 8px;font-family:'Courier New',monospace;font-size:10px;cursor:pointer">
+          <option value="none" ${state.privateExpiryHours === 'none' ? 'selected' : ''}>No expiry</option>
+          <option value="1" ${state.privateExpiryHours === '1' ? 'selected' : ''}>1 hour</option>
+          <option value="24" ${state.privateExpiryHours === '24' ? 'selected' : ''}>24 hours</option>
+          <option value="168" ${state.privateExpiryHours === '168' ? 'selected' : ''}>7 days</option>
+        </select>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button id="togglePrivateShareBtn" style="padding:7px 10px;background:${state.privateShare?.enabled ? 'transparent' : 'var(--accent)'};border:1px solid ${state.privateShare?.enabled ? 'var(--border)' : 'var(--accent)'};border-radius:7px;color:${state.privateShare?.enabled ? 'var(--text)' : '#000'};font-family:'Courier New',monospace;font-size:10px;cursor:${state.privateShareSaving ? 'not-allowed' : 'pointer'}" ${state.privateShareSaving ? 'disabled' : ''}>${state.privateShare?.enabled ? 'DISABLE' : 'ENABLE'}</button>
+          <button id="refreshPrivateShareBtn" style="padding:7px 10px;background:transparent;border:1px solid var(--border);border-radius:7px;color:var(--text);font-family:'Courier New',monospace;font-size:10px;cursor:${state.privateShareSaving ? 'not-allowed' : 'pointer'}" ${state.privateShareSaving ? 'disabled' : ''}>REFRESH</button>
+        </div>
+      </div>
+      ${state.privateShare?.expires_at ? `<div style="margin-top:8px;font-size:10px;color:var(--muted)">Expires ${new Date(state.privateShare.expires_at).toLocaleString()}</div>` : ''}
+    </div>` : ''}
 
     <div class="stats">
       <div class="stat">
@@ -391,13 +501,32 @@ function renderDashboard(app) {
     }
   })
 
+  document.getElementById('privateCodeInput')?.addEventListener('input', (e) => {
+    state.privateCodeInput = e.target.value.replace(/\D/g, '').slice(0, 9)
+    state.error = null
+    chrome.storage.local.set({ privateCodeInput: state.privateCodeInput })
+    render()
+  })
   document.getElementById('connectBtn')?.addEventListener('click', connectSession)
+  document.getElementById('connectPrivateBtn')?.addEventListener('click', connectSession)
   document.getElementById('disconnectBtn')?.addEventListener('click', disconnectSession)
   document.getElementById('shareToggle')?.addEventListener('change', e => toggleSharing(e.target.checked))
   document.getElementById('signOutBtn')?.addEventListener('click', signOut)
   document.getElementById('installHelperBtn')?.addEventListener('click', (e) => {
     e.preventDefault()
     chrome.tabs.create({ url: `${API}/api/desktop-download` })
+  })
+  document.getElementById('copyPrivateCodeBtn')?.addEventListener('click', () => {
+    if (state.privateShare?.code) navigator.clipboard.writeText(state.privateShare.code).catch(() => {})
+  })
+  document.getElementById('privateExpirySelect')?.addEventListener('change', (e) => {
+    state.privateExpiryHours = e.target.value
+  })
+  document.getElementById('togglePrivateShareBtn')?.addEventListener('click', () => {
+    savePrivateShareState({ enabled: !(state.privateShare?.enabled ?? false), expiryHours: state.privateExpiryHours })
+  })
+  document.getElementById('refreshPrivateShareBtn')?.addEventListener('click', () => {
+    savePrivateShareState({ enabled: true, refresh: true, expiryHours: state.privateExpiryHours })
   })
 
   // Disclosure modal
@@ -451,7 +580,8 @@ function renderDashboard(app) {
 // ── Actions ───────────────────────────────────────────────────────────────────
 
 async function connectSession() {
-  if (!state.selectedCountry || !state.user || state.connecting) return
+  const privateCode = (state.privateCodeInput || '').trim()
+  if ((!state.selectedCountry && !privateCode) || !state.user || state.connecting) return
 
   if (!state.isOnline) {
     state.error = 'No internet connection — check your network and try again'
@@ -470,7 +600,7 @@ async function connectSession() {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${state.supabaseToken || state.user.token}`,
       },
-      body: JSON.stringify({ country: state.selectedCountry }),
+      body: JSON.stringify(privateCode ? { privateCode } : { country: state.selectedCountry }),
     })
 
     const data = await res.json()
@@ -480,16 +610,18 @@ async function connectSession() {
     const response = await chrome.runtime.sendMessage({
       type: 'CONNECT',
       relayEndpoint: data.relayEndpoint,
-      country: state.selectedCountry,
+      country: data.country ?? state.selectedCountry,
       userId: state.user.id,
       dbSessionId: data.sessionId,
       preferredProviderUserId: data.preferredProviderUserId ?? null,
+      privateProviderUserId: data.privateProviderUserId ?? null,
+      privateBaseDeviceId: data.privateBaseDeviceId ?? null,
       token: state.supabaseToken || state.user.token,
     })
 
     if (!response?.success) throw new Error(response?.error || 'Connection failed')
 
-    state.session = { id: data.sessionId, country: state.selectedCountry, relayEndpoint: data.relayEndpoint }
+    state.session = { id: data.sessionId, country: data.country ?? state.selectedCountry, relayEndpoint: data.relayEndpoint }
     await chrome.storage.local.set({ session: state.session })
   } catch (err) {
     state.error = err.message === 'Failed to fetch' ? 'Network error — could not reach server' : err.message

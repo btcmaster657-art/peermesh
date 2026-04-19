@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('peermesh', {
   openAuth: (url) => ipcRenderer.invoke('open-auth', url),
   signIn: (data) => ipcRenderer.invoke('sign-in', data),
   toggleSharing: () => ipcRenderer.invoke('toggle-sharing'),
+  setConnectionSlots: (slots) => ipcRenderer.invoke('set-connection-slots', slots),
   signOut: () => ipcRenderer.invoke('sign-out'),
   openDashboard: () => ipcRenderer.invoke('open-dashboard'),
   acceptProviderTerms: (opts) => ipcRenderer.invoke('accept-provider-terms', opts),

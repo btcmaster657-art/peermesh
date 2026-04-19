@@ -14,6 +14,7 @@ const proxyClients = new Map()
 // In-memory cache — seeded from DB via request_session msg, updated on session end.
 // Survives within a relay process lifetime. DB is the persistent source of truth.
 const peerAffinity = new Map()
+const providerShareStatusCache = new Map()
 
 const MAX_RECONNECT_ATTEMPTS = 3
 
@@ -48,12 +49,43 @@ function setAffinity(requesterUserId, country, providerUserId) {
 
 // ── Provider finder — affinity-aware ─────────────────────────────────────────
 // preferredUserId: try this provider first (peer affinity)
-// excludeUserIds: skip these (e.g. the provider that just dropped)
+// excludePeerIds: skip specific peer connections (e.g. the provider that just dropped)
 
-function findProvider(country, requesterId, requestingUserId, {
+async function getProviderShareStatus(userId) {
+  const cached = providerShareStatusCache.get(userId)
+  if (cached && cached.expiresAt > Date.now()) return cached.value
+  if (!userId || !API_BASE || !RELAY_SECRET) {
+    if (cached) {
+      log('LIMIT', `STATUS_STALE userId=${userId?.slice(0,8) ?? 'unknown'} using cached share status`)
+      return cached.value
+    }
+    return { can_accept_sessions: false, total_bytes_today: 0, daily_limit_bytes: null }
+  }
+
+  try {
+    const res = await fetch(`${API_BASE}/api/user/sharing?providerUserId=${encodeURIComponent(userId)}`, {
+      headers: { 'x-relay-secret': RELAY_SECRET },
+    })
+    if (!res.ok) throw new Error(`status=${res.status}`)
+    const value = await res.json()
+    providerShareStatusCache.set(userId, { value, expiresAt: Date.now() + 5000 })
+    return value
+  } catch (err) {
+    logErr('LIMIT', `provider status lookup failed userId=${userId.slice(0,8)}`, err)
+    if (cached) {
+      log('LIMIT', `STATUS_STALE userId=${userId.slice(0,8)} using cached share status`)
+      return cached.value
+    }
+    return { can_accept_sessions: false, total_bytes_today: 0, daily_limit_bytes: null }
+  }
+}
+
+async function findProvider(country, requesterId, requestingUserId, {
   requireTunnel = false,
   preferredUserId = null,
-  excludeUserIds = [],
+  privateBaseDeviceId = null,
+  privateOnly = false,
+  excludePeerIds = [],
 } = {}) {
   const isEligible = (peer) =>
     peer.role === 'provider' &&
@@ -63,29 +95,44 @@ function findProvider(country, requesterId, requestingUserId, {
     peer.trustScore >= 30 &&
     peer.peerId !== requesterId &&
     peer.userId !== requestingUserId &&
-    !excludeUserIds.includes(peer.userId) &&
+    !excludePeerIds.includes(peer.peerId) &&
+    (!privateBaseDeviceId || peer.baseDeviceId === privateBaseDeviceId) &&
     peer.supportsHttp !== false &&
     (!requireTunnel || peer.supportsTunnel)
 
-  // First pass — try preferred provider (affinity)
   if (preferredUserId) {
     for (const [, peer] of peers) {
       if (peer.userId === preferredUserId && isEligible(peer)) {
+        const status = await getProviderShareStatus(peer.userId)
+        if (!status.can_accept_sessions) {
+          log('LIMIT', `SKIP preferred provider userId=${preferredUserId.slice(0,8)} daily limit reached`)
+          continue
+        }
         log('AFFINITY', `HIT preferred provider userId=${preferredUserId.slice(0,8)} country=${country}`)
         return peer
       }
     }
-    log('AFFINITY', `MISS preferred provider userId=${preferredUserId.slice(0,8)} offline/busy — falling back`)
+    if (privateOnly) {
+      log('PRIVATE', `MISS preferred provider userId=${preferredUserId.slice(0,8)} baseDeviceId=${privateBaseDeviceId?.slice(0,12) ?? 'unknown'}`)
+      return null
+    }
+    log('AFFINITY', `MISS preferred provider userId=${preferredUserId.slice(0,8)} offline/busy - falling back`)
   }
 
-  // Second pass — any eligible provider, sorted by trust score descending
   const eligible = []
   for (const [, peer] of peers) {
     if (isEligible(peer)) eligible.push(peer)
   }
   if (eligible.length === 0) return null
   eligible.sort((a, b) => (b.trustScore ?? 50) - (a.trustScore ?? 50))
-  return eligible[0]
+
+  for (const peer of eligible) {
+    const status = await getProviderShareStatus(peer.userId)
+    if (status.can_accept_sessions) return peer
+    log('LIMIT', `SKIP provider peerId=${peer.peerId.slice(0,8)} userId=${peer.userId?.slice(0,8)} daily limit reached`)
+  }
+
+  return null
 }
 
 // ── Create a new relay session between an existing requester WS and a provider ─
@@ -108,6 +155,7 @@ function createSession(requesterWs, provider, country, dbSessionId) {
     dbSessionId: dbSessionId ?? null,
     targetHost: null,
     reconnectAttempts: 0,
+    privateBaseDeviceId: requesterWs.privateBaseDeviceId ?? null,
   })
 
   send(provider, { type: 'session_request', sessionId })
@@ -118,8 +166,8 @@ function createSession(requesterWs, provider, country, dbSessionId) {
 
 // ── Auto-reconnect — called when provider drops while requester is still live ─
 
-function attemptReconnect(requesterWs, droppedSession) {
-  const { country, dbSessionId, reconnectAttempts, providerUserId, requesterUserId } = droppedSession
+async function attemptReconnect(requesterWs, droppedSession) {
+  const { country, dbSessionId, reconnectAttempts, providerUserId, requesterUserId, providerId, privateBaseDeviceId } = droppedSession
 
   if ((reconnectAttempts ?? 0) >= MAX_RECONNECT_ATTEMPTS) {
     log(requesterWs.peerId.slice(0,8), `RECONNECT giving up after ${MAX_RECONNECT_ATTEMPTS} attempts`)
@@ -127,15 +175,17 @@ function attemptReconnect(requesterWs, droppedSession) {
     return
   }
 
-  // Exclude the provider that just dropped so we don't reconnect to them immediately
-  const excludeUserIds = providerUserId ? [providerUserId] : []
-  const preferred = getAffinity(requesterUserId, country)
+  // Exclude only the exact dropped peer connection. Other slots from the same user can still serve.
+  const excludePeerIds = providerId ? [providerId] : []
+  const preferred = privateBaseDeviceId ? providerUserId : getAffinity(requesterUserId, country)
   // Don't prefer the one that just dropped
-  const preferredUserId = preferred === providerUserId ? null : preferred
+  const preferredUserId = privateBaseDeviceId ? providerUserId : (preferred === providerUserId ? null : preferred)
 
-  const nextProvider = findProvider(country, requesterWs.peerId, requesterUserId, {
-    excludeUserIds,
+  const nextProvider = await findProvider(country, requesterWs.peerId, requesterUserId, {
+    excludePeerIds,
     preferredUserId,
+    privateBaseDeviceId: privateBaseDeviceId ?? null,
+    privateOnly: !!privateBaseDeviceId,
   })
 
   if (!nextProvider) {
@@ -244,6 +294,7 @@ wss.on('connection', (ws, req) => {
   Object.assign(ws, {
     peerId, role: null, country: null, userId: null,
     trustScore: 50, sessionId: null, providerKind: 'unknown',
+    baseDeviceId: null,
     supportsHttp: true, supportsTunnel: false,
     bytesTransferred: 0, isAlive: true,
     clientIp: req.headers['fly-client-ip'] || (req.headers['x-forwarded-for']?.split(',')[0].trim()) || req.socket.remoteAddress || null,
@@ -254,7 +305,7 @@ wss.on('connection', (ws, req) => {
 
   ws.on('pong', () => { ws.isAlive = true })
 
-  ws.on('message', (data) => {
+  ws.on('message', async (data) => {
     try {
       ws.bytesTransferred += data.length
       if (ws.bytesTransferred > 1_073_741_824) {
@@ -264,7 +315,7 @@ wss.on('connection', (ws, req) => {
       }
       const msg = JSON.parse(data.toString())
       if (msg.type !== 'ping') log(peerId.slice(0,8), `MSG_IN type=${msg.type}`, msg.userId ? `userId=${msg.userId.slice(0,8)}` : '')
-      handleMessage(ws, msg)
+      await handleMessage(ws, msg)
     } catch (e) {
       log(peerId.slice(0,8), `PARSE_ERROR ${e.message}`)
     }
@@ -274,25 +325,19 @@ wss.on('connection', (ws, req) => {
     log(peerId.slice(0,8), `DISCONNECTED code=${code} role=${ws.role} userId=${ws.userId?.slice(0,8)}`)
     peers.delete(peerId)
     cleanupSession(ws)
-    if (ws.role === 'provider' && ws.userId && API_BASE) {
-      fetch(`${API_BASE}/api/user/sharing`, {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json', 'x-relay-secret': RELAY_SECRET },
-        body: JSON.stringify({ device_id: `relay_${peerId.slice(0,8)}`, user_id: ws.userId }),
-      }).catch(() => {})
-    }
     log(peerId.slice(0,8), `PEERS AFTER DISCONNECT`, peersSnapshot())
   })
 
   ws.on('error', (err) => log(peerId.slice(0,8), `SOCKET_ERROR ${err.message}`))
 })
 
-function handleMessage(ws, msg) {
+async function handleMessage(ws, msg) {
   switch (msg.type) {
 
     case 'register_provider': {
       log(ws.peerId.slice(0,8), `REGISTER_PROVIDER userId=${msg.userId?.slice(0,8)} country=${msg.country} deviceId=${msg.deviceId?.slice(0,8)}`)
       ws.deviceId = msg.deviceId ?? null
+      ws.baseDeviceId = msg.baseDeviceId ?? msg.deviceId ?? null
       for (const [id, peer] of peers) {
         if (peer.userId === msg.userId && peer.role === 'provider' && id !== ws.peerId) {
           // Only evict if same device reconnecting — different devices are allowed
@@ -318,34 +363,33 @@ function handleMessage(ws, msg) {
       send(ws, { type: 'registered', peerId: ws.peerId })
       log(ws.peerId.slice(0,8), `REGISTERED_PROVIDER country=${ws.country} userId=${ws.userId?.slice(0,8)}`)
       log(ws.peerId.slice(0,8), `PEERS AFTER REGISTER`, peersSnapshot())
-      if (msg.userId && API_BASE) {
-        const headers = { 'Content-Type': 'application/json', 'x-relay-secret': RELAY_SECRET }
-        if (ws.clientIp) headers['x-provider-ip'] = ws.clientIp
-        fetch(`${API_BASE}/api/user/sharing`, {
-          method: 'PUT',
-          headers,
-          body: JSON.stringify({ device_id: `relay_${ws.peerId.slice(0,8)}`, user_id: msg.userId }),
-        }).catch(() => {})
-      }
       break
     }
 
     case 'request_session': {
       const requireTunnel = !!msg.requireTunnel
+      const privateBaseDeviceId = msg.privateBaseDeviceId ?? null
+      const privateOnly = !!privateBaseDeviceId
       log(ws.peerId.slice(0,8), `REQUEST_SESSION country=${msg.country} userId=${msg.userId?.slice(0,8)}`)
       log(ws.peerId.slice(0,8), `PEERS AT REQUEST TIME`, peersSnapshot())
 
       // Seed in-memory affinity from DB value passed by client on connect
-      if (msg.preferredProviderUserId && msg.userId && msg.country) {
+      if (!privateOnly && msg.preferredProviderUserId && msg.userId && msg.country) {
         setAffinity(msg.userId, msg.country, msg.preferredProviderUserId)
         log('AFFINITY', `SEEDED from DB requester=${msg.userId.slice(0,8)} → provider=${msg.preferredProviderUserId.slice(0,8)} country=${msg.country}`)
       }
 
-      const preferredUserId = getAffinity(msg.userId, msg.country)
+      const preferredUserId = privateOnly
+        ? (msg.privateProviderUserId ?? msg.preferredProviderUserId ?? null)
+        : getAffinity(msg.userId, msg.country)
 
-      const provider = findProvider(msg.country, ws.peerId, msg.userId, {
+      ws.privateBaseDeviceId = privateBaseDeviceId
+
+      const provider = await findProvider(msg.country, ws.peerId, msg.userId, {
         requireTunnel,
         preferredUserId,
+        privateBaseDeviceId,
+        privateOnly,
       })
 
       if (!provider) {
@@ -359,12 +403,15 @@ function handleMessage(ws, msg) {
             if (peer.trustScore < 30) reasons.push(`low_trust(${peer.trustScore})`)
             if (peer.peerId === ws.peerId) reasons.push('same_peer')
             if (peer.userId === msg.userId) reasons.push('same_user')
+            if (privateBaseDeviceId && peer.baseDeviceId !== privateBaseDeviceId) reasons.push('wrong_private_device')
             if (peer.supportsHttp === false) reasons.push('no_http')
             if (requireTunnel && !peer.supportsTunnel) reasons.push('no_tunnel')
+            const shareStatus = await getProviderShareStatus(peer.userId)
+            if (!shareStatus.can_accept_sessions) reasons.push('daily_limit_reached')
             log(ws.peerId.slice(0,8), `  PROVIDER_REJECTED ${peer.peerId.slice(0,8)} | ${reasons.join(', ')}`)
           }
         }
-        send(ws, { type: 'error', message: `No peers available in ${msg.country}` })
+        send(ws, { type: 'error', message: privateOnly ? 'Private share is offline or busy' : `No peers available in ${msg.country}` })
         return
       }
 

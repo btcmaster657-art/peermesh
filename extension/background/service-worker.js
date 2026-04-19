@@ -178,23 +178,30 @@ async function getDesktopHelperStatusHttp() {
         country: data.country ?? null,
         userId: data.userId ?? null,
         version: data.version ?? null,
+        baseDeviceId: data.baseDeviceId ?? null,
+        connectionSlots: data.connectionSlots ?? null,
+        slots: data.slots ?? null,
+        stats: data.stats ?? null,
       }
     }
   } catch (e) { log('warn', 'desktop HTTP unreachable: ' + e.message) }
 
   // Also check peer port — whichever process is running the relay
-  let peerRunning = false
-  let peerStats = null
+  let peerState = null
   try {
     const res2 = await fetch(`http://127.0.0.1:${PEER_PORT}/native/state`, { signal: AbortSignal.timeout(1000) })
-    if (res2.ok) { const d = await res2.json(); peerRunning = !!d.running; peerStats = d.stats ?? null }
+    if (res2.ok) peerState = await res2.json()
   } catch {}
 
   if (!primary) return null
+  const peerRunning = !!peerState?.running
   const eitherRunning = primary.running || peerRunning
   // If peer is the active sharer, use its stats for live display
-  const stats = (peerRunning && peerStats) ? peerStats : (primary.stats ?? null)
-  return { ...primary, running: eitherRunning, shareEnabled: eitherRunning || primary.shareEnabled, stats }
+  const stats = (peerRunning && peerState?.stats) ? peerState.stats : (primary.stats ?? null)
+  const activeBaseDeviceId = peerRunning ? (peerState?.baseDeviceId ?? primary.baseDeviceId ?? null) : primary.baseDeviceId
+  const activeSlots = peerRunning ? (peerState?.slots ?? primary.slots ?? null) : primary.slots
+  const activeConnectionSlots = peerRunning ? (peerState?.connectionSlots ?? primary.connectionSlots ?? null) : primary.connectionSlots
+  return { ...primary, running: eitherRunning, shareEnabled: eitherRunning || primary.shareEnabled, baseDeviceId: activeBaseDeviceId, slots: activeSlots, connectionSlots: activeConnectionSlots, stats }
 }
 
 async function getDesktopHelperStatus() {
@@ -210,6 +217,10 @@ async function getDesktopHelperStatus() {
       country: response.country ?? null,
       userId: response.userId ?? null,
       version: response.version ?? null,
+      baseDeviceId: response.baseDeviceId ?? null,
+      connectionSlots: response.connectionSlots ?? null,
+      slots: response.slots ?? null,
+      stats: response.stats ?? null,
     }
   } catch {
     return { available: false, running: false, shareEnabled: false, configured: false, country: null, userId: null, version: null }
@@ -234,6 +245,10 @@ async function startDesktopSharing({ token, userId, country, trust }) {
         country: data.country ?? country ?? null,
         userId: data.userId ?? userId ?? null,
         version: data.version ?? null,
+        baseDeviceId: data.baseDeviceId ?? null,
+        connectionSlots: data.connectionSlots ?? null,
+        slots: data.slots ?? null,
+        stats: data.stats ?? null,
       }
       const isSharing = helper.running || helper.shareEnabled
       await chrome.storage.local.set({ isSharing, helper })
@@ -258,6 +273,10 @@ async function startDesktopSharing({ token, userId, country, trust }) {
       country: response.country ?? country ?? null,
       userId: response.userId ?? userId ?? null,
       version: response.version ?? null,
+      baseDeviceId: response.baseDeviceId ?? null,
+      connectionSlots: response.connectionSlots ?? null,
+      slots: response.slots ?? null,
+      stats: response.stats ?? null,
     }
     const isSharing = helper.running || helper.shareEnabled
     await chrome.storage.local.set({ isSharing, helper })
@@ -283,6 +302,10 @@ async function stopDesktopSharing() {
         available: true, running: !!data.running, shareEnabled: false,
         configured: !!data.configured, country: data.country ?? null,
         userId: data.userId ?? null, version: data.version ?? null,
+        baseDeviceId: data.baseDeviceId ?? null,
+        connectionSlots: data.connectionSlots ?? null,
+        slots: data.slots ?? null,
+        stats: data.stats ?? null,
       }
       await chrome.storage.local.set({ isSharing: false, helper })
       return { success: true, helper }
@@ -295,6 +318,10 @@ async function stopDesktopSharing() {
       available: true, running: !!response.running, shareEnabled: false,
       configured: !!response.configured, country: response.country ?? null,
       userId: response.userId ?? null, version: response.version ?? null,
+      baseDeviceId: response.baseDeviceId ?? null,
+      connectionSlots: response.connectionSlots ?? null,
+      slots: response.slots ?? null,
+      stats: response.stats ?? null,
     }
     await chrome.storage.local.set({ isSharing: false, helper })
     return { success: true, helper }
@@ -318,7 +345,7 @@ async function connectToRelay(opts, attempt = 0) {
   }
 }
 
-async function connectOnce({ relayEndpoint, country, userId, dbSessionId, preferredProviderUserId }) {
+async function connectOnce({ relayEndpoint, country, userId, dbSessionId, preferredProviderUserId, privateProviderUserId, privateBaseDeviceId }) {
   return new Promise((resolve, reject) => {
     const wsUrl = relayEndpoint || RELAY_WS
     log('info', `[CONNECT] WS connecting to ${wsUrl} country=${country} userId=${userId?.slice(0,8)}`)
@@ -335,7 +362,16 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
 
     ws.onopen = () => {
       log('info', `[CONNECT] WS open → sending request_session country=${country}`)
-      ws.send(JSON.stringify({ type: 'request_session', country, userId, dbSessionId: dbSessionId ?? null, preferredProviderUserId: preferredProviderUserId ?? null, requireTunnel: false }))
+      ws.send(JSON.stringify({
+        type: 'request_session',
+        country,
+        userId,
+        dbSessionId: dbSessionId ?? null,
+        preferredProviderUserId: preferredProviderUserId ?? null,
+        privateProviderUserId: privateProviderUserId ?? null,
+        privateBaseDeviceId: privateBaseDeviceId ?? null,
+        requireTunnel: false,
+      }))
       keepaliveTimer = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' }))
       }, 20000)

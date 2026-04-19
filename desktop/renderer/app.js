@@ -319,8 +319,7 @@ document.getElementById('share-toggle').addEventListener('click', async () => {
   }
   clearMainError()
 
-  // isSharing = A.running || B.running (set by pollState via updateUI)
-  const state = await window.peermesh.getState()
+  const state = await pollState() || await window.peermesh.getState()
   const isSharing = state.running || !!state.peerRunning
 
   if (!isSharing) {
@@ -421,6 +420,145 @@ document.getElementById('btn-signout').addEventListener('click', async () => {
   await window.peermesh.signOut()
   await pollState()
   startDeviceFlow()
+})
+
+function getSlotWarning(slots) {
+  if (slots > 16) return 'Very high resource usage - recommended for servers or dedicated machines only.'
+  if (slots > 8) return 'High resource usage - ensure a stable connection.'
+  return ''
+}
+
+function renderSlots(configured, slots) {
+  const dots = document.getElementById('slots-dots')
+  const summary = document.getElementById('slots-summary')
+  const warning = document.getElementById('slots-warning')
+  const slotInput = document.getElementById('slots-input')
+  if (!dots || !summary || !warning || !slotInput) return
+
+  slotInput.value = String(configured)
+  dots.innerHTML = ''
+  const statuses = slots?.statuses ?? []
+  const active = slots?.active ?? statuses.filter(slot => slot.running).length
+  for (let i = 0; i < configured; i++) {
+    const dot = document.createElement('span')
+    dot.className = 'slot-dot' + (statuses[i]?.running ? ' on' : '')
+    dot.title = statuses[i]?.running ? `Slot ${i} active` : `Slot ${i} idle`
+    dots.appendChild(dot)
+  }
+  summary.textContent = `${active} / ${configured} slots active`
+  const warningText = getSlotWarning(configured)
+  warning.textContent = warningText
+  warning.style.display = warningText ? 'block' : 'none'
+}
+
+function updateUI(state) {
+  const { running, config, stats } = state
+
+  if (!config.userId) {
+    showScreen('auth-screen')
+    return
+  }
+
+  showScreen('main-screen')
+
+  const dot = document.getElementById('status-dot')
+  const label = document.getElementById('status-label')
+  const country = document.getElementById('status-country')
+  const statsEl = document.getElementById('status-stats')
+  const card = document.getElementById('status-card')
+  const peerBanner = document.getElementById('peer-active-banner')
+  const peerSharing = !!state.peerRunning
+  const desktopSlots = state.slots
+  const peerSlots = state.peerSlots
+  const configuredSlots = state.connectionSlots ?? config.connectionSlots ?? 1
+
+  if (running) {
+    dot.className = 'status-dot on'
+    dot.style.cssText = ''
+    label.textContent = `SHARING - ${config.country} (${configuredSlots} slots)`
+    label.style.color = 'var(--accent)'
+    country.textContent = getFlagForCountry(config.country)
+    statsEl.textContent = `${desktopSlots?.active ?? 0} / ${desktopSlots?.configured ?? configuredSlots} slots active - ${stats.requestsHandled} requests - ${formatBytes(stats.bytesServed)} served`
+    card.className = 'status-card active'
+    if (peerBanner) peerBanner.style.display = 'none'
+  } else if (peerSharing) {
+    dot.className = 'status-dot on'
+    dot.style.cssText = ''
+    label.textContent = 'CLI IS SHARING'
+    label.style.color = 'var(--accent)'
+    country.textContent = ''
+    const cs = state.peerStats
+    const peerConfigured = state.peerConnectionSlots ?? peerSlots?.configured ?? 1
+    const peerActive = peerSlots?.active ?? 0
+    statsEl.textContent = cs ? `${peerActive} / ${peerConfigured} slots active - ${cs.requestsHandled ?? 0} requests - ${formatBytes(cs.bytesServed ?? 0)} served` : 'CLI provider running on this machine'
+    card.className = 'status-card active'
+    if (peerBanner) peerBanner.style.display = 'none'
+  } else {
+    dot.className = 'status-dot'
+    dot.style.cssText = ''
+    label.textContent = 'NOT SHARING'
+    label.style.color = 'var(--muted)'
+    country.textContent = ''
+    statsEl.textContent = 'Toggle below to start sharing'
+    card.className = 'status-card'
+    if (peerBanner) peerBanner.style.display = 'none'
+  }
+
+  const toggle = document.getElementById('share-toggle')
+  toggle.className = 'toggle' + ((running || peerSharing) ? ' on' : '')
+  document.getElementById('toggle-desc').textContent = running
+    ? 'Sharing active - earning credits'
+    : peerSharing
+      ? 'CLI is sharing'
+      : config.userId
+        ? 'Help others browse. Stay free.'
+        : 'Sign in to start sharing.'
+
+  const displayStats = (peerSharing && state.peerStats) ? state.peerStats : stats
+  const displaySlots = peerSharing
+    ? (peerSlots ?? { configured: state.peerConnectionSlots ?? 1, active: 0, statuses: [] })
+    : (desktopSlots ?? { configured: configuredSlots, active: 0, statuses: [] })
+
+  document.getElementById('stat-requests').textContent = String(displayStats.requestsHandled ?? 0)
+  document.getElementById('stat-bytes').textContent = formatBytes(displayStats.bytesServed ?? 0)
+  document.getElementById('stat-slots').textContent = `${displaySlots.active ?? 0} / ${displaySlots.configured ?? configuredSlots}`
+  document.getElementById('user-label').textContent = config.userId ? `ID: ${config.userId.slice(0, 8)}` : ''
+  renderSlots(displaySlots.configured ?? configuredSlots, displaySlots)
+}
+
+async function pollState() {
+  try {
+    const state = await window.peermesh.getState()
+    if (state.version) setVersion(state.version)
+    try {
+      const r = await fetch('http://127.0.0.1:7656/native/state', { signal: AbortSignal.timeout(800) })
+      if (r.ok) {
+        const cli = await r.json()
+        state.peerRunning = !!cli.running
+        state.peerStats = cli.stats
+        state.peerSlots = cli.slots
+        state.peerConnectionSlots = cli.connectionSlots
+      } else {
+        state.peerRunning = false
+      }
+    } catch {
+      state.peerRunning = false
+    }
+    updateUI(state)
+    return state
+  } catch {}
+}
+
+document.getElementById('slots-input').addEventListener('change', async (event) => {
+  const raw = parseInt(event.target.value, 10)
+  const slots = Number.isInteger(raw) ? Math.max(1, Math.min(32, raw)) : 1
+  event.target.value = String(slots)
+  try {
+    await window.peermesh.setConnectionSlots(slots)
+    await pollState()
+  } catch {
+    showMainError('Could not update connection slots')
+  }
 })
 
 // On load: apply network state then auto-start device flow if not signed in

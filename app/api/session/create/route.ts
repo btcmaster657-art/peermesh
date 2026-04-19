@@ -3,6 +3,7 @@ import { createClient } from '@/lib/supabase/server'
 import { adminClient } from '@/lib/supabase/admin'
 import { isUserTrusted } from '@/lib/traffic-filter'
 import { createHmac } from 'crypto'
+import { isPrivateShareActive, normalizePrivateShareCode } from '@/lib/private-sharing'
 
 const RELAY_ENDPOINTS = (process.env.RELAY_ENDPOINTS ?? 'ws://localhost:8080').split(',')
 const RECEIPT_SECRET = process.env.RELAY_SECRET ?? process.env.RECEIPT_SECRET ?? 'dev-secret'
@@ -50,8 +51,16 @@ export async function POST(req: Request) {
   }
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  const { country } = await req.json()
-  if (!country) return NextResponse.json({ error: 'country is required' }, { status: 400 })
+  const body = await req.json().catch(() => ({}))
+  const hasPrivateCode = body.privateCode !== undefined
+  const privateCode = normalizePrivateShareCode(body.privateCode)
+  let country = typeof body.country === 'string' ? body.country.trim().toUpperCase() : ''
+  if (!country && !hasPrivateCode) {
+    return NextResponse.json({ error: 'country or privateCode is required' }, { status: 400 })
+  }
+  if (hasPrivateCode && !privateCode) {
+    return NextResponse.json({ error: 'Private code must be exactly 9 digits' }, { status: 400 })
+  }
 
   const { data: profile } = await adminClient
     .from('profiles')
@@ -59,15 +68,67 @@ export async function POST(req: Request) {
     .eq('id', user.id)
     .single()
 
-  if (!profile?.is_verified)
+  if (!profile?.is_verified) {
     return NextResponse.json({ error: 'Account not verified' }, { status: 403 })
-  if (!isUserTrusted(profile.trust_score))
+  }
+  if (!isUserTrusted(profile.trust_score)) {
     return NextResponse.json({ error: 'Account suspended due to low trust score' }, { status: 403 })
-  if (profile.bandwidth_used_month >= profile.bandwidth_limit)
+  }
+  if (profile.bandwidth_used_month >= profile.bandwidth_limit) {
     return NextResponse.json({ error: 'Monthly bandwidth limit reached. Upgrade to premium.' }, { status: 403 })
+  }
 
   const relay = pickRelay()
   try { await adminClient.rpc('cleanup_stale_sessions') } catch {}
+
+  let preferredProviderUserId = (profile.preferred_providers as Record<string, string>)?.[country] ?? null
+  let privateProviderUserId: string | null = null
+  let privateBaseDeviceId: string | null = null
+
+  if (hasPrivateCode) {
+    const { data: privateShare, error: privateShareError } = await adminClient
+      .from('private_share_devices')
+      .select('user_id, base_device_id, enabled, expires_at')
+      .eq('share_code', privateCode)
+      .maybeSingle()
+
+    if (privateShareError) {
+      return NextResponse.json({ error: 'Could not validate private share code' }, { status: 500 })
+    }
+    if (!privateShare || !isPrivateShareActive(privateShare.enabled, privateShare.expires_at)) {
+      return NextResponse.json({ error: 'Private share code is invalid or expired' }, { status: 404 })
+    }
+    if (privateShare.user_id === user.id) {
+      return NextResponse.json({ error: 'You cannot connect to your own private share code' }, { status: 400 })
+    }
+
+    const heartbeatCutoff = new Date(Date.now() - 45_000).toISOString()
+    const { data: activeDevices, error: activeDevicesError } = await adminClient
+      .from('provider_devices')
+      .select('device_id, country_code, last_heartbeat')
+      .eq('user_id', privateShare.user_id)
+      .gt('last_heartbeat', heartbeatCutoff)
+
+    if (activeDevicesError) {
+      return NextResponse.json({ error: 'Could not validate private share availability' }, { status: 500 })
+    }
+
+    const slotPrefix = `${privateShare.base_device_id}_slot_`
+    const matchingDevices = (activeDevices ?? [])
+      .filter(device => device.device_id === privateShare.base_device_id || device.device_id.startsWith(slotPrefix))
+      .sort((a, b) => new Date(b.last_heartbeat).getTime() - new Date(a.last_heartbeat).getTime())
+
+    if (matchingDevices.length === 0) {
+      return NextResponse.json({ error: 'Private share is currently offline' }, { status: 409 })
+    }
+
+    country = matchingDevices[0]?.country_code ?? country
+    privateProviderUserId = privateShare.user_id
+    privateBaseDeviceId = privateShare.base_device_id
+    preferredProviderUserId = privateShare.user_id
+  }
+
+  if (!country) return NextResponse.json({ error: 'country is required' }, { status: 400 })
 
   const { data: session, error: sessionError } = await adminClient
     .from('sessions')
@@ -80,8 +141,9 @@ export async function POST(req: Request) {
     .select('id')
     .single()
 
-  if (sessionError || !session)
+  if (sessionError || !session) {
     return NextResponse.json({ error: 'Failed to create session' }, { status: 500 })
+  }
 
   const receipt = issueAccountabilityReceipt({
     sessionId: session.id,
@@ -103,13 +165,13 @@ export async function POST(req: Request) {
     .update({ signed_receipt: receipt })
     .eq('id', session.id)
 
-  // Read preferred provider for this country from DB — passed to relay for affinity matching
-  const preferredProviderUserId = (profile.preferred_providers as Record<string, string>)?.[country] ?? null
-
   return NextResponse.json({
     sessionId: session.id,
     relayEndpoint: relay,
     receipt,
+    country,
     preferredProviderUserId,
+    privateProviderUserId,
+    privateBaseDeviceId,
   })
 }

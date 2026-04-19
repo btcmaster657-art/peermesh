@@ -28,6 +28,23 @@ function CliSection({ label, cmd }: { label: string; cmd: string }) {
   )
 }
 
+type PrivateShareState = {
+  base_device_id: string
+  code: string
+  enabled: boolean
+  expires_at: string | null
+  active: boolean
+} | null
+
+function getExpiryPreset(expiresAt: string | null): string {
+  if (!expiresAt) return 'none'
+  const hours = Math.max(0, Math.round((new Date(expiresAt).getTime() - Date.now()) / 3_600_000))
+  if (hours <= 2) return '1'
+  if (hours <= 30) return '24'
+  if (hours <= 24 * 8) return '168'
+  return 'none'
+}
+
 export default function Dashboard() {
   const router = useRouter()
   const supabase = createClient()
@@ -44,6 +61,10 @@ export default function Dashboard() {
   const [disconnecting, setDisconnecting] = useState(false)
   const [shareToggling, setShareToggling] = useState(false)
   const [showDisclosure, setShowDisclosure] = useState(false)
+  const [privateCodeInput, setPrivateCodeInput] = useState('')
+  const [privateShare, setPrivateShare] = useState<PrivateShareState>(null)
+  const [privateExpiryHours, setPrivateExpiryHours] = useState('24')
+  const [privateShareSaving, setPrivateShareSaving] = useState(false)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [shareError, setShareError] = useState<string | null>(null)
@@ -142,6 +163,15 @@ export default function Dashboard() {
       .catch(() => {})
   }, [])
 
+  useEffect(() => {
+    const baseDeviceId = desktop?.baseDeviceId ?? desktop?.peer?.baseDeviceId ?? null
+    if (!profile || !baseDeviceId) {
+      setPrivateShare(null)
+      return
+    }
+    loadPrivateShare(baseDeviceId).catch(() => {})
+  }, [profile?.id, desktop?.baseDeviceId, desktop?.peer?.baseDeviceId])
+
   // ── Poll desktop state + refresh profile from DB ──────────────────────────
   function startPolling() {
     if (pollRef.current) return
@@ -180,6 +210,49 @@ export default function Dashboard() {
 
   function stopPolling() {
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
+  }
+
+  async function loadPrivateShare(baseDeviceId: string) {
+    const res = await fetch(`/api/user/sharing?baseDeviceId=${encodeURIComponent(baseDeviceId)}`)
+    if (!res.ok) throw new Error('Could not load private sharing state')
+    const data = await res.json()
+    setPrivateShare(data.private_share ?? null)
+    setPrivateExpiryHours(getExpiryPreset(data.private_share?.expires_at ?? null))
+  }
+
+  async function savePrivateShare(input: { enabled?: boolean; refresh?: boolean; expiryHours?: string }) {
+    const baseDeviceId = desktop?.baseDeviceId ?? desktop?.peer?.baseDeviceId ?? null
+    if (!baseDeviceId) {
+      setShareError('A local desktop app or CLI device is required to manage private sharing')
+      return
+    }
+    setPrivateShareSaving(true)
+    setShareError(null)
+    try {
+      const expiryHours = input.expiryHours === undefined
+        ? undefined
+        : (input.expiryHours === 'none' ? null : Number.parseInt(input.expiryHours, 10))
+      const res = await fetch('/api/user/sharing', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          privateSharing: {
+            baseDeviceId,
+            enabled: input.enabled,
+            refresh: input.refresh === true,
+            expiryHours,
+          },
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok || data.error) throw new Error(data.error ?? 'Could not update private sharing')
+      setPrivateShare(data.private_share ?? null)
+      if (input.expiryHours !== undefined) setPrivateExpiryHours(input.expiryHours)
+    } catch (err: unknown) {
+      setShareError(err instanceof Error ? err.message : 'Could not update private sharing')
+    } finally {
+      setPrivateShareSaving(false)
+    }
   }
 
   // ── Share toggle ────────────────────────────────────────────────────────────
@@ -260,7 +333,8 @@ export default function Dashboard() {
 
   // ── Connect ─────────────────────────────────────────────────────────────────
   async function handleConnect() {
-    if (!selectedCountry || !profile) return
+    const trimmedPrivateCode = privateCodeInput.trim()
+    if ((!selectedCountry && !trimmedPrivateCode) || !profile) return
     setConnectError(null)
     if (!navigator.onLine) {
       setConnectError('No internet connection — check your network and try again')
@@ -271,11 +345,12 @@ export default function Dashboard() {
       const res = await fetch('/api/session/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ country: selectedCountry }),
+        body: JSON.stringify(trimmedPrivateCode ? { privateCode: trimmedPrivateCode } : { country: selectedCountry }),
       })
       const data = await res.json()
       if (!res.ok || data.error) throw new Error(data.error ?? `Server error (${res.status})`)
-      router.push(`/browse?relay=${encodeURIComponent(data.relayEndpoint)}&country=${selectedCountry}&userId=${profile.id}&dbSessionId=${data.sessionId}&preferredProviderUserId=${encodeURIComponent(data.preferredProviderUserId ?? '')}`)
+      const targetCountry = data.country ?? selectedCountry
+      router.push(`/browse?relay=${encodeURIComponent(data.relayEndpoint)}&country=${encodeURIComponent(targetCountry)}&userId=${profile.id}&dbSessionId=${data.sessionId}&preferredProviderUserId=${encodeURIComponent(data.preferredProviderUserId ?? '')}&privateProviderUserId=${encodeURIComponent(data.privateProviderUserId ?? '')}&privateBaseDeviceId=${encodeURIComponent(data.privateBaseDeviceId ?? '')}`)
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Could not connect'
       setConnectError(msg === 'Failed to fetch' ? 'Network error — could not reach server' : msg)
@@ -343,6 +418,9 @@ export default function Dashboard() {
   const cliUpdateAvailable     = !!(cliRunning     && latestCliVersion     && cliProcessVersion     && latestCliVersion     !== cliProcessVersion)
   const extUpdateAvailable     = !!(extInstalled   && latestExtVersion     && extVersion            && latestExtVersion     !== extVersion)
   const showExtBanner          = !extInstalled || extUpdateAvailable
+  const helperBaseDeviceId = desktop?.baseDeviceId ?? desktop?.peer?.baseDeviceId ?? null
+  const helperSlots = desktop?.slots ?? desktop?.peer?.slots ?? null
+  const privateConnectReady = !!privateCodeInput.trim()
 
   // Detect OS for CLI docs default tab
   const detectedOS: 'windows' | 'mac' | 'linux' = typeof navigator !== 'undefined'
@@ -465,6 +543,32 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {/* Private connect */}
+      <div style={{ background: 'var(--surface)', border: '1px solid rgba(0,255,136,0.18)', borderRadius: '12px', padding: '16px', marginBottom: '16px' }}>
+        <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--accent)', letterSpacing: '1px', marginBottom: '6px' }}>PRIVATE SHARE CODE</div>
+        <div style={{ fontSize: '12px', color: 'var(--muted)', lineHeight: 1.6, marginBottom: '12px' }}>
+          Connect directly to a known device. PeerMesh will only use that device&apos;s active slots and will not fall back to the public pool.
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '10px' }}>
+          <input
+            value={privateCodeInput}
+            onChange={(e) => { setPrivateCodeInput(e.target.value.replace(/\D/g, '').slice(0, 9)); setConnectError(null) }}
+            placeholder="Enter 9-digit code"
+            inputMode="numeric"
+            maxLength={9}
+            style={{ padding: '10px 12px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text)', fontFamily: 'var(--font-geist-mono)', fontSize: '12px', letterSpacing: '1px' }}
+          />
+          <button
+            onClick={handleConnect}
+            disabled={connecting || !privateConnectReady || (!profile.is_premium && !isSharing)}
+            title={!profile.is_premium && !isSharing ? 'Enable sharing or upgrade to connect' : undefined}
+            style={{ padding: '10px 14px', background: privateConnectReady ? 'var(--accent)' : 'var(--border)', color: privateConnectReady ? '#000' : 'var(--muted)', border: 'none', borderRadius: '8px', fontFamily: 'var(--font-geist-mono)', fontSize: '10px', fontWeight: 700, letterSpacing: '0.5px', cursor: connecting || !privateConnectReady || (!profile.is_premium && !isSharing) ? 'not-allowed' : 'pointer', opacity: (!profile.is_premium && !isSharing) ? 0.5 : 1 }}
+          >
+            {connecting && privateConnectReady ? 'CONNECTING...' : 'CONNECT CODE'}
+          </button>
+        </div>
+      </div>
+
       {/* Country picker */}
       <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '12px', padding: '16px', marginBottom: '16px', opacity: connecting ? 0.5 : 1, pointerEvents: connecting ? 'none' : 'auto' }}>
         <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--muted)', letterSpacing: '1px', marginBottom: '14px' }}>BROWSE AS...</div>
@@ -480,7 +584,7 @@ export default function Dashboard() {
               >
                 <div style={{ fontSize: '20px', marginBottom: '3px' }}>{c.flag}</div>
                 <div style={{ fontSize: '10px', color: 'var(--text)', marginBottom: '2px' }}>{c.name}</div>
-                <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '9px', color: count > 0 ? 'var(--accent)' : 'var(--muted)' }}>{count} peers</div>
+                <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '9px', color: count > 0 ? 'var(--accent)' : 'var(--muted)' }}>{count} devices</div>
               </button>
             )
           })}
@@ -565,6 +669,15 @@ export default function Dashboard() {
           </button>
         </div>
 
+        {helperSlots && (
+          <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid var(--border)' }}>
+            <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--muted)', letterSpacing: '0.5px', marginBottom: '4px' }}>CONNECTION SLOTS</div>
+            <div style={{ fontSize: '11px', color: 'var(--muted)' }}>
+              {helperSlots.active} / {helperSlots.configured} active{helperSlots.warning ? ` — ${helperSlots.warning}` : ''}
+            </div>
+          </div>
+        )}
+
         {/* Daily limit setter — always visible so user can set before sharing */}
         <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px' }}>
           <div>
@@ -610,8 +723,74 @@ export default function Dashboard() {
         )}
       </div>
 
+      {helperBaseDeviceId && (
+        <div style={{ background: 'var(--surface)', border: '1px solid rgba(0,255,136,0.18)', borderRadius: '12px', padding: '16px', marginBottom: '16px' }}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '12px', marginBottom: '12px' }}>
+            <div>
+              <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--accent)', letterSpacing: '1px', marginBottom: '4px' }}>PRIVATE SHARING</div>
+              <div style={{ fontSize: '12px', color: 'var(--muted)', lineHeight: 1.6 }}>
+                {privateShare?.active
+                  ? 'Enabled for this local device. The 9-digit code is pinned to this device and all of its active slots.'
+                  : 'Optional device-scoped sharing for trusted requesters only.'}
+              </div>
+            </div>
+            <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: privateShare?.active ? 'var(--accent)' : 'var(--muted)', whiteSpace: 'nowrap' }}>
+              {privateShare?.active ? '● ACTIVE' : '○ OFF'}
+            </div>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '10px', marginBottom: '10px' }}>
+            <div style={{ padding: '10px 12px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '8px', fontFamily: 'var(--font-geist-mono)', fontSize: '15px', letterSpacing: '3px', color: privateShare?.code ? 'var(--accent)' : 'var(--muted)' }}>
+              {privateShare?.code ?? 'CODE OFF'}
+            </div>
+            <button
+              onClick={() => { if (privateShare?.code) navigator.clipboard.writeText(privateShare.code).catch(() => {}) }}
+              disabled={!privateShare?.code}
+              style={{ padding: '10px 12px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '8px', color: privateShare?.code ? 'var(--text)' : 'var(--muted)', fontFamily: 'var(--font-geist-mono)', fontSize: '10px', cursor: privateShare?.code ? 'pointer' : 'not-allowed' }}
+            >
+              COPY
+            </button>
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px', flexWrap: 'wrap' }}>
+            <select
+              value={privateExpiryHours}
+              onChange={(e) => setPrivateExpiryHours(e.target.value)}
+              style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: '6px', padding: '6px 8px', fontFamily: 'var(--font-geist-mono)', fontSize: '10px', cursor: 'pointer' }}
+            >
+              <option value='none'>No expiry</option>
+              <option value='1'>1 hour</option>
+              <option value='24'>24 hours</option>
+              <option value='168'>7 days</option>
+            </select>
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+              <button
+                onClick={() => savePrivateShare({ enabled: !(privateShare?.enabled ?? false), expiryHours: privateExpiryHours })}
+                disabled={privateShareSaving}
+                style={{ padding: '7px 12px', background: privateShare?.enabled ? 'transparent' : 'var(--accent)', color: privateShare?.enabled ? 'var(--text)' : '#000', border: `1px solid ${privateShare?.enabled ? 'var(--border)' : 'var(--accent)'}`, borderRadius: '7px', fontFamily: 'var(--font-geist-mono)', fontSize: '10px', cursor: privateShareSaving ? 'not-allowed' : 'pointer', opacity: privateShareSaving ? 0.6 : 1 }}
+              >
+                {privateShare?.enabled ? 'DISABLE' : 'ENABLE'}
+              </button>
+              <button
+                onClick={() => savePrivateShare({ enabled: true, refresh: true, expiryHours: privateExpiryHours })}
+                disabled={privateShareSaving}
+                style={{ padding: '7px 12px', background: 'transparent', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: '7px', fontFamily: 'var(--font-geist-mono)', fontSize: '10px', cursor: privateShareSaving ? 'not-allowed' : 'pointer', opacity: privateShareSaving ? 0.6 : 1 }}
+              >
+                REFRESH CODE
+              </button>
+            </div>
+          </div>
+
+          {privateShare?.expires_at && (
+            <div style={{ marginTop: '10px', fontSize: '11px', color: 'var(--muted)' }}>
+              Expires {new Date(privateShare.expires_at).toLocaleString()}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Free tier must-share enforcement */}
-      {!profile.is_premium && !isSharing && selectedCountry && (
+      {!profile.is_premium && !isSharing && (selectedCountry || privateConnectReady) && (
         <div style={{ background: 'rgba(255,80,80,0.07)', border: '1px solid rgba(255,80,80,0.3)', borderRadius: '10px', padding: '12px 16px', marginBottom: '16px', fontSize: '12px', color: '#ff9090' }}>
           <span style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', letterSpacing: '0.5px' }}>FREE TIER — </span>
           Enable sharing above to connect, or{' '}

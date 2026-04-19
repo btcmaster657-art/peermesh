@@ -13,21 +13,17 @@ export async function GET() {
 
   let query = adminClient
     .from('provider_devices')
-    .select('country_code, user_id')
+    .select('country_code, user_id, device_id')
     .gt('last_heartbeat', cutoff)
 
   const { data, error } = await query
 
   if (error || !data) return NextResponse.json({ peers: [] })
 
-  // Aggregate — exclude current user, deduplicate by user_id per country
-  const seen = new Set<string>()
+  // Aggregate live devices — exclude the current user's devices
   const counts: Record<string, number> = {}
   for (const row of data) {
     if (user && row.user_id === user.id) continue
-    const key = `${row.country_code}:${row.user_id}`
-    if (seen.has(key)) continue
-    seen.add(key)
     counts[row.country_code] = (counts[row.country_code] ?? 0) + 1
   }
 

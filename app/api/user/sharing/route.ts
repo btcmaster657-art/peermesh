@@ -2,12 +2,90 @@ import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { adminClient } from '@/lib/supabase/admin'
 import { verifyDesktopToken } from '@/lib/desktop-token'
+import {
+  buildPrivateShareExpiry,
+  generatePrivateShareCode,
+  isPrivateShareActive,
+  parsePrivateShareExpiryHours,
+} from '@/lib/private-sharing'
 
 const RELAY_SECRET = process.env.RELAY_SECRET ?? ''
 
-async function resolveUserId(req: Request, bodyUserId?: string): Promise<string | null> {
+function isRelayRequest(req: Request): boolean {
   const relaySecret = req.headers.get('x-relay-secret') ?? ''
-  if (RELAY_SECRET && relaySecret === RELAY_SECRET) return bodyUserId ?? null
+  return !!RELAY_SECRET && relaySecret === RELAY_SECRET
+}
+
+function getTodaySharedBytes(profile: {
+  share_bytes_today?: number | null
+  share_bytes_today_date?: string | null
+}): number {
+  const today = new Date().toISOString().slice(0, 10)
+  return profile.share_bytes_today_date === today ? (profile.share_bytes_today ?? 0) : 0
+}
+
+function getProviderShareStatus(profile: {
+  daily_share_limit_mb?: number | null
+  share_bytes_today?: number | null
+  share_bytes_today_date?: string | null
+}) {
+  const totalBytesToday = getTodaySharedBytes(profile)
+  const limitBytes = profile.daily_share_limit_mb == null ? null : profile.daily_share_limit_mb * 1024 * 1024
+  return {
+    total_bytes_today: totalBytesToday,
+    daily_limit_bytes: limitBytes,
+    can_accept_sessions: limitBytes == null ? true : totalBytesToday < limitBytes,
+  }
+}
+
+type PrivateShareRow = {
+  base_device_id: string
+  share_code: string
+  enabled: boolean
+  expires_at: string | null
+}
+
+function serializePrivateShare(row: PrivateShareRow | null) {
+  if (!row) return null
+  return {
+    base_device_id: row.base_device_id,
+    code: row.share_code,
+    enabled: row.enabled,
+    expires_at: row.expires_at,
+    active: isPrivateShareActive(row.enabled, row.expires_at),
+  }
+}
+
+async function loadPrivateShareDevice(userId: string, baseDeviceId: string): Promise<PrivateShareRow | null> {
+  const { data, error } = await adminClient
+    .from('private_share_devices')
+    .select('base_device_id, share_code, enabled, expires_at')
+    .eq('user_id', userId)
+    .eq('base_device_id', baseDeviceId)
+    .maybeSingle()
+
+  if (error) throw error
+  return data ?? null
+}
+
+async function issuePrivateShareCode(userId: string): Promise<string> {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const code = generatePrivateShareCode()
+    const { data, error } = await adminClient
+      .from('private_share_devices')
+      .select('id')
+      .eq('share_code', code)
+      .maybeSingle()
+
+    if (error) throw error
+    if (!data) return code
+  }
+
+  throw new Error(`Could not issue a unique private share code for ${userId}`)
+}
+
+async function resolveUserId(req: Request, bodyUserId?: string): Promise<string | null> {
+  if (isRelayRequest(req)) return bodyUserId ?? null
 
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
@@ -26,17 +104,44 @@ async function resolveUserId(req: Request, bodyUserId?: string): Promise<string 
 
 // ── GET: fetch fresh profile stats (extension polls this) ──────────────────
 export async function GET(req: Request) {
+  const url = new URL(req.url)
+  const relayProviderUserId = url.searchParams.get('providerUserId')
+  const baseDeviceId = url.searchParams.get('baseDeviceId')?.trim() || null
+
+  if (isRelayRequest(req) && relayProviderUserId) {
+    const { data, error } = await adminClient
+      .from('profiles')
+      .select('daily_share_limit_mb, share_bytes_today, share_bytes_today_date')
+      .eq('id', relayProviderUserId)
+      .single()
+
+    if (error || !data) return NextResponse.json({ error: 'Not found' }, { status: 404 })
+    return NextResponse.json(getProviderShareStatus(data))
+  }
+
   const userId = await resolveUserId(req)
   if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const { data, error } = await adminClient
     .from('profiles')
-    .select('total_bytes_shared, total_bytes_used, bandwidth_used_month, bandwidth_limit, trust_score, is_sharing, daily_share_limit_mb, has_accepted_provider_terms')
+    .select('total_bytes_shared, total_bytes_used, bandwidth_used_month, bandwidth_limit, trust_score, is_sharing, daily_share_limit_mb, has_accepted_provider_terms, share_bytes_today, share_bytes_today_date')
     .eq('id', userId)
     .single()
 
   if (error || !data) return NextResponse.json({ error: 'Not found' }, { status: 404 })
-  return NextResponse.json(data)
+  const privateShare = baseDeviceId ? await loadPrivateShareDevice(userId, baseDeviceId) : null
+  return NextResponse.json({
+    total_bytes_shared: data.total_bytes_shared,
+    total_bytes_used: data.total_bytes_used,
+    bandwidth_used_month: data.bandwidth_used_month,
+    bandwidth_limit: data.bandwidth_limit,
+    trust_score: data.trust_score,
+    is_sharing: data.is_sharing,
+    daily_share_limit_mb: data.daily_share_limit_mb,
+    has_accepted_provider_terms: data.has_accepted_provider_terms,
+    private_share: serializePrivateShare(privateShare),
+    ...getProviderShareStatus(data),
+  })
 }
 
 // ── POST: set is_sharing flag OR increment bytes (desktop provider) ───────────
@@ -57,6 +162,60 @@ export async function POST(req: Request) {
     if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     await adminClient.from('profiles').update({ has_accepted_provider_terms: true }).eq('id', userId)
     return NextResponse.json({ ok: true })
+  }
+
+  if (body.privateSharing && typeof body.privateSharing === 'object') {
+    const userId = await resolveUserId(req)
+    if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+    const baseDeviceId = String(body.privateSharing.baseDeviceId ?? '').trim()
+    if (!baseDeviceId) {
+      return NextResponse.json({ error: 'baseDeviceId is required' }, { status: 400 })
+    }
+
+    if (body.privateSharing.enabled !== undefined && typeof body.privateSharing.enabled !== 'boolean') {
+      return NextResponse.json({ error: 'enabled must be boolean' }, { status: 400 })
+    }
+
+    const expiryHours = parsePrivateShareExpiryHours(body.privateSharing.expiryHours)
+    if (body.privateSharing.expiryHours !== undefined && expiryHours === undefined) {
+      return NextResponse.json({ error: 'expiryHours must be null or an integer between 1 and 720' }, { status: 400 })
+    }
+
+    const refresh = body.privateSharing.refresh === true
+    const existing = await loadPrivateShareDevice(userId, baseDeviceId)
+    const enabled = body.privateSharing.enabled ?? existing?.enabled ?? false
+    const expiresAt = expiryHours !== undefined
+      ? buildPrivateShareExpiry(expiryHours)
+      : (existing?.expires_at ?? null)
+
+    if (!enabled && !refresh && expiryHours === undefined && !existing) {
+      return NextResponse.json({ ok: true, private_share: null })
+    }
+
+    let code = existing?.share_code ?? null
+    if (!code || refresh) code = await issuePrivateShareCode(userId)
+
+    const payload = {
+      user_id: userId,
+      base_device_id: baseDeviceId,
+      share_code: code,
+      enabled,
+      expires_at: expiresAt,
+      updated_at: new Date().toISOString(),
+    }
+
+    const { data, error } = await adminClient
+      .from('private_share_devices')
+      .upsert(payload, { onConflict: 'user_id,base_device_id' })
+      .select('base_device_id, share_code, enabled, expires_at')
+      .single()
+
+    if (error || !data) {
+      return NextResponse.json({ error: error?.message ?? 'Could not update private sharing' }, { status: 500 })
+    }
+
+    return NextResponse.json({ ok: true, private_share: serializePrivateShare(data) })
   }
 
   // Web dashboard: { isSharing: boolean } or { dailyLimitMb: number | null }

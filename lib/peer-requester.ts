@@ -29,7 +29,9 @@ export class PeerRequester {
     country: string,
     userId: string,
     onDisconnect?: () => void,
-    preferredProviderUserId?: string | null
+    preferredProviderUserId?: string | null,
+    privateProviderUserId?: string | null,
+    privateBaseDeviceId?: string | null
   ): Promise<void> {
     this.onDisconnect = onDisconnect
 
@@ -46,6 +48,8 @@ export class PeerRequester {
           requireTunnel: false,
           dbSessionId,
           preferredProviderUserId: preferredProviderUserId ?? null,
+          privateProviderUserId: privateProviderUserId ?? null,
+          privateBaseDeviceId: privateBaseDeviceId ?? null,
         }))
       }
 

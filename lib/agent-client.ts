@@ -24,13 +24,31 @@ export type DesktopState = {
   version: string | null
   where?: 'desktop' | 'cli'
   source?: 'desktop' | 'cli'  // legacy compat
+  baseDeviceId?: string | null
+  connectionSlots?: number
+  slots?: {
+    configured: number
+    active: number
+    statuses: Array<{
+      index: number
+      deviceId: string
+      running: boolean
+      requestsHandled: number
+      bytesServed: number
+      connectedAt: string | null
+    }>
+    warning?: string | null
+  }
   stats?: AgentHealth['stats']
   peer?: {                     // the other process if both are running
     available: boolean
     running: boolean
     where: 'desktop' | 'cli'
     version: string | null
+    baseDeviceId?: string | null
     stats?: AgentHealth['stats'] | null
+    slots?: DesktopState['slots'] | null
+    connectionSlots?: number | null
   } | null
 }
 
@@ -63,11 +81,11 @@ export async function checkDesktop(): Promise<DesktopState> {
   }
   if (bRes.status === 'fulfilled' && bRes.value.ok) {
     const d = await bRes.value.json()
-    b = { available: true, running: !!d.running, where: d.where ?? 'cli', version: d.version ?? null }
+    b = { available: true, running: !!d.running, where: d.where ?? 'cli', version: d.version ?? null, baseDeviceId: d.baseDeviceId ?? null, stats: d.stats ?? null, slots: d.slots ?? null, connectionSlots: d.connectionSlots ?? null }
     // If peer is the active sharer, promote its stats to the top-level
     if (b.running && d.stats) {
       if (!a) a = { available: false, running: false, shareEnabled: false, configured: false, country: null, userId: null, version: null, peer: null }
-      a = { ...a, stats: d.stats }
+      a = { ...a, stats: d.stats, slots: d.slots ?? a.slots, connectionSlots: d.connectionSlots ?? a.connectionSlots }
     }
   }
 
