@@ -1847,7 +1847,7 @@ function connectRelay() {
       ws.close(1000)
       return
     }
-    const reg = { type: 'register_provider', userId: config.userId, country: config.country, trustScore: config.trust, agentMode: true, providerKind: 'desktop', supportsHttp: true, supportsTunnel: true }
+    const reg = { type: 'register_provider', userId: config.userId, country: config.country, trustScore: config.trust, agentMode: true, providerKind: 'desktop', supportsHttp: true, supportsTunnel: true, deviceId: config.extId }
     logRelay('SEND', 'register_provider', reg)
     ws.send(JSON.stringify(reg))
     startHeartbeat()

@@ -34,7 +34,7 @@ const API_BASE    = 'https://peermesh-beta.vercel.app'
 const RELAY_WS    = 'wss://peermesh-relay.fly.dev'
 const CONFIG_DIR  = join(homedir(), '.peermesh')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
-const VERSION     = '1.0.26'
+const VERSION     = '1.0.27'
 const DEBUG_LOG   = join(homedir(), 'Desktop', 'peermesh-debug.log')
 
 const BLOCKED = [/\.onion$/i, /^smtp\./i, /^mail\./i, /torrent/i]
@@ -472,7 +472,7 @@ function connectRelay(limitBytes) {
     running = true
     reconnectDelay = 2000
     clog.info('RELAY', 'WebSocket OPEN', { relay: RELAY_WS })
-    const reg = { type: 'register_provider', userId: config.userId, country: config.country, trustScore: config.trust ?? 50, agentMode: true, providerKind: 'cli', supportsHttp: true, supportsTunnel: true }
+    const reg = { type: 'register_provider', userId: config.userId, country: config.country, trustScore: config.trust ?? 50, agentMode: true, providerKind: 'cli', supportsHttp: true, supportsTunnel: true, deviceId: DEVICE_ID }
     clogRelay('SEND', 'register_provider', reg)
     ws.send(JSON.stringify(reg))
     if (heartbeatTimer) clearInterval(heartbeatTimer)

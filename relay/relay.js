@@ -291,9 +291,12 @@ function handleMessage(ws, msg) {
   switch (msg.type) {
 
     case 'register_provider': {
-      log(ws.peerId.slice(0,8), `REGISTER_PROVIDER userId=${msg.userId?.slice(0,8)} country=${msg.country}`)
+      log(ws.peerId.slice(0,8), `REGISTER_PROVIDER userId=${msg.userId?.slice(0,8)} country=${msg.country} deviceId=${msg.deviceId?.slice(0,8)}`)
+      ws.deviceId = msg.deviceId ?? null
       for (const [id, peer] of peers) {
         if (peer.userId === msg.userId && peer.role === 'provider' && id !== ws.peerId) {
+          // Only evict if same device reconnecting — different devices are allowed
+          if (msg.deviceId && peer.deviceId && peer.deviceId !== msg.deviceId) continue
           if (peer.sessionId) {
             const oldSession = sessions.get(peer.sessionId)
             if (oldSession) { oldSession.providerId = ws.peerId; ws.sessionId = peer.sessionId }
