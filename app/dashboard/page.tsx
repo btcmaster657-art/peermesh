@@ -103,8 +103,7 @@ export default function Dashboard() {
               trust: data.trust_score,
             })
           }
-          const desktopSharing = dt.running || dt.shareEnabled
-          setIsSharing(desktopSharing)
+          setIsSharing(dt.running)
           if (dt.stats) setSharingStats({ bytesServed: dt.stats.bytesServed, requestsHandled: dt.stats.requestsHandled })
         } else if (data.is_sharing) {
           await fetch('/api/user/sharing', {
@@ -152,16 +151,8 @@ export default function Dashboard() {
       const dt = await checkDesktop()
       setDesktop(dt)
       if (dt.available) {
-        const desktopSharing = dt.running || dt.shareEnabled
-        setIsSharing(desktopSharing)
+        setIsSharing(dt.running)
         if (dt.stats) setSharingStats({ bytesServed: dt.stats.bytesServed, requestsHandled: dt.stats.requestsHandled })
-        if (!desktopSharing) {
-          await fetch('/api/user/sharing', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ isSharing: false }),
-          }).catch(() => {})
-        }
       } else {
         setIsSharing(false)
       }

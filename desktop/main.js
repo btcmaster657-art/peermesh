@@ -37,7 +37,8 @@ const CONFIG_FILE = path.join(app.getPath('userData'), 'config.json')
 const IS_NATIVE_HOST_MODE = process.argv.some(arg => arg.startsWith('chrome-extension://')) || process.argv.some(arg => arg.startsWith('--parent-window='))
 const IS_BACKGROUND_LAUNCH = process.argv.includes('--background')
 
-let peerPort = null  // port of the other process (CLI), set via /native/peer/register
+let peerPort = null       // port of the other process (CLI), set via /native/peer/register
+let peerSharing = false   // true when the peer process is the active relay sharer
 
 function notifyPeer(path, body) {
   if (!peerPort) return
@@ -440,8 +441,6 @@ function connectRelay() {
       if (msg.type === 'registered') {
         stats.connectedAt = new Date().toISOString()
         showNotification('PeerMesh Active', `Sharing your ${config.country} connection`)
-        // Tell peer (CLI) to start sharing too if it isn't already
-        notifyPeer('/native/share/start', { token: config.token, userId: config.userId })
         updateTray()
       } else if (msg.type === 'error') {
         log('relay error message:', msg.message)
@@ -534,8 +533,6 @@ function stopRelay() {
   stats = { bytesServed: 0, requestsHandled: 0, connectedAt: null }
   stopHeartbeat()
   persistSharingState(false)
-  // Tell peer (CLI) to stop sharing too
-  notifyPeer('/native/share/stop')
   updateTray()
 }
 
@@ -926,14 +923,19 @@ function updateTray() {
   const menu = Menu.buildFromTemplate([
     { label: 'PeerMesh', enabled: false },
     { type: 'separator' },
-    { label: running ? `● Sharing — ${config.country}` : '○ Not sharing', enabled: false },
-    { label: running ? `${stats.requestsHandled} requests · ${formatBytes(stats.bytesServed)} served` : 'Click to start sharing', enabled: false },
+    { label: running ? `● Sharing — ${config.country}` : (peerSharing ? '● Sharing (via CLI)' : '○ Not sharing'), enabled: false },
+    { label: running ? `${stats.requestsHandled} requests · ${formatBytes(stats.bytesServed)} served` : (peerSharing ? 'CLI is the active provider' : 'Click to start sharing'), enabled: false },
     { type: 'separator' },
     {
-      label: running ? 'Stop Sharing' : 'Start Sharing',
+      label: running ? 'Stop Sharing' : (peerSharing ? 'Stop Sharing (CLI)' : 'Start Sharing'),
       click: () => {
-        if (running) {
+        if (running || peerSharing) {
           stopRelay()
+          if (peerPort) {
+            fetch(`http://127.0.0.1:${peerPort}/native/share/stop`, { method: 'POST', signal: AbortSignal.timeout(2000) }).catch(() => {})
+          }
+          peerSharing = false
+          updateTray()
         } else if (config.token && config.userId) {
           connectRelay()
         } else { shell.openExternal(`${API_BASE}/dashboard`); showWindow() }
@@ -1097,10 +1099,17 @@ ipcMain.handle('sign-in', async (_, { token, userId, country, trust }) => {
   return { success: true }
 })
 
-ipcMain.handle('toggle-sharing', () => {
-  if (running) {
+ipcMain.handle('toggle-sharing', async () => {
+  // OFF: stop both A(7654) and B(7656)
+  if (running || peerSharing) {
     stopRelay()
+    if (peerPort) {
+      try { await fetch(`http://127.0.0.1:${peerPort}/native/share/stop`, { method: 'POST', signal: AbortSignal.timeout(2000) }) } catch {}
+    }
+    peerSharing = false
+    updateTray()
   } else if (config.token) {
+    // ON: connect this desktop to relay
     config.shareEnabled = true
     saveConfig()
     connectRelay()
@@ -1187,7 +1196,7 @@ if (IS_NATIVE_HOST_MODE) {
   const net = require('net')
   const tester = net.createServer()
   tester.once('error', () => {
-    // Port in use (CLI owns it) — skip control server, app still works
+    // Port in use (CLI owns it) — desktop runs as peer on PEER_PORT
     console.log(`Port ${CONTROL_PORT} in use — CLI may be running`)
     // Try to register with CLI so we can cross-notify
     fetch(`http://127.0.0.1:${CONTROL_PORT}/native/peer/register`, {
@@ -1196,38 +1205,124 @@ if (IS_NATIVE_HOST_MODE) {
       body: JSON.stringify({ port: PEER_PORT, where: 'desktop' }),
       signal: AbortSignal.timeout(1500),
     }).then(() => { peerPort = CONTROL_PORT }).catch(() => {})
+
+    // Bind a minimal peer server on PEER_PORT so the tray/renderer can
+    // reflect CLI sharing state and forward stop commands to CLI.
+    const peerServer = http.createServer((req, res) => {
+      const origin = req.headers.origin || ''
+      res.setHeader('Access-Control-Allow-Origin',
+        origin.includes('peermesh') || origin.includes('localhost') || origin.startsWith('chrome-extension://') ? origin : '')
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+      if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return }
+      const url = new URL(req.url, `http://localhost:${PEER_PORT}`)
+
+      // Reflect CLI state — proxy the GET through to CLI on 7654
+      if (req.method === 'GET' && url.pathname === '/native/state') {
+        fetch(`http://127.0.0.1:${CONTROL_PORT}/native/state`, { signal: AbortSignal.timeout(1500) })
+          .then(r => r.json())
+          .then(d => {
+            peerSharing = !!d.running
+            res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ...d, where: 'desktop', peerWhere: 'cli' }))
+          })
+          .catch(() => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ available: true, running: false, shareEnabled: false, where: 'desktop' })) })
+        return
+      }
+
+      // Stop sharing — forward to CLI on 7654, clear peerSharing
+      if (req.method === 'POST' && url.pathname === '/native/share/stop') {
+        fetch(`http://127.0.0.1:${CONTROL_PORT}/native/share/stop`, { method: 'POST', signal: AbortSignal.timeout(2000) }).catch(() => {})
+        peerSharing = false
+        stopRelay()
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ available: true, running: false, shareEnabled: false }))
+        return
+      }
+
+      // Peer registration
+      if (req.method === 'POST' && url.pathname === '/native/peer/register') {
+        let body = ''
+        req.on('data', d => body += d)
+        req.on('end', () => {
+          try { peerPort = JSON.parse(body).port } catch {}
+          res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: true }))
+        })
+        return
+      }
+
+      res.writeHead(404); res.end()
+    })
+    peerServer.listen(PEER_PORT, '127.0.0.1', async () => {
+      log('Desktop peer server on port ' + PEER_PORT + ' (CLI owns 7654)')
+      // Read CLI's actual sharing state now so tray label is correct immediately
+      try {
+        const r = await fetch(`http://127.0.0.1:${CONTROL_PORT}/native/state`, { signal: AbortSignal.timeout(1500) })
+        if (r.ok) { const d = await r.json(); peerSharing = !!d.running }
+      } catch {}
+      updateTray()
+      // Watch for CLI stopping — just update tray, no auto-takeover
+      const cliWatcher = setInterval(async () => {
+        try {
+          const r = await fetch(`http://127.0.0.1:${CONTROL_PORT}/native/state`, { signal: AbortSignal.timeout(1500) })
+          if (r.ok) {
+            const d = await r.json()
+            peerSharing = !!d.running
+            updateTray()
+          } else {
+            peerSharing = false
+            updateTray()
+            clearInterval(cliWatcher)
+          }
+        } catch {
+          peerSharing = false
+          updateTray()
+          clearInterval(cliWatcher)
+        }
+      }, 3000)
+    })
+    peerServer.on('error', e => log('Desktop peer server error: ' + e.message))
   })
   tester.once('listening', () => {
     tester.close(() => {
       controlServer.listen(CONTROL_PORT, '127.0.0.1', async () => {
         localProxyServer.listen(LOCAL_PROXY_PORT, '127.0.0.1')
-        // Check if CLI is already on PEER_PORT — register and sync state
+        // Check if CLI is already sharing on CONTROL_PORT (7654) — desktop just
+        // took that port so this path only runs when desktop wins the port race.
+        // Also check PEER_PORT (7656) in case CLI bound there first.
+        let cliAlreadySharing = false
         try {
+          // CLI may have been on 7656 before desktop started — check there
           const r = await fetch(`http://127.0.0.1:${PEER_PORT}/native/state`, { signal: AbortSignal.timeout(1500) })
           if (r.ok) {
             const cliState = await r.json()
-            // Register with CLI so it can cross-notify us
-            await fetch(`http://127.0.0.1:${PEER_PORT}/native/peer/register`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ port: CONTROL_PORT, where: 'desktop' }),
-              signal: AbortSignal.timeout(1500),
-            })
-            peerPort = PEER_PORT
-            log('CLI detected on port ' + PEER_PORT + (cliState.running ? ' (sharing active)' : ' (not sharing)'))
-            // If CLI is already sharing, start desktop relay too
-            if (cliState.running && !running && config.token && config.userId) {
-              connectRelay()
+            if (cliState.where === 'cli') {
+              await fetch(`http://127.0.0.1:${PEER_PORT}/native/peer/register`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ port: CONTROL_PORT, where: 'desktop' }),
+                signal: AbortSignal.timeout(1500),
+              })
+              peerPort = PEER_PORT
+              cliAlreadySharing = !!cliState.running
+              peerSharing = cliAlreadySharing
+              log('CLI detected on port ' + PEER_PORT + (cliAlreadySharing ? ' (sharing active)' : ' (not sharing)'))
+              if (cliAlreadySharing) {
+                log('CLI is sharing — desktop standing by, not connecting relay')
+              }
             }
           }
-        } catch {} // CLI not running — that's fine
+        } catch {}
+        if (!cliAlreadySharing && config.token && config.userId && config.shareEnabled) {
+          connectRelay()
+        }
       })
     })
   })
   tester.listen(CONTROL_PORT, '127.0.0.1')
 
   if (config.token && config.userId && config.shareEnabled) {
-    connectRelay()
+    // connectRelay is called inside the controlServer.listen callback
+    // after checking if CLI is already sharing — don't call it here too
     if (!IS_BACKGROUND_LAUNCH) showWindow()
   } else {
     showWindow()

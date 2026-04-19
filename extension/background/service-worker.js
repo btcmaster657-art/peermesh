@@ -162,21 +162,36 @@ async function sendNativeMessage(message) {
   })
 }
 
+const PEER_PORT = 7656
+
 async function getDesktopHelperStatusHttp() {
+  let primary = null
   try {
     const res = await fetch(`http://127.0.0.1:${CONTROL_PORT}/native/state`, { signal: AbortSignal.timeout(1500) })
-    if (!res.ok) { log('warn', 'desktop HTTP status not ok: ' + res.status); return null }
-    const data = await res.json()
-    return {
-      available: true,
-      running: !!data.running,
-      shareEnabled: !!data.shareEnabled,
-      configured: !!data.configured,
-      country: data.country ?? null,
-      userId: data.userId ?? null,
-      version: data.version ?? null,
+    if (res.ok) {
+      const data = await res.json()
+      primary = {
+        available: true,
+        running: !!data.running,
+        shareEnabled: !!data.shareEnabled,
+        configured: !!data.configured,
+        country: data.country ?? null,
+        userId: data.userId ?? null,
+        version: data.version ?? null,
+      }
     }
-  } catch (e) { log('warn', 'desktop HTTP unreachable: ' + e.message); return null }
+  } catch (e) { log('warn', 'desktop HTTP unreachable: ' + e.message) }
+
+  // Also check peer port — whichever process is running the relay
+  let peerRunning = false
+  try {
+    const res2 = await fetch(`http://127.0.0.1:${PEER_PORT}/native/state`, { signal: AbortSignal.timeout(1000) })
+    if (res2.ok) { const d = await res2.json(); peerRunning = !!d.running }
+  } catch {}
+
+  if (!primary) return null
+  const eitherRunning = primary.running || peerRunning
+  return { ...primary, running: eitherRunning, shareEnabled: eitherRunning || primary.shareEnabled }
 }
 
 async function getDesktopHelperStatus() {

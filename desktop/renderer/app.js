@@ -72,38 +72,49 @@ function updateUI(state) {
   const country = document.getElementById('status-country')
   const statsEl = document.getElementById('status-stats')
   const card = document.getElementById('status-card')
+  const peerBanner = document.getElementById('peer-active-banner')
+
+  // Check if CLI peer is sharing (state.peerRunning set by pollPeerState)
+  const peerSharing = !!state.peerRunning
 
   if (running) {
     dot.className = 'status-dot on'
-    dot.style.animation = ''
-    dot.style.background = ''
-    dot.style.border = ''
-    dot.style.borderTopColor = ''
+    dot.style.cssText = ''
     label.textContent = `SHARING — ${config.country}`
     label.style.color = 'var(--accent)'
     country.textContent = getFlagForCountry(config.country)
     statsEl.textContent = `${stats.requestsHandled} requests · ${formatBytes(stats.bytesServed)} served`
     card.className = 'status-card active'
+    if (peerBanner) peerBanner.style.display = 'none'
+  } else if (peerSharing) {
+    dot.className = 'status-dot on'
+    dot.style.cssText = ''
+    label.textContent = 'CLI IS SHARING'
+    label.style.color = 'var(--accent)'
+    country.textContent = ''
+    statsEl.textContent = 'CLI provider running on this machine'
+    card.className = 'status-card active'
+    if (peerBanner) peerBanner.style.display = 'none'
   } else {
     dot.className = 'status-dot'
-    dot.style.animation = ''
-    dot.style.background = ''
-    dot.style.border = ''
-    dot.style.borderTopColor = ''
+    dot.style.cssText = ''
     label.textContent = 'NOT SHARING'
     label.style.color = 'var(--muted)'
     country.textContent = ''
     statsEl.textContent = 'Toggle below to start sharing'
     card.className = 'status-card'
+    if (peerBanner) peerBanner.style.display = 'none'
   }
 
   const toggle = document.getElementById('share-toggle')
-  toggle.className = 'toggle' + (running ? ' on' : '')
+  toggle.className = 'toggle' + ((running || peerSharing) ? ' on' : '')
   document.getElementById('toggle-desc').textContent = running
     ? 'Sharing active — earning credits'
-    : config.userId
-      ? 'Help others browse. Stay free.'
-      : 'Sign in to start sharing.'
+    : peerSharing
+      ? 'CLI is sharing'
+      : config.userId
+        ? 'Help others browse. Stay free.'
+        : 'Sign in to start sharing.'
 
   document.getElementById('stat-requests').textContent = String(stats.requestsHandled)
   document.getElementById('stat-bytes').textContent = formatBytes(stats.bytesServed)
@@ -116,7 +127,18 @@ async function pollState() {
   try {
     const state = await window.peermesh.getState()
     if (state.version) setVersion(state.version)
-    // Desktop IPC is always authoritative
+    // Also check CLI peer on port 7656
+    try {
+      const r = await fetch('http://127.0.0.1:7656/native/state', { signal: AbortSignal.timeout(800) })
+      if (r.ok) {
+        const cli = await r.json()
+        state.peerRunning = !!cli.running
+      } else {
+        state.peerRunning = false
+      }
+    } catch {
+      state.peerRunning = false
+    }
     updateUI(state)
     return state
   } catch {}
@@ -293,12 +315,14 @@ document.getElementById('share-toggle').addEventListener('click', async () => {
   }
   clearMainError()
 
-  // Show disclosure on first share — re-check DB in case another client already accepted
+  // isSharing = A.running || B.running (set by pollState via updateUI)
   const state = await window.peermesh.getState()
-  if (!state.running) {
+  const isSharing = state.running || !!state.peerRunning
+
+  if (!isSharing) {
+    // Turning ON — check disclosure
     let accepted = state.config.hasAcceptedProviderTerms
     if (!accepted) {
-      // Re-fetch from DB to catch acceptances from CLI/extension/dashboard
       try {
         const result = await window.peermesh.acceptProviderTerms({ checkOnly: true })
         accepted = result?.accepted === true
@@ -310,7 +334,7 @@ document.getElementById('share-toggle').addEventListener('click', async () => {
     }
   }
 
-  await doToggleSharing()
+  await doToggleSharing(isSharing)
 })
 
 function showDisclosureModal() {
@@ -338,11 +362,11 @@ function showDisclosureModal() {
   document.getElementById('pm-disclose-accept').onclick = async () => {
     overlay.remove()
     await window.peermesh.acceptProviderTerms()
-    await doToggleSharing()
+    await doToggleSharing(false)
   }
 }
 
-async function doToggleSharing() {
+async function doToggleSharing(isSharing) {
   const toggle = document.getElementById('share-toggle')
   const label = document.getElementById('status-label')
   const dot = document.getElementById('status-dot')
@@ -350,33 +374,34 @@ async function doToggleSharing() {
   const desc = document.getElementById('toggle-desc')
 
   toggle.classList.add('loading')
-  label.textContent = 'CONNECTING...'
+  label.textContent = isSharing ? 'STOPPING...' : 'CONNECTING...'
   label.style.color = 'var(--muted)'
   dot.className = 'status-dot'
-  dot.style.animation = 'spin 0.7s linear infinite'
-  dot.style.background = 'transparent'
-  dot.style.border = '2px solid var(--border)'
-  dot.style.borderTopColor = 'var(--accent)'
+  dot.style.cssText = 'animation:spin 0.7s linear infinite;background:transparent;border:2px solid var(--border);border-top-color:var(--accent)'
   card.className = 'status-card'
   desc.textContent = 'Please wait...'
 
   try {
-    const result = await window.peermesh.toggleSharing()
-    if (result && result.error) showMainError(result.error)
+    if (isSharing) {
+      // Stop both A(7654) and B(7656)
+      await Promise.allSettled([
+        fetch('http://127.0.0.1:7654/native/share/stop', { method: 'POST', signal: AbortSignal.timeout(2000) }),
+        fetch('http://127.0.0.1:7656/native/share/stop', { method: 'POST', signal: AbortSignal.timeout(2000) }),
+      ])
+    } else {
+      const result = await window.peermesh.toggleSharing()
+      if (result && result.error) showMainError(result.error)
+    }
   } catch {
     showMainError('Could not toggle sharing — please try again')
   } finally {
     toggle.classList.remove('loading')
-    dot.style.animation = ''
-    dot.style.background = ''
-    dot.style.border = ''
-    dot.style.borderTopColor = ''
+    dot.style.cssText = ''
   }
-  // Poll a few times so the UI reflects the relay connection quickly
   for (let i = 0; i < 6; i++) {
     await new Promise(r => setTimeout(r, 500))
     const s = await pollState()
-    if (s && (s.running || !s.shareEnabled)) break
+    if (s && (!isSharing ? (s.running || s.peerRunning) : (!s.running && !s.peerRunning))) break
   }
   await pollState()
 }

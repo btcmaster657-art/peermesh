@@ -44,27 +44,31 @@ export async function checkAgent(): Promise<AgentHealth | null> {
 }
 
 /** Check if the desktop app or CLI is running via its control server.
- *  Also probes port 7656 for the peer process (the other one). */
+ *  isSharing = A(7654).running OR B(7656).running */
 export async function checkDesktop(): Promise<DesktopState> {
   const notAvailable: DesktopState = { available: false, running: false, shareEnabled: false, configured: false, country: null, userId: null, version: null, peer: null }
-  let primary: DesktopState = notAvailable
-  try {
-    const res = await fetch(`${AGENT_URL}/native/state`, { signal: AbortSignal.timeout(1500) })
-    if (res.ok) primary = { available: true, peer: null, ...(await res.json()) }
-  } catch {}
 
-  // Also probe peer port for the second process
-  let peer: DesktopState['peer'] = null
-  try {
-    const res2 = await fetch(`${PEER_URL}/native/state`, { signal: AbortSignal.timeout(1000) })
-    if (res2.ok) {
-      const d = await res2.json()
-      peer = { available: true, running: !!d.running, where: d.where ?? 'cli', version: d.version ?? null }
-    }
-  } catch {}
+  const [aRes, bRes] = await Promise.allSettled([
+    fetch(`${AGENT_URL}/native/state`, { signal: AbortSignal.timeout(1500) }),
+    fetch(`${PEER_URL}/native/state`,  { signal: AbortSignal.timeout(1000) }),
+  ])
 
-  if (!primary.available) return notAvailable
-  return { ...primary, peer }
+  let a: DesktopState | null = null
+  let b: DesktopState['peer'] = null
+
+  if (aRes.status === 'fulfilled' && aRes.value.ok) {
+    const d = await aRes.value.json()
+    a = { available: true, peer: null, ...d }
+  }
+  if (bRes.status === 'fulfilled' && bRes.value.ok) {
+    const d = await bRes.value.json()
+    b = { available: true, running: !!d.running, where: d.where ?? 'cli', version: d.version ?? null }
+  }
+
+  if (!a) return notAvailable
+
+  const isSharing = !!a.running || !!(b?.running)
+  return { ...a, running: isSharing, shareEnabled: isSharing, peer: b }
 }
 
 /** Push auth credentials to the running desktop app */
@@ -97,15 +101,19 @@ export async function startDesktopSharing(payload: { token: string; userId: stri
 }
 
 export async function stopDesktopSharing(): Promise<boolean> {
-  try {
-    const res = await fetch(`${AGENT_URL}/native/share/stop`, {
-      method: 'POST',
-      signal: AbortSignal.timeout(4000),
-    })
-    return res.ok
-  } catch {
-    return false
-  }
+  // Stop both the primary process (7654) and the peer process (7656)
+  const stopPrimary = fetch(`${AGENT_URL}/native/share/stop`, {
+    method: 'POST',
+    signal: AbortSignal.timeout(4000),
+  }).then(r => r.ok).catch(() => false)
+
+  const stopPeer = fetch(`${PEER_URL}/native/share/stop`, {
+    method: 'POST',
+    signal: AbortSignal.timeout(4000),
+  }).then(r => r.ok).catch(() => false)
+
+  const [primary] = await Promise.all([stopPrimary, stopPeer])
+  return primary
 }
 
 export async function startAgent(config: {

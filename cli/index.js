@@ -28,7 +28,7 @@ const API_BASE    = 'https://peermesh-beta.vercel.app'
 const RELAY_WS    = 'wss://peermesh-relay.fly.dev'
 const CONFIG_DIR  = join(homedir(), '.peermesh')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
-const VERSION     = '1.0.11'
+const VERSION     = '1.0.16'
 
 const BLOCKED = [/\.onion$/i, /^smtp\./i, /^mail\./i, /torrent/i]
 const PRIVATE = [/^localhost$/i, /^127\./, /^10\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./]
@@ -324,8 +324,20 @@ function buildHandler(port) {
 
     if (req.method === 'POST' && url.pathname === '/native/share/stop') {
       stopRelay()
+      // Also stop the peer process (desktop on the other port)
+      if (peerPort) {
+        fetch(`http://127.0.0.1:${peerPort}/native/share/stop`, { method: 'POST', signal: AbortSignal.timeout(1500) }).catch(() => {})
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(state()))
+      return
+    }
+
+    if (req.method === 'POST' && url.pathname === '/quit') {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ ok: true }))
+      stopRelay()
+      setTimeout(() => process.exit(0), 300)
       return
     }
 
@@ -369,16 +381,11 @@ function startControlServer() {
       log('Desktop detected on port ' + CONTROL_PORT + (desktopSharing ? ' (sharing active)' : ' (not sharing)') + ' — CLI running as peer on port ' + PEER_PORT)
       // Register our port with the desktop so it can cross-notify us
       registerWithPeer(CONTROL_PORT)
-      // Sync sharing state: if desktop is already sharing, CLI joins too;
-      // if CLI is about to share (connectRelay called after this), desktop will
-      // be notified via notifyPeer in /native/share/start handler.
-      // But if desktop is sharing and CLI hasn't started yet, start CLI relay.
-      if (desktopSharing && !running && _controlLimitBytes !== undefined) {
-        // Inherit credentials from desktop state if CLI has none
-        if (!config.token && desktopState?.userId) {
-          log('Inheriting session from desktop — sharing started', 'warn')
-        }
-        connectRelay(_controlLimitBytes)
+      // Desktop is already sharing — don't also connect CLI relay.
+      // Two providers with the same userId would evict each other in a loop.
+      // The main() handoff timer will connect CLI if desktop stops.
+      if (desktopSharing) {
+        log('Desktop is sharing — CLI standing by')
       }
     })
     secondary.on('error', e2 => log('Could not bind peer port: ' + e2.message, 'error'))
@@ -436,9 +443,15 @@ function connectRelay(limitBytes) {
       switch (msg.type) {
         case 'registered':
           log(`Sharing active — country: auto-detected from IP`)
+          // Mark is_sharing in DB so dashboard/extension see the correct state
+          if (config.token) {
+            fetch(`${API_BASE}/api/user/sharing`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
+              body: JSON.stringify({ isSharing: true }),
+            }).catch(() => {})
+          }
           printStatus(limitBytes)
-          // Tell peer (desktop) to start sharing too if it isn't already
-          notifyPeer('/native/share/start', { token: config.token, userId: config.userId })
           break
 
         case 'error':
@@ -510,8 +523,13 @@ function stopRelay() {
   if (ws) { ws.removeAllListeners('close'); ws.close(1000); ws = null }
   running = false
   closeAllTunnels()
-  // Tell peer (desktop) to stop sharing too
-  notifyPeer('/native/share/stop')
+  if (config.token) {
+    fetch(`${API_BASE}/api/user/sharing`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
+      body: JSON.stringify({ isSharing: false }),
+    }).catch(() => {})
+  }
 }
 
 // ── Status display ────────────────────────────────────────────────────────────
@@ -741,19 +759,41 @@ async function main() {
   _controlLimitBytes = limitBytes
   startControlServer()
 
-  // ── Connect ───────────────────────────────────────────────────────────────
-  connectRelay(limitBytes)
+  // ── Connect — only if desktop is not already sharing ─────────────────────
+  // If desktop owns port 7654 and is sharing, connecting CLI relay too would
+  // cause both to register with the same userId and evict each other in a loop.
+  // We check desktop state; if it's sharing we stand by and let desktop handle it.
+  let desktopAlreadySharing = false
+  try {
+    const r = await fetch(`http://127.0.0.1:${CONTROL_PORT}/native/state`, { signal: AbortSignal.timeout(1500) })
+    if (r.ok) {
+      const s = await r.json()
+      desktopAlreadySharing = !!s.running
+    }
+  } catch {}
+
+  if (desktopAlreadySharing) {
+    log('Desktop is sharing — CLI standing by (press Ctrl+C to stop both)')
+    printStatus(limitBytes)
+  } else {
+    connectRelay(limitBytes)
+  }
 
   // ── Graceful shutdown ─────────────────────────────────────────────────────
-  process.on('SIGINT', () => {
+  async function shutdown() {
     console.log('')
     log('Stopping...')
+    // Always stop desktop relay too (covers both: CLI sharing or CLI standing by)
+    if (peerPort) {
+      try { await fetch(`http://127.0.0.1:${peerPort}/native/share/stop`, { method: 'POST', signal: AbortSignal.timeout(2000) }) } catch {}
+    }
     stopRelay()
     console.log(`  Session: ${formatBytes(sessionBytes)} served`)
     console.log(`  Today:   ${formatBytes((config.todaySharedBytes ?? 0) + sessionBytes)} total`)
     console.log('')
     process.exit(0)
-  })
+  }
+  process.on('SIGINT', () => { shutdown() })
   process.on('SIGTERM', () => { stopRelay(); process.exit(0) })
 }
 
