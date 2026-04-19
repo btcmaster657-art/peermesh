@@ -102,27 +102,27 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'You cannot connect to your own private share code' }, { status: 400 })
     }
 
-    const heartbeatCutoff = new Date(Date.now() - 45_000).toISOString()
-    const { data: activeDevices, error: activeDevicesError } = await adminClient
-      .from('provider_devices')
-      .select('device_id, country_code, last_heartbeat')
-      .eq('user_id', privateShare.user_id)
-      .gt('last_heartbeat', heartbeatCutoff)
-
-    if (activeDevicesError) {
-      return NextResponse.json({ error: 'Could not validate private share availability' }, { status: 500 })
+    // Check relay directly for live provider state — relay is authoritative, DB heartbeat can lag
+    let relayOnline = false
+    let relayCountry: string | null = null
+    const relayHttp = (process.env.RELAY_ENDPOINTS ?? '').split(',')[0]
+      .replace('wss://', 'https://').replace('ws://', 'http://')
+    if (relayHttp) {
+      try {
+        const qs = new URLSearchParams({ baseDeviceId: privateShare.base_device_id, providerUserId: privateShare.user_id })
+        const r = await fetch(`${relayHttp}/check-private?${qs}`, {
+          headers: { 'x-relay-secret': process.env.RELAY_SECRET ?? '' },
+          signal: AbortSignal.timeout(3000),
+        })
+        if (r.ok) { const d = await r.json(); relayOnline = !!d.online; relayCountry = d.country ?? null }
+      } catch {}
     }
 
-    const slotPrefix = `${privateShare.base_device_id}_slot_`
-    const matchingDevices = (activeDevices ?? [])
-      .filter(device => device.device_id === privateShare.base_device_id || device.device_id.startsWith(slotPrefix))
-      .sort((a, b) => new Date(b.last_heartbeat).getTime() - new Date(a.last_heartbeat).getTime())
-
-    if (matchingDevices.length === 0) {
+    if (!relayOnline) {
       return NextResponse.json({ error: 'Private share is currently offline' }, { status: 409 })
     }
 
-    country = matchingDevices[0]?.country_code ?? country
+    if (relayCountry) country = relayCountry
     privateProviderUserId = privateShare.user_id
     privateBaseDeviceId = privateShare.base_device_id
     preferredProviderUserId = privateShare.user_id

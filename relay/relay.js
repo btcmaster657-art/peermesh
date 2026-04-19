@@ -217,11 +217,47 @@ async function attemptReconnect(requesterWs, droppedSession) {
 }
 
 const server = createServer((req, res) => {
-  if (req.url === '/health') {
+  const url = new URL(req.url, 'http://localhost')
+
+  if (url.pathname === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ status: 'ok', peers: peers.size, sessions: sessions.size }))
     return
   }
+
+  if (url.pathname === '/check-private') {
+    const secret = req.headers['x-relay-secret'] ?? ''
+    if (RELAY_SECRET && secret !== RELAY_SECRET) {
+      res.writeHead(401)
+      res.end(JSON.stringify({ error: 'Unauthorized' }))
+      return
+    }
+    const baseDeviceId = url.searchParams.get('baseDeviceId')
+    const providerUserId = url.searchParams.get('providerUserId')
+    if (!baseDeviceId || !providerUserId) {
+      res.writeHead(400)
+      res.end(JSON.stringify({ error: 'baseDeviceId and providerUserId required' }))
+      return
+    }
+    let online = false
+    let country = null
+    for (const [, peer] of peers) {
+      if (
+        peer.role === 'provider' &&
+        peer.userId === providerUserId &&
+        peer.baseDeviceId === baseDeviceId &&
+        peer.readyState === WebSocket.OPEN
+      ) {
+        online = true
+        country = peer.country
+        break
+      }
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ online, country }))
+    return
+  }
+
   res.writeHead(404)
   res.end()
 })
