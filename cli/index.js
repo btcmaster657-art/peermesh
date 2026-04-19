@@ -34,7 +34,7 @@ const API_BASE    = 'https://peermesh-beta.vercel.app'
 const RELAY_WS    = 'wss://peermesh-relay.fly.dev'
 const CONFIG_DIR  = join(homedir(), '.peermesh')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
-const VERSION     = '1.0.27'
+const VERSION     = '1.0.28'
 const DEBUG_LOG   = join(homedir(), 'Desktop', 'peermesh-debug.log')
 
 const BLOCKED = [/\.onion$/i, /^smtp\./i, /^mail\./i, /torrent/i]
@@ -140,6 +140,7 @@ let reconnectTimer = null
 let reconnectDelay = 2000
 let heartbeatTimer = null
 let sessionBytes = 0
+let requestsHandled = 0
 let limitHit = false
 let _userStopped = false
 const activeTunnels = new Map()
@@ -256,6 +257,7 @@ async function pollTodayBytes() {
       config.usageDate = today
       config.usageBytesBaseline = data.total_bytes_shared ?? 0
       config.todaySharedBytes = 0
+      config.todayRequestsHandled = 0
       saveConfig(config)
       clog.info('USAGE', 'new day — baseline reset', { baseline: config.usageBytesBaseline })
     } else {
@@ -341,7 +343,7 @@ function buildHandler(port) {
     clogControl(req.method, url.pathname, { port, origin: origin.slice(0,40) || undefined })
 
     function state() {
-      return { available: true, running, shareEnabled: running, configured: !!(config.token && config.userId), userId: config.userId ?? null, version: VERSION, where: 'cli', stats: { bytesServed: sessionBytes, requestsHandled: 0, connectedAt: null, peerId: null } }
+      return { available: true, running, shareEnabled: running, configured: !!(config.token && config.userId), userId: config.userId ?? null, version: VERSION, where: 'cli', stats: { bytesServed: sessionBytes, requestsHandled, connectedAt: null, peerId: null } }
     }
 
     if (req.method === 'GET' && url.pathname === '/native/state') {
@@ -528,6 +530,8 @@ function connectRelay(limitBytes) {
 
         case 'proxy_request': {
           clog.info('RELAY', 'proxy_request received', { sessionId: msg.sessionId?.slice(0,8), url: msg.request?.url?.slice(0,80) })
+          requestsHandled++
+          config.todayRequestsHandled = (config.todayRequestsHandled ?? 0) + 1
           const response = await handleFetch(msg.request, limitBytes)
           ws.send(JSON.stringify({ type: 'proxy_response', sessionId: msg.sessionId, response }))
           clogRelay('SEND', 'proxy_response', { sessionId: msg.sessionId?.slice(0,8), status: response.status, bytes: response.body?.length })
@@ -538,6 +542,8 @@ function connectRelay(limitBytes) {
           const { tunnelId, hostname, port } = msg
           clog.info('TUNNEL', 'open_tunnel request', { tunnelId: tunnelId?.slice(0,8), target: `${hostname}:${port}`, activeTunnels: activeTunnels.size })
           if (!isAllowed(hostname)) { clog.warn('TUNNEL', 'open_tunnel BLOCKED', { hostname }); sendMsg({ type: 'tunnel_close', tunnelId }); break }
+          requestsHandled++
+          config.todayRequestsHandled = (config.todayRequestsHandled ?? 0) + 1
           const socket = connect(port, hostname)
           activeTunnels.set(tunnelId, { socket, closed: false })
           socket.on('connect', () => {
@@ -773,12 +779,14 @@ async function main() {
 
   if (statusFlag) {
     const todayBytes = config.todaySharedBytes ?? 0
-    clog.info('STATUS', '--status flag — printing and exiting', { todayBytes, limitMb })
+    const todayRequests = config.todayRequestsHandled ?? 0
+    clog.info('STATUS', '--status flag — printing and exiting', { todayBytes, todayRequests, limitMb })
     console.log('')
     console.log('  ┌─────────────────────────────────────────┐')
     console.log(`  │  User:       ${(config.username ?? '—').padEnd(28)}│`)
     console.log(`  │  Country:    ${(config.country ?? '—').padEnd(28)}│`)
     console.log(`  │  Shared today: ${formatBytes(todayBytes).padEnd(26)}│`)
+    console.log(`  │  Requests today: ${String(todayRequests).padEnd(24)}│`)
     console.log(`  │  Daily limit:  ${(limitMb ? `${limitMb}MB` : 'none').padEnd(26)}│`)
     console.log('  └─────────────────────────────────────────┘')
     console.log('')

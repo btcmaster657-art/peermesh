@@ -92,7 +92,8 @@ function updateUI(state) {
     label.textContent = 'CLI IS SHARING'
     label.style.color = 'var(--accent)'
     country.textContent = ''
-    statsEl.textContent = 'CLI provider running on this machine'
+    const cs = state.peerStats
+    statsEl.textContent = cs ? `${cs.requestsHandled ?? 0} requests · ${formatBytes(cs.bytesServed ?? 0)} served` : 'CLI provider running on this machine'
     card.className = 'status-card active'
     if (peerBanner) peerBanner.style.display = 'none'
   } else {
@@ -116,8 +117,10 @@ function updateUI(state) {
         ? 'Help others browse. Stay free.'
         : 'Sign in to start sharing.'
 
-  document.getElementById('stat-requests').textContent = String(stats.requestsHandled)
-  document.getElementById('stat-bytes').textContent = formatBytes(stats.bytesServed)
+  const displayStats = (peerSharing && state.peerStats) ? state.peerStats : stats
+
+  document.getElementById('stat-requests').textContent = String(displayStats.requestsHandled ?? 0)
+  document.getElementById('stat-bytes').textContent = formatBytes(displayStats.bytesServed ?? 0)
   document.getElementById('user-label').textContent = config.userId ? `ID: ${config.userId.slice(0, 8)}` : ''
 }
 
@@ -133,6 +136,7 @@ async function pollState() {
       if (r.ok) {
         const cli = await r.json()
         state.peerRunning = !!cli.running
+        state.peerStats = cli.stats
       } else {
         state.peerRunning = false
       }
