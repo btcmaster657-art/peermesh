@@ -497,7 +497,7 @@ function renderDashboard(app) {
   document.getElementById('retryConnectBtn')?.addEventListener('click', () => { state.error = null; connectSession() })
   document.querySelectorAll('.country-btn').forEach(btn => {
     btn.onclick = () => {
-      state.selectedCountry = btn.dataset.code
+      state.selectedCountry = state.selectedCountry === btn.dataset.code ? null : btn.dataset.code
       state.privateCodeInput = ''
       state.error = null
       chrome.storage.local.set({ selectedCountry: state.selectedCountry, privateCodeInput: '' })
