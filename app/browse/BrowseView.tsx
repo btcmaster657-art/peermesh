@@ -136,6 +136,7 @@ export default function BrowseView() {
   const country = searchParams.get('country') ?? ''
   const userId = searchParams.get('userId') ?? ''
   const dbSessionId = searchParams.get('dbSessionId') ?? ''
+  const preferredProviderUserId = searchParams.get('preferredProviderUserId') ?? null
 
   const [inputUrl, setInputUrl] = useState('')
   const [currentUrl, setCurrentUrl] = useState('')
@@ -151,10 +152,10 @@ export default function BrowseView() {
 
     requester = new PeerRequester()
     requester
-      .connect(relayEndpoint, '', country, userId, () => {
+      .connect(relayEndpoint, dbSessionId, country, userId, () => {
         setStatus('error')
         setErrorMsg('Peer disconnected unexpectedly')
-      })
+      }, preferredProviderUserId)
       .then(() => setStatus('ready'))
       .catch(err => { setStatus('error'); setErrorMsg(err.message) })
 

@@ -25,10 +25,11 @@ export class PeerRequester {
 
   async connect(
     relayEndpoint: string,
-    _sessionId: string,
+    dbSessionId: string,
     country: string,
     userId: string,
-    onDisconnect?: () => void
+    onDisconnect?: () => void,
+    preferredProviderUserId?: string | null
   ): Promise<void> {
     this.onDisconnect = onDisconnect
 
@@ -38,7 +39,14 @@ export class PeerRequester {
 
       this.ws.onopen = () => {
         console.log('[requester] relay connected, requesting session')
-        this.ws!.send(JSON.stringify({ type: 'request_session', country, userId, requireTunnel: false }))
+        this.ws!.send(JSON.stringify({
+          type: 'request_session',
+          country,
+          userId,
+          requireTunnel: false,
+          dbSessionId,
+          preferredProviderUserId: preferredProviderUserId ?? null,
+        }))
       }
 
       this.ws.onmessage = async (event) => {

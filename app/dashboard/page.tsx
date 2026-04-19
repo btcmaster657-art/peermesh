@@ -275,7 +275,7 @@ export default function Dashboard() {
       })
       const data = await res.json()
       if (!res.ok || data.error) throw new Error(data.error ?? `Server error (${res.status})`)
-      router.push(`/browse?relay=${encodeURIComponent(data.relayEndpoint)}&country=${selectedCountry}&userId=${profile.id}&dbSessionId=${data.sessionId}`)
+      router.push(`/browse?relay=${encodeURIComponent(data.relayEndpoint)}&country=${selectedCountry}&userId=${profile.id}&dbSessionId=${data.sessionId}&preferredProviderUserId=${encodeURIComponent(data.preferredProviderUserId ?? '')}`)
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Could not connect'
       setConnectError(msg === 'Failed to fetch' ? 'Network error — could not reach server' : msg)
@@ -322,7 +322,7 @@ export default function Dashboard() {
   if (!profile) return null
 
   const bandwidthPct = profile.bandwidth_limit > 0
-    ? Math.min(100, Math.round((profile.bandwidth_used_month / profile.bandwidth_limit) * 100))
+    ? Math.min(100, Math.max(profile.bandwidth_used_month > 0 ? 1 : 0, Math.round((profile.bandwidth_used_month / profile.bandwidth_limit) * 100)))
     : profile.bandwidth_used_month > 0 ? 100 : 0
   const desktopAvailable = desktop?.available ?? false
   const primaryWhere = desktop?.where ?? desktop?.source ?? null  // 'desktop' | 'cli' | null
@@ -442,7 +442,7 @@ export default function Dashboard() {
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '10px', marginBottom: '20px' }}>
         {[
           { label: 'TRUST', value: String(profile.trust_score) },
-          { label: 'SHARED', value: isSharing && sharingStats.bytesServed > 0 ? formatBytes(sharingStats.bytesServed) : formatBytes(profile.total_bytes_shared) },
+          { label: 'SHARED', value: formatBytes(profile.total_bytes_shared + (isSharing ? sharingStats.bytesServed : 0)) },
           { label: 'USED', value: formatBytes(profile.total_bytes_used) },
         ].map(({ label, value }) => (
           <div key={label} style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '10px', padding: '14px', textAlign: 'center' }}>
