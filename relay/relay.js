@@ -246,7 +246,7 @@ wss.on('connection', (ws, req) => {
     trustScore: 50, sessionId: null, providerKind: 'unknown',
     supportsHttp: true, supportsTunnel: false,
     bytesTransferred: 0, isAlive: true,
-    clientIp: (req.headers['x-forwarded-for']?.split(',')[0].trim()) || req.socket.remoteAddress || null,
+    clientIp: req.headers['fly-client-ip'] || (req.headers['x-forwarded-for']?.split(',')[0].trim()) || req.socket.remoteAddress || null,
   })
 
   log(peerId.slice(0,8), `CONNECTED from ${clientIp}`)

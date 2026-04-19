@@ -103,8 +103,11 @@ export async function PUT(req: Request) {
       req.headers.get('x-real-ip') ||
       ''
     if (ip) {
-      const geo = await fetch(`https://ipapi.co/${ip}/country/`, { signal: AbortSignal.timeout(3000) })
-      if (geo.ok) country = (await geo.text()).trim().slice(0, 2).toUpperCase()
+      const geo = await fetch(`http://ip-api.com/json/${ip}?fields=countryCode`, { signal: AbortSignal.timeout(3000) })
+      if (geo.ok) {
+        const json = await geo.json()
+        if (json.status === 'success' && json.countryCode) country = json.countryCode.toUpperCase()
+      }
     }
   } catch {}
 
