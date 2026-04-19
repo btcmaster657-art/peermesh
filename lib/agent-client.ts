@@ -30,6 +30,7 @@ export type DesktopState = {
     running: boolean
     where: 'desktop' | 'cli'
     version: string | null
+    stats?: AgentHealth['stats'] | null
   } | null
 }
 
@@ -63,6 +64,11 @@ export async function checkDesktop(): Promise<DesktopState> {
   if (bRes.status === 'fulfilled' && bRes.value.ok) {
     const d = await bRes.value.json()
     b = { available: true, running: !!d.running, where: d.where ?? 'cli', version: d.version ?? null }
+    // If peer is the active sharer, promote its stats to the top-level
+    if (b.running && d.stats) {
+      if (!a) a = { available: false, running: false, shareEnabled: false, configured: false, country: null, userId: null, version: null, peer: null }
+      a = { ...a, stats: d.stats }
+    }
   }
 
   if (!a) return notAvailable

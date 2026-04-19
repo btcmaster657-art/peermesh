@@ -184,14 +184,17 @@ async function getDesktopHelperStatusHttp() {
 
   // Also check peer port — whichever process is running the relay
   let peerRunning = false
+  let peerStats = null
   try {
     const res2 = await fetch(`http://127.0.0.1:${PEER_PORT}/native/state`, { signal: AbortSignal.timeout(1000) })
-    if (res2.ok) { const d = await res2.json(); peerRunning = !!d.running }
+    if (res2.ok) { const d = await res2.json(); peerRunning = !!d.running; peerStats = d.stats ?? null }
   } catch {}
 
   if (!primary) return null
   const eitherRunning = primary.running || peerRunning
-  return { ...primary, running: eitherRunning, shareEnabled: eitherRunning || primary.shareEnabled }
+  // If peer is the active sharer, use its stats for live display
+  const stats = (peerRunning && peerStats) ? peerStats : (primary.stats ?? null)
+  return { ...primary, running: eitherRunning, shareEnabled: eitherRunning || primary.shareEnabled, stats }
 }
 
 async function getDesktopHelperStatus() {
