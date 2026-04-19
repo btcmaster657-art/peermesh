@@ -246,6 +246,7 @@ wss.on('connection', (ws, req) => {
     trustScore: 50, sessionId: null, providerKind: 'unknown',
     supportsHttp: true, supportsTunnel: false,
     bytesTransferred: 0, isAlive: true,
+    clientIp: (req.headers['x-forwarded-for']?.split(',')[0].trim()) || req.socket.remoteAddress || null,
   })
 
   log(peerId.slice(0,8), `CONNECTED from ${clientIp}`)
@@ -315,10 +316,12 @@ function handleMessage(ws, msg) {
       log(ws.peerId.slice(0,8), `REGISTERED_PROVIDER country=${ws.country} userId=${ws.userId?.slice(0,8)}`)
       log(ws.peerId.slice(0,8), `PEERS AFTER REGISTER`, peersSnapshot())
       if (msg.userId && API_BASE) {
+        const headers = { 'Content-Type': 'application/json', 'x-relay-secret': RELAY_SECRET }
+        if (ws.clientIp) headers['x-provider-ip'] = ws.clientIp
         fetch(`${API_BASE}/api/user/sharing`, {
           method: 'PUT',
-          headers: { 'Content-Type': 'application/json', 'x-relay-secret': RELAY_SECRET },
-          body: JSON.stringify({ device_id: `relay_${ws.peerId.slice(0,8)}`, country: msg.country, user_id: msg.userId }),
+          headers,
+          body: JSON.stringify({ device_id: `relay_${ws.peerId.slice(0,8)}`, user_id: msg.userId }),
         }).catch(() => {})
       }
       break

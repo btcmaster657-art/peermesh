@@ -98,6 +98,7 @@ export async function PUT(req: Request) {
   let country = 'XX'
   try {
     const ip =
+      req.headers.get('x-provider-ip') ||
       req.headers.get('x-forwarded-for')?.split(',')[0].trim() ||
       req.headers.get('x-real-ip') ||
       ''
