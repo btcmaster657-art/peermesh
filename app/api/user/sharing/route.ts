@@ -94,22 +94,26 @@ export async function PUT(req: Request) {
   const userId = await resolveUserId(req, user_id)
   if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  // Detect country from the request IP — never trust client-supplied value
+  // Detect country from the request IP
+  // x-vercel-ip-country is injected by Vercel for free — no external call needed.
+  // When the relay calls this endpoint it passes x-provider-ip (the real provider IP)
+  // so we fall back to a geo-lookup only in that case.
   let country = 'XX'
-  try {
-    const ip =
-      req.headers.get('x-provider-ip') ||
-      req.headers.get('x-forwarded-for')?.split(',')[0].trim() ||
-      req.headers.get('x-real-ip') ||
-      ''
-    if (ip) {
-      const geo = await fetch(`http://ip-api.com/json/${ip}?fields=countryCode`, { signal: AbortSignal.timeout(3000) })
+  const providerIp = req.headers.get('x-provider-ip')
+  if (providerIp) {
+    // Relay-forwarded heartbeat — geo-lookup the real provider IP
+    try {
+      const geo = await fetch(`http://ip-api.com/json/${providerIp}?fields=status,countryCode`, { signal: AbortSignal.timeout(3000) })
       if (geo.ok) {
         const json = await geo.json()
         if (json.status === 'success' && json.countryCode) country = json.countryCode.toUpperCase()
       }
-    }
-  } catch {}
+    } catch {}
+  } else {
+    // Direct heartbeat from desktop/CLI — Vercel knows the real IP
+    const vercelCountry = req.headers.get('x-vercel-ip-country')
+    if (vercelCountry && /^[A-Z]{2}$/.test(vercelCountry)) country = vercelCountry
+  }
 
   const { error: rpcError } = await adminClient.rpc('upsert_provider_heartbeat', {
     p_user_id: userId,
