@@ -116,7 +116,15 @@ export async function GET(req: Request) {
       .single()
 
     if (error || !data) return NextResponse.json({ error: 'Not found' }, { status: 404 })
-    return NextResponse.json(getProviderShareStatus(data))
+
+    // Also fetch private share state for this base device if requested
+    let private_share = null
+    if (baseDeviceId) {
+      const ps = await loadPrivateShareDevice(relayProviderUserId, baseDeviceId)
+      private_share = serializePrivateShare(ps)
+    }
+
+    return NextResponse.json({ ...getProviderShareStatus(data), private_share })
   }
 
   const userId = await resolveUserId(req)

@@ -65,6 +65,7 @@ export default function Dashboard() {
   const [privateShare, setPrivateShare] = useState<PrivateShareState>(null)
   const [privateExpiryHours, setPrivateExpiryHours] = useState('24')
   const [privateShareSaving, setPrivateShareSaving] = useState(false)
+  const [privateShareStoppedSharing, setPrivateShareStoppedSharing] = useState(false)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [shareError, setShareError] = useState<string | null>(null)
@@ -324,6 +325,7 @@ export default function Dashboard() {
 
     setIsSharing(true)
     setShareToggling(false)
+    setPrivateShareStoppedSharing(false)
     await fetch('/api/user/sharing', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -334,6 +336,8 @@ export default function Dashboard() {
   // ── Connect ─────────────────────────────────────────────────────────────────
   async function handleConnect() {
     const trimmedPrivateCode = privateCodeInput.trim()
+    // Country selection = public mode (ignore any code in the box)
+    const isPrivateConnect = !selectedCountry && !!trimmedPrivateCode
     if ((!selectedCountry && !trimmedPrivateCode) || !profile) return
     setConnectError(null)
     if (!navigator.onLine) {
@@ -345,12 +349,12 @@ export default function Dashboard() {
       const res = await fetch('/api/session/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(trimmedPrivateCode ? { privateCode: trimmedPrivateCode } : { country: selectedCountry }),
+        body: JSON.stringify(isPrivateConnect ? { privateCode: trimmedPrivateCode } : { country: selectedCountry }),
       })
       const data = await res.json()
       if (!res.ok || data.error) throw new Error(data.error ?? `Server error (${res.status})`)
       const targetCountry = data.country ?? selectedCountry
-      router.push(`/browse?relay=${encodeURIComponent(data.relayEndpoint)}&country=${encodeURIComponent(targetCountry)}&userId=${profile.id}&dbSessionId=${data.sessionId}&preferredProviderUserId=${encodeURIComponent(data.preferredProviderUserId ?? '')}&privateProviderUserId=${encodeURIComponent(data.privateProviderUserId ?? '')}&privateBaseDeviceId=${encodeURIComponent(data.privateBaseDeviceId ?? '')}`)
+      router.push(`/browse?relay=${encodeURIComponent(data.relayEndpoint)}&country=${encodeURIComponent(targetCountry)}&userId=${profile.id}&dbSessionId=${data.sessionId}&preferredProviderUserId=${encodeURIComponent(data.preferredProviderUserId ?? '')}&privateProviderUserId=${encodeURIComponent(data.privateProviderUserId ?? '')}&privateBaseDeviceId=${encodeURIComponent(data.privateBaseDeviceId ?? '')}&connectionType=${isPrivateConnect ? 'private' : 'public'}`)
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Could not connect'
       setConnectError(msg === 'Failed to fetch' ? 'Network error — could not reach server' : msg)
@@ -420,7 +424,7 @@ export default function Dashboard() {
   const showExtBanner          = !extInstalled || extUpdateAvailable
   const helperBaseDeviceId = desktop?.baseDeviceId ?? desktop?.peer?.baseDeviceId ?? null
   const helperSlots = desktop?.slots ?? desktop?.peer?.slots ?? null
-  const privateConnectReady = !!privateCodeInput.trim()
+  const privateConnectReady = !selectedCountry && !!privateCodeInput.trim()
 
   // Detect OS for CLI docs default tab
   const detectedOS: 'windows' | 'mac' | 'linux' = typeof navigator !== 'undefined'
@@ -550,23 +554,37 @@ export default function Dashboard() {
           Connect directly to a known device. PeerMesh will only use that device&apos;s active slots and will not fall back to the public pool.
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '10px' }}>
-          <input
-            value={privateCodeInput}
-            onChange={(e) => { setPrivateCodeInput(e.target.value.replace(/\D/g, '').slice(0, 9)); setConnectError(null) }}
-            placeholder="Enter 9-digit code"
-            inputMode="numeric"
-            maxLength={9}
-            style={{ padding: '10px 12px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text)', fontFamily: 'var(--font-geist-mono)', fontSize: '12px', letterSpacing: '1px' }}
-          />
+          <div style={{ position: 'relative' }}>
+            <input
+              value={privateCodeInput}
+              onChange={(e) => { setPrivateCodeInput(e.target.value.replace(/\D/g, '').slice(0, 9)); setConnectError(null) }}
+              placeholder="Enter 9-digit code"
+              inputMode="numeric"
+              maxLength={9}
+              style={{ width: '100%', padding: '10px 36px 10px 12px', background: 'var(--bg)', border: `1px solid ${selectedCountry ? 'var(--border)' : 'var(--border)'}`, borderRadius: '8px', color: 'var(--text)', fontFamily: 'var(--font-geist-mono)', fontSize: '12px', letterSpacing: '1px', boxSizing: 'border-box' }}
+            />
+            {privateCodeInput && (
+              <button
+                onClick={() => { setPrivateCodeInput(''); setConnectError(null) }}
+                style={{ position: 'absolute', right: '8px', top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', color: 'var(--muted)', cursor: 'pointer', fontSize: '14px', lineHeight: 1, padding: '2px' }}
+                title="Clear code"
+              >✕</button>
+            )}
+          </div>
           <button
             onClick={handleConnect}
             disabled={connecting || !privateConnectReady || (!profile.is_premium && !isSharing)}
-            title={!profile.is_premium && !isSharing ? 'Enable sharing or upgrade to connect' : undefined}
+            title={selectedCountry ? 'Clear country selection to use private code' : !profile.is_premium && !isSharing ? 'Enable sharing or upgrade to connect' : undefined}
             style={{ padding: '10px 14px', background: privateConnectReady ? 'var(--accent)' : 'var(--border)', color: privateConnectReady ? '#000' : 'var(--muted)', border: 'none', borderRadius: '8px', fontFamily: 'var(--font-geist-mono)', fontSize: '10px', fontWeight: 700, letterSpacing: '0.5px', cursor: connecting || !privateConnectReady || (!profile.is_premium && !isSharing) ? 'not-allowed' : 'pointer', opacity: (!profile.is_premium && !isSharing) ? 0.5 : 1 }}
           >
             {connecting && privateConnectReady ? 'CONNECTING...' : 'CONNECT CODE'}
           </button>
         </div>
+        {selectedCountry && privateCodeInput && (
+          <div style={{ marginTop: '8px', fontSize: '11px', color: 'var(--muted)', fontFamily: 'var(--font-geist-mono)' }}>
+            Country selected — connecting publicly. Clear country to use private code.
+          </div>
+        )}
       </div>
 
       {/* Country picker */}
@@ -579,7 +597,7 @@ export default function Dashboard() {
             return (
               <button
                 key={c.code}
-                onClick={() => { setSelectedCountry(selected ? null : c.code); setConnectError(null) }}
+                onClick={() => { const next = selected ? null : c.code; setSelectedCountry(next); setConnectError(null); if (next) setPrivateCodeInput('') }}
                 style={{ background: selected ? 'var(--accent-dim)' : 'var(--bg)', border: `1px solid ${selected ? 'var(--accent)' : 'var(--border)'}`, borderRadius: '8px', padding: '10px 6px', cursor: 'pointer', textAlign: 'center', transition: 'all 0.15s' }}
               >
                 <div style={{ fontSize: '20px', marginBottom: '3px' }}>{c.flag}</div>
@@ -615,6 +633,7 @@ export default function Dashboard() {
             <span style={{ fontSize: '18px' }}>🧩</span>
             <span style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', fontWeight: 700, letterSpacing: '0.5px' }}>EXTENSION</span>
             <span style={{ fontSize: '10px', opacity: 0.8 }}>Full browser · YouTube works</span>
+            <span style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '9px', background: 'rgba(0,0,0,0.15)', padding: '2px 6px', borderRadius: '4px' }}>🌐 PUBLIC</span>
           </a>
 
           <button
@@ -638,6 +657,7 @@ export default function Dashboard() {
               {connecting ? 'CONNECTING...' : 'WEB BROWSER'}
             </span>
             <span style={{ fontSize: '10px', opacity: 0.7 }}>Limited sites · No install</span>
+            <span style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '9px', color: 'var(--muted)', background: 'var(--border)', padding: '2px 6px', borderRadius: '4px' }}>🌐 PUBLIC</span>
           </button>
         </div>
       )}
@@ -649,7 +669,7 @@ export default function Dashboard() {
             <div style={{ fontSize: '14px', fontWeight: 500, marginBottom: '3px' }}>Share my connection</div>
             <div style={{ fontSize: '12px', color: isSharing ? 'var(--accent)' : 'var(--muted)' }}>
               {isSharing
-                ? `${sharingStats.requestsHandled} requests · ${formatBytes(sharingStats.bytesServed)} served`
+                ? `${sharingStats.requestsHandled} requests · ${formatBytes(sharingStats.bytesServed)} served · ${privateShare?.active ? '\uD83D\uDD12 PRIVATE' : '\uD83C\uDF10 PUBLIC'}`
                 : shareToggling
                   ? 'Connecting...'
                   : desktopAvailable
@@ -765,7 +785,21 @@ export default function Dashboard() {
             </select>
             <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
               <button
-                onClick={() => savePrivateShare({ enabled: !(privateShare?.enabled ?? false), expiryHours: privateExpiryHours })}
+                onClick={async () => {
+                  const nextEnabled = !(privateShare?.enabled ?? false)
+                  await savePrivateShare({ enabled: nextEnabled, expiryHours: privateExpiryHours })
+                  // If sharing is active, stop it so user must manually restart with new privacy state
+                  if (isSharing) {
+                    await stopDesktopSharing()
+                    setIsSharing(false)
+                    setPrivateShareStoppedSharing(true)
+                    await fetch('/api/user/sharing', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ isSharing: false }),
+                    }).catch(() => {})
+                  }
+                }}
                 disabled={privateShareSaving}
                 style={{ padding: '7px 12px', background: privateShare?.enabled ? 'transparent' : 'var(--accent)', color: privateShare?.enabled ? 'var(--text)' : '#000', border: `1px solid ${privateShare?.enabled ? 'var(--border)' : 'var(--accent)'}`, borderRadius: '7px', fontFamily: 'var(--font-geist-mono)', fontSize: '10px', cursor: privateShareSaving ? 'not-allowed' : 'pointer', opacity: privateShareSaving ? 0.6 : 1 }}
               >
@@ -781,6 +815,21 @@ export default function Dashboard() {
             </div>
           </div>
 
+          {privateShareStoppedSharing && !isSharing && (
+            <div style={{ marginTop: '8px', fontSize: '11px', color: '#ffaa00', fontFamily: 'var(--font-geist-mono)', background: 'rgba(255,170,0,0.07)', border: '1px solid rgba(255,170,0,0.3)', borderRadius: '6px', padding: '6px 10px' }}>
+              Sharing was stopped. Toggle sharing above to restart with the new privacy setting.
+            </div>
+          )}
+          {isSharing && privateShare?.active && (
+            <div style={{ marginTop: '8px', fontSize: '11px', color: 'var(--muted)', fontFamily: 'var(--font-geist-mono)', background: 'rgba(0,255,136,0.05)', border: '1px solid rgba(0,255,136,0.15)', borderRadius: '6px', padding: '6px 10px' }}>
+              Sharing is PRIVATE — only requesters with your code can connect.
+            </div>
+          )}
+          {isSharing && !privateShare?.active && (
+            <div style={{ marginTop: '8px', fontSize: '11px', color: 'var(--muted)', fontFamily: 'var(--font-geist-mono)', background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)', borderRadius: '6px', padding: '6px 10px' }}>
+              Sharing is PUBLIC — any verified user can connect.
+            </div>
+          )}
           {privateShare?.expires_at && (
             <div style={{ marginTop: '10px', fontSize: '11px', color: 'var(--muted)' }}>
               Expires {new Date(privateShare.expires_at).toLocaleString()}
@@ -900,8 +949,7 @@ export default function Dashboard() {
               <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
                 <CliSection label="Option 1 — npx (no install needed)" cmd="npx @btcmaster1000/peermesh-provider" />
                 <CliSection label="Option 2 — install globally" cmd="npm install -g @btcmaster1000/peermesh-provider" />
-                <CliSection label="Install Node.js first (cmd / winglet)" cmd={`curl -fsSL https://nodejs.org/dist/v20.11.0/node-v20.11.0-x64.msi -o node.msi
-msiexec /i node.msi /quiet`} />
+                <CliSection label="Install Node.js first (cmd / winget)" cmd={`winget install OpenJS.NodeJS`} />
                 <CliSection label="Install Node.js first (PowerShell / Invoke)" cmd={`Invoke-WebRequest https://nodejs.org/dist/v20.11.0/node-v20.11.0-x64.msi -OutFile node.msi
 Start-Process msiexec -ArgumentList '/i node.msi /quiet' -Wait`} />
                 <CliSection label="Run at startup (Task Scheduler)" cmd={`$action = New-ScheduledTaskAction -Execute "$(where.exe peermesh-provider)"
@@ -962,15 +1010,19 @@ sudo systemctl enable --now peermesh.service`} />
               <CliSection label="Update to latest version" cmd="npm install -g @btcmaster1000/peermesh-provider@latest" />
 
               <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '9px', color: 'var(--muted)', letterSpacing: '0.5px', marginTop: '4px' }}>USAGE</div>
-              <CliSection label="Run (starts sharing immediately)" cmd="peermesh-provider" />
+              <CliSection label="Start sharing (prompts for sign-in on first run)" cmd="peermesh-provider" />
               <CliSection label="Run without installing" cmd="npx @btcmaster1000/peermesh-provider" />
-              <CliSection label="Set a daily bandwidth limit" cmd="peermesh-provider --limit 500" />
-              <CliSection label="Show today's usage then exit" cmd="peermesh-provider --status" />
-              <CliSection label="Clear saved credentials and re-authenticate" cmd="peermesh-provider --reset" />
+              <CliSection label="Set a daily bandwidth limit (MB)" cmd="peermesh-provider --limit 500" />
               <CliSection label="Remove daily limit" cmd="peermesh-provider --no-limit" />
+              <CliSection label="Set number of concurrent connection slots (1–32)" cmd="peermesh-provider --slots 4" />
+              <CliSection label="Show today's usage and status, then exit" cmd="peermesh-provider --status" />
+              <CliSection label="Clear saved credentials and re-authenticate" cmd="peermesh-provider --reset" />
+              <CliSection label="Skip provider terms prompt (for scripts/CI)" cmd="peermesh-provider --serve" />
+              <CliSection label="Print verbose debug logs to console" cmd="peermesh-provider --debug" />
+              <CliSection label="Combine flags" cmd="peermesh-provider --slots 4 --limit 1024 --debug" />
 
               <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '9px', color: 'var(--muted)', letterSpacing: '0.5px', marginTop: '4px' }}>UNINSTALL</div>
-              <CliSection label="Remove the CLI" cmd="npm uninstall -g peermesh-provider" />
+              <CliSection label="Remove the CLI" cmd="npm uninstall -g @btcmaster1000/peermesh-provider" />
               {cliDocTab === 'windows' && (
                 <>
                   <CliSection label="Remove saved credentials (PowerShell)" cmd={`Remove-Item -Recurse -Force "$env:USERPROFILE\.peermesh"`} />

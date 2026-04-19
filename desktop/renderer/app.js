@@ -471,11 +471,14 @@ function updateUI(state) {
   const desktopSlots = state.slots
   const peerSlots = state.peerSlots
   const configuredSlots = state.connectionSlots ?? config.connectionSlots ?? 1
+  const desktopPrivateShareActive = !!(state.privateShareActive)
+  const peerPrivateShareActive = !!(state.peerPrivateShareActive)
 
   if (running) {
     dot.className = 'status-dot on'
     dot.style.cssText = ''
-    label.textContent = `SHARING - ${config.country} (${configuredSlots} slots)`
+    const privBadge = desktopPrivateShareActive ? ' \uD83D\uDD12 PRIVATE' : ' \uD83C\uDF10 PUBLIC'
+    label.textContent = `SHARING - ${config.country} (${configuredSlots} slots)${privBadge}`
     label.style.color = 'var(--accent)'
     country.textContent = getFlagForCountry(config.country)
     statsEl.textContent = `${desktopSlots?.active ?? 0} / ${desktopSlots?.configured ?? configuredSlots} slots active - ${stats.requestsHandled} requests - ${formatBytes(stats.bytesServed)} served`
@@ -484,7 +487,8 @@ function updateUI(state) {
   } else if (peerSharing) {
     dot.className = 'status-dot on'
     dot.style.cssText = ''
-    label.textContent = 'CLI IS SHARING'
+    const privBadge = peerPrivateShareActive ? ' \uD83D\uDD12 PRIVATE' : ' \uD83C\uDF10 PUBLIC'
+    label.textContent = `CLI IS SHARING${privBadge}`
     label.style.color = 'var(--accent)'
     country.textContent = ''
     const cs = state.peerStats
@@ -538,6 +542,7 @@ async function pollState() {
         state.peerStats = cli.stats
         state.peerSlots = cli.slots
         state.peerConnectionSlots = cli.connectionSlots
+        state.peerPrivateShareActive = !!cli.privateShareActive
       } else {
         state.peerRunning = false
       }

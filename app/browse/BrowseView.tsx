@@ -139,6 +139,7 @@ export default function BrowseView() {
   const preferredProviderUserId = searchParams.get('preferredProviderUserId') ?? null
   const privateProviderUserId = searchParams.get('privateProviderUserId') ?? null
   const privateBaseDeviceId = searchParams.get('privateBaseDeviceId') ?? null
+  const connectionType = searchParams.get('connectionType') ?? 'public'
 
   const [inputUrl, setInputUrl] = useState('')
   const [currentUrl, setCurrentUrl] = useState('')
@@ -264,6 +265,9 @@ export default function BrowseView() {
           <span style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--accent)', letterSpacing: '0.5px' }}>
             {flag} {country}
           </span>
+          <span style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '9px', color: connectionType === 'private' ? 'var(--accent)' : 'var(--muted)', background: 'rgba(0,0,0,0.3)', padding: '1px 5px', borderRadius: '3px', letterSpacing: '0.5px' }}>
+            {connectionType === 'private' ? '\uD83D\uDD12 PRIVATE' : '\uD83C\uDF10 PUBLIC'}
+          </span>
         </div>
 
         <form onSubmit={e => { e.preventDefault(); navigate(inputUrl) }} style={{ flex: 1, display: 'flex', gap: '8px' }}>
@@ -302,7 +306,7 @@ export default function BrowseView() {
       {status === 'ready' && !content && (
         <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '16px', padding: '40px' }}>
           <div style={{ fontSize: '48px' }}>{flag}</div>
-          <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '13px', color: 'var(--accent)', letterSpacing: '1px' }}>CONNECTED · {country} PEER</div>
+          <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '13px', color: 'var(--accent)', letterSpacing: '1px' }}>CONNECTED · {country} PEER · {connectionType === 'private' ? '\uD83D\uDD12 PRIVATE' : '\uD83C\uDF10 PUBLIC'}</div>
           <div style={{ fontSize: '13px', color: 'var(--muted)', textAlign: 'center', maxWidth: '400px', lineHeight: 1.7 }}>
             Enter a URL above to browse through this peer.
           </div>

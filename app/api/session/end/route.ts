@@ -11,14 +11,17 @@ export async function PATCH(req: Request) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
 
-  const { sessionId, providerUserId } = await req.json().catch(() => ({}))
+  const { sessionId, providerUserId, providerKind: patchProviderKind } = await req.json().catch(() => ({}))
   if (!sessionId || !providerUserId) {
     return NextResponse.json({ error: 'sessionId and providerUserId required' }, { status: 400 })
   }
 
+  const updatePayload: Record<string, unknown> = { provider_id: providerUserId }
+  if (patchProviderKind) updatePayload.provider_kind = patchProviderKind
+
   await adminClient
     .from('sessions')
-    .update({ provider_id: providerUserId })
+    .update(updatePayload)
     .eq('id', sessionId)
     .eq('status', 'active')
 
@@ -51,7 +54,7 @@ export async function POST(req: Request) {
     userId = user.id
   }
 
-  const { sessionId, bytesUsed = 0, providerUserId, requesterUserId, country, targetHost } = await req.json()
+  const { sessionId, bytesUsed = 0, providerUserId, requesterUserId, country, targetHost, providerKind } = await req.json()
   if (!sessionId) return NextResponse.json({ error: 'sessionId is required' }, { status: 400 })
 
   const resolvedRequesterId = isRelay ? (requesterUserId ?? null) : userId
@@ -59,24 +62,29 @@ export async function POST(req: Request) {
 
   const { data: session } = await adminClient
     .from('sessions')
-    .select('provider_id, target_country, user_id')
+    .select('provider_id, target_country, user_id, provider_kind')
     .eq('id', sessionId)
     .single()
 
   const finalProviderId = resolvedProviderId ?? session?.provider_id ?? null
   const finalRequesterId = resolvedRequesterId ?? session?.user_id ?? null
   const finalCountry = country ?? session?.target_country ?? null
+  // Prefer caller-supplied providerKind, fall back to what was stored on the session row
+  const resolvedProviderKind = providerKind ?? session?.provider_kind ?? null
 
-  const { error } = await adminClient
+  const { error, count } = await adminClient
     .from('sessions')
     .update({
       status: 'ended',
       ended_at: new Date().toISOString(),
       bytes_used: bytesUsed,
-    })
+    }, { count: 'exact' })
     .eq('id', sessionId)
+    .eq('status', 'active')
 
   if (error) return NextResponse.json({ error: 'Session not found' }, { status: 404 })
+  // Session was already ended by another caller (relay + browser race) — skip RPCs
+  if (count === 0) return NextResponse.json({ success: true })
 
   // Run all DB updates in parallel
   await Promise.all([
@@ -85,8 +93,9 @@ export async function POST(req: Request) {
       ? adminClient.rpc('increment_bandwidth', { p_user_id: finalRequesterId, p_bytes: bytesUsed })
       : Promise.resolve(),
 
-    // Credit provider bytes (non-relay only — desktop uses flushStats)
-    bytesUsed > 0 && finalProviderId && !isRelay
+    // Credit provider bytes — skip for relay calls (desktop/CLI flush their own bytes via flushStats)
+    // Also skip for desktop/CLI providers even on browser-client calls to avoid double-credit
+    bytesUsed > 0 && finalProviderId && !isRelay && resolvedProviderKind !== 'desktop' && resolvedProviderKind !== 'cli'
       ? adminClient.rpc('increment_bytes_shared', { p_user_id: finalProviderId, p_bytes: bytesUsed })
       : Promise.resolve(),
 

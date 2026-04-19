@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
+import { checkRateLimit } from '@/lib/traffic-filter'
 
 const BLOCKED_PATTERNS = [/\.onion$/i, /^smtp\./i, /^mail\./i, /torrent/i]
 const BLOCKED_HOSTS = [/^localhost$/i, /^127\./, /^10\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./]
@@ -89,8 +90,12 @@ export async function POST(req: Request) {
   }
   if (!authed) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  const { url, method = 'GET', headers: reqHeaders = {}, body = null } = await req.json()
+  const { url, method = 'GET', headers: reqHeaders = {}, body = null, sessionId = null } = await req.json()
   if (!url) return NextResponse.json({ error: 'url required' }, { status: 400 })
+
+  if (sessionId && !checkRateLimit(sessionId)) {
+    return NextResponse.json({ error: 'Rate limit exceeded' }, { status: 429 })
+  }
 
   let parsed: URL
   try { parsed = new URL(url) } catch {

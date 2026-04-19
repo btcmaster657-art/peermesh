@@ -37,6 +37,7 @@ let state = {
   privateShare: null,
   privateExpiryHours: '24',
   privateShareSaving: false,
+  connectionType: 'public', // 'public' | 'private'
 }
 
 window.addEventListener('online', () => { state.isOnline = true; render() })
@@ -62,7 +63,7 @@ async function handleExpiredSession() {
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 async function init() {
-  const stored = await chrome.storage.local.get(['user', 'session', 'isSharing', 'helper', 'selectedCountry', 'privateCodeInput', 'extId', 'supabaseToken'])
+  const stored = await chrome.storage.local.get(['user', 'session', 'isSharing', 'helper', 'selectedCountry', 'privateCodeInput', 'extId', 'supabaseToken', 'connectionType'])
 
   if (!stored.extId) {
     stored.extId = crypto.randomUUID()
@@ -364,6 +365,7 @@ function renderDashboard(app) {
       <div class="session-card">
         <div class="via">Browsing via peer</div>
         <div class="country-display">${getFlagForCountry(session.country)} ${session.country}</div>
+        <div style="margin-top:6px;display:inline-block;font-family:'Courier New',monospace;font-size:9px;padding:2px 7px;border-radius:4px;background:${state.connectionType === 'private' ? 'rgba(0,255,136,0.12)' : 'rgba(255,255,255,0.05)'};border:1px solid ${state.connectionType === 'private' ? 'rgba(0,255,136,0.35)' : '#1e1e2a'};color:${state.connectionType === 'private' ? '#00ff88' : '#666680'}">${state.connectionType === 'private' ? '\uD83D\uDD12 PRIVATE' : '\uD83C\uDF10 PUBLIC'}</div>
       </div>
       <button class="connect-btn disconnect" id="disconnectBtn" ${state.disconnecting ? 'disabled' : ''}>
         ${state.disconnecting
@@ -418,6 +420,7 @@ function renderDashboard(app) {
         <div class="share-info">
           <h4>Share my connection</h4>
           <p>${isSharing ? 'Sharing active — earning credits' : helperLabel}</p>
+          ${isSharing ? `<div style="margin-top:4px;display:inline-block;font-family:'Courier New',monospace;font-size:9px;padding:2px 7px;border-radius:4px;background:${state.privateShare?.active ? 'rgba(0,255,136,0.12)' : 'rgba(255,255,255,0.05)'};border:1px solid ${state.privateShare?.active ? 'rgba(0,255,136,0.35)' : '#1e1e2a'};color:${state.privateShare?.active ? '#00ff88' : '#666680'}">${state.privateShare?.active ? '\uD83D\uDD12 PRIVATE' : '\uD83C\uDF10 PUBLIC'}</div>` : ''}
           ${state.user?.dailyLimitMb ? `<p style="font-size:10px;color:var(--muted);margin-top:2px">${formatBytes((state.user.dailyLimitMb ?? 0) * 1024 * 1024)} daily limit</p>` : ''}
           ${helper?.slots ? `<p style="font-size:10px;color:var(--muted);margin-top:4px">${helper.slots.active} / ${helper.slots.configured} slots active${helper.slots.warning ? ` - ${helper.slots.warning}` : ''}</p>` : ''}
         </div>
@@ -495,8 +498,9 @@ function renderDashboard(app) {
   document.querySelectorAll('.country-btn').forEach(btn => {
     btn.onclick = () => {
       state.selectedCountry = btn.dataset.code
+      state.privateCodeInput = ''
       state.error = null
-      chrome.storage.local.set({ selectedCountry: state.selectedCountry })
+      chrome.storage.local.set({ selectedCountry: state.selectedCountry, privateCodeInput: '' })
       render()
     }
   })
@@ -581,6 +585,12 @@ function renderDashboard(app) {
 
 async function connectSession() {
   const privateCode = (state.privateCodeInput || '').trim()
+  // Country selected = public mode; clear any stale private code
+  if (state.selectedCountry && privateCode) {
+    state.privateCodeInput = ''
+    chrome.storage.local.set({ privateCodeInput: '' })
+  }
+  const isPrivateConnect = !state.selectedCountry && !!privateCode
   if ((!state.selectedCountry && !privateCode) || !state.user || state.connecting) return
 
   if (!state.isOnline) {
@@ -600,7 +610,7 @@ async function connectSession() {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${state.supabaseToken || state.user.token}`,
       },
-      body: JSON.stringify(privateCode ? { privateCode } : { country: state.selectedCountry }),
+      body: JSON.stringify(isPrivateConnect ? { privateCode } : { country: state.selectedCountry }),
     })
 
     const data = await res.json()
@@ -622,7 +632,8 @@ async function connectSession() {
     if (!response?.success) throw new Error(response?.error || 'Connection failed')
 
     state.session = { id: data.sessionId, country: data.country ?? state.selectedCountry, relayEndpoint: data.relayEndpoint }
-    await chrome.storage.local.set({ session: state.session })
+    state.connectionType = isPrivateConnect ? 'private' : 'public'
+    await chrome.storage.local.set({ session: state.session, connectionType: state.connectionType })
   } catch (err) {
     state.error = err.message === 'Failed to fetch' ? 'Network error — could not reach server' : err.message
   } finally {
@@ -651,8 +662,9 @@ async function disconnectSession() {
   }
 
   state.session = null
+  state.connectionType = 'public'
   state.disconnecting = false
-  await chrome.storage.local.set({ session: null })
+  await chrome.storage.local.set({ session: null, connectionType: 'public' })
   render()
 }
 

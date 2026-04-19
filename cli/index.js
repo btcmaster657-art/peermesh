@@ -16,7 +16,7 @@ const API_BASE = 'https://peermesh-beta.vercel.app'
 const RELAY_WS = 'wss://peermesh-relay.fly.dev'
 const CONFIG_DIR = join(homedir(), '.peermesh')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
-const VERSION     = '1.0.29'
+const VERSION     = '1.0.30'
 const DEBUG_LOG = join(homedir(), 'Desktop', 'peermesh-debug.log')
 
 const CONTROL_PORT = 7654
@@ -235,6 +235,7 @@ function getStatePayload() {
     where: 'cli',
     baseDeviceId: BASE_DEVICE_ID,
     connectionSlots: getConnectionSlots(),
+    privateShareActive: !!(config.privateShareActive),
     slots: {
       configured: getConnectionSlots(),
       active: activeSlotCount(),
@@ -320,13 +321,14 @@ async function pollTodayBytes() {
   syncUsageDay()
   clogRequest('GET', `${API_BASE}/api/user/sharing`)
   try {
-    const res = await fetch(`${API_BASE}/api/user/sharing`, {
+    const res = await fetch(`${API_BASE}/api/user/sharing${BASE_DEVICE_ID ? `?baseDeviceId=${encodeURIComponent(BASE_DEVICE_ID)}` : ''}`, {
       headers: { Authorization: `Bearer ${config.token}` },
     })
     clogResponse('GET', `${API_BASE}/api/user/sharing`, res.status)
     if (!res.ok) return
     const data = await res.json()
     config.todaySharedBytes = data.total_bytes_today ?? 0
+    config.privateShareActive = !!(data.private_share?.enabled && data.private_share?.active)
     saveConfig(config)
     return data
   } catch (e) {
@@ -445,7 +447,7 @@ function attachSlotSocketHandlers(slot, limitBytes) {
     if (slot.heartbeatTimer) clearInterval(slot.heartbeatTimer)
     slot.heartbeatTimer = setInterval(() => {
       sendHeartbeat(slot)
-      pollTodayBytes()
+      if (slot.index === 0) pollTodayBytes()
     }, 30_000)
     sendHeartbeat(slot)
   })
@@ -486,6 +488,7 @@ function attachSlotSocketHandlers(slot, limitBytes) {
           syncUsageDay()
           slot.requestsHandled++
           config.todayRequestsHandled = (config.todayRequestsHandled ?? 0) + 1
+          saveConfig(config)
           const response = await handleFetch(slot, msg.request, limitBytes)
           sendMsg(slot, { type: 'proxy_response', sessionId: msg.sessionId, response })
           break
@@ -500,6 +503,7 @@ function attachSlotSocketHandlers(slot, limitBytes) {
           syncUsageDay()
           slot.requestsHandled++
           config.todayRequestsHandled = (config.todayRequestsHandled ?? 0) + 1
+          saveConfig(config)
           const socket = connect(port, hostname)
           slot.activeTunnels.set(tunnelId, { socket, closed: false })
           socket.on('connect', () => sendMsg(slot, { type: 'tunnel_ready', tunnelId }))
@@ -530,7 +534,6 @@ function attachSlotSocketHandlers(slot, limitBytes) {
           break
       }
 
-      saveConfig(config)
     } catch (e) {
       clog.error('RELAY', `${slotPrefix(slot)} message handler exception`, { err: e.message })
     }
@@ -609,8 +612,9 @@ function printStatus(limitBytes) {
   const limitStr = limitBytes
     ? `${formatBytes(totalToday)} / ${formatBytes(limitBytes)} today`
     : `${formatBytes(totalToday)} today (no limit)`
+  const privBadge = config.privateShareActive ? '\uD83D\uDD12 PRIVATE' : '\uD83C\uDF10 PUBLIC'
   console.log('')
-  console.log(`  Sharing active — ${active} / ${configured} slots active`)
+  console.log(`  Sharing active [${privBadge}] — ${active} / ${configured} slots active`)
   console.log(`  ${aggregate.requestsHandled} requests — ${formatBytes(aggregate.bytesServed)} served`)
   console.log(`  ${limitStr}`)
   const warning = getSlotWarning(configured)
