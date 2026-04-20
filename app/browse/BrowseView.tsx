@@ -133,6 +133,7 @@ export default function BrowseView() {
   // dbSessionId = the session row we created in Supabase (for end-session API)
   // relay assigns its own live session ID during WebRTC handshake
   const relayEndpoint = searchParams.get('relay') ?? ''
+  const relayFallbackList = (searchParams.get('relayFallback') ?? relayEndpoint).split(',').filter(Boolean)
   const country = searchParams.get('country') ?? ''
   const userId = searchParams.get('userId') ?? ''
   const dbSessionId = searchParams.get('dbSessionId') ?? ''
@@ -158,7 +159,7 @@ export default function BrowseView() {
       .connect(relayEndpoint, dbSessionId, country, userId, () => {
         setStatus('error')
         setErrorMsg('Peer disconnected unexpectedly')
-      }, preferredProviderUserId, privateProviderUserId, privateBaseDeviceId)
+      }, preferredProviderUserId, privateProviderUserId, privateBaseDeviceId, relayFallbackList)
       .then(() => setStatus('ready'))
       .catch(err => { setStatus('error'); setErrorMsg(err.message) })
 

@@ -29,7 +29,7 @@ const CONTROL_PORT = 7654
 const PROXY_PORT = 7655
 
 let config = {
-  relay: 'ws://localhost:8080',
+  relay: 'wss://peermesh-relay.fly.dev',
   apiBase: 'http://localhost:3000',
   token: '',
   userId: '',

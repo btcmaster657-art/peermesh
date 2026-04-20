@@ -28,68 +28,86 @@ export class PeerRequester {
     onDisconnect?: () => void,
     preferredProviderUserId?: string | null,
     privateProviderUserId?: string | null,
-    privateBaseDeviceId?: string | null
+    privateBaseDeviceId?: string | null,
+    relayFallbackList?: string[]
   ): Promise<void> {
     this.onDisconnect = onDisconnect
+    const fallbackList = (relayFallbackList && relayFallbackList.length > 0)
+      ? relayFallbackList
+      : [relayEndpoint]
 
     return new Promise((resolve, reject) => {
-      this.ws = new WebSocket(relayEndpoint)
+      let attemptIndex = 0
 
-      this.ws.onopen = () => {
-        this.ws!.send(JSON.stringify({
-          type: 'request_session',
-          country,
-          userId,
-          requireTunnel: false,
-          dbSessionId,
-          preferredProviderUserId: preferredProviderUserId ?? null,
-          privateProviderUserId: privateProviderUserId ?? null,
-          privateBaseDeviceId: privateBaseDeviceId ?? null,
-        }))
-      }
+      const tryConnect = () => {
+        const relay = fallbackList[attemptIndex % fallbackList.length]
+        this.ws = new WebSocket(relay)
 
-      this.ws.onmessage = (event) => {
-        const msg = JSON.parse(event.data)
-
-        if (msg.type === 'session_created') {
-          this.sessionInfo = { sessionId: msg.sessionId, country, relayEndpoint }
+        this.ws.onopen = () => {
+          this.ws!.send(JSON.stringify({
+            type: 'request_session',
+            country,
+            userId,
+            requireTunnel: false,
+            dbSessionId,
+            preferredProviderUserId: preferredProviderUserId ?? null,
+            privateProviderUserId: privateProviderUserId ?? null,
+            privateBaseDeviceId: privateBaseDeviceId ?? null,
+          }))
         }
 
-        if (msg.type === 'agent_session_ready') {
-          this.agentSessionId = msg.sessionId
-          resolve()
-        }
+        this.ws.onmessage = (event) => {
+          const msg = JSON.parse(event.data)
 
-        if (msg.type === 'proxy_response') {
-          const response = msg.response as ProxyResponse
-          const cb = this.pending.get(response.requestId)
-          if (cb) {
-            cb(response)
-            this.pending.delete(response.requestId)
+          if (msg.type === 'session_created') {
+            this.sessionInfo = { sessionId: msg.sessionId, country, relayEndpoint: relay }
+          }
+
+          if (msg.type === 'agent_session_ready') {
+            this.agentSessionId = msg.sessionId
+            resolve()
+          }
+
+          if (msg.type === 'proxy_response') {
+            const response = msg.response as ProxyResponse
+            const cb = this.pending.get(response.requestId)
+            if (cb) {
+              cb(response)
+              this.pending.delete(response.requestId)
+            }
+          }
+
+          if (msg.type === 'error') {
+            reject(new Error(msg.message))
+          }
+
+          if (msg.type === 'session_ended') {
+            this.onDisconnect?.()
           }
         }
 
-        if (msg.type === 'error') {
-          reject(new Error(msg.message))
+        this.ws.onerror = () => {
+          if (attemptIndex < fallbackList.length - 1) {
+            attemptIndex++
+            setTimeout(tryConnect, 1500)
+          } else {
+            reject(new Error('WebSocket connection failed'))
+          }
         }
 
-        if (msg.type === 'session_ended') {
-          this.onDisconnect?.()
+        this.ws.onclose = () => {
+          if (this.sessionInfo) this.onDisconnect?.()
         }
+
+        setTimeout(() => {
+          if (!this.agentSessionId) {
+            this.ws?.close()
+            reject(new Error('No peer available in ' + country + ' — try another country'))
+          }
+        }, 20_000)
       }
 
-      this.ws.onerror = () => reject(new Error('WebSocket connection failed'))
-
-      this.ws.onclose = () => {
-        if (this.sessionInfo) this.onDisconnect?.()
-      }
-
-      setTimeout(() => {
-        if (!this.agentSessionId) {
-          this.ws?.close()
-          reject(new Error('No peer available in ' + country + ' — try another country'))
-        }
-      }, 20_000)
+      tryConnect()
     })
   }
 

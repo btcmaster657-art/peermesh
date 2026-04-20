@@ -4,16 +4,9 @@ import { adminClient } from '@/lib/supabase/admin'
 import { isUserTrusted } from '@/lib/traffic-filter'
 import { createHmac } from 'crypto'
 import { isPrivateShareActive, normalizePrivateShareCode } from '@/lib/private-sharing'
+import { pickRelay, getRelayFallbackList, relayHttpUrl, RELAY_ENDPOINTS } from '@/lib/relay-endpoints'
 
-const RELAY_ENDPOINTS = (process.env.RELAY_ENDPOINTS ?? 'ws://localhost:8080').split(',')
 const RECEIPT_SECRET = process.env.RELAY_SECRET ?? process.env.RECEIPT_SECRET ?? 'dev-secret'
-
-let relayIndex = 0
-function pickRelay(): string {
-  const endpoint = RELAY_ENDPOINTS[relayIndex % RELAY_ENDPOINTS.length]
-  relayIndex++
-  return endpoint
-}
 
 export function issueAccountabilityReceipt(payload: {
   sessionId: string
@@ -78,7 +71,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'Monthly bandwidth limit reached. Upgrade to premium.' }, { status: 403 })
   }
 
-  const relay = pickRelay()
+  const [relay, fallbackList] = await Promise.all([pickRelay(), getRelayFallbackList()])
   try { await adminClient.rpc('cleanup_stale_sessions') } catch {}
 
   let preferredProviderUserId = (profile.preferred_providers as Record<string, string>)?.[country] ?? null
@@ -102,21 +95,24 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'You cannot connect to your own private share code' }, { status: 400 })
     }
 
-    // Check relay directly for live provider state — relay is authoritative, DB heartbeat can lag
+    // Check all relays in parallel for the private provider — relay is authoritative, DB heartbeat can lag
     let relayOnline = false
     let relayCountry: string | null = null
-    const relayHttp = (process.env.RELAY_ENDPOINTS ?? '').split(',')[0]
-      .replace('wss://', 'https://').replace('ws://', 'http://')
-    if (relayHttp) {
+    const qs = new URLSearchParams({ baseDeviceId: privateShare.base_device_id, providerUserId: privateShare.user_id })
+    const secret = process.env.RELAY_SECRET ?? ''
+    await Promise.all(RELAY_ENDPOINTS.map(async (wsUrl) => {
+      if (relayOnline) return
       try {
-        const qs = new URLSearchParams({ baseDeviceId: privateShare.base_device_id, providerUserId: privateShare.user_id })
-        const r = await fetch(`${relayHttp}/check-private?${qs}`, {
-          headers: { 'x-relay-secret': process.env.RELAY_SECRET ?? '' },
+        const r = await fetch(`${relayHttpUrl(wsUrl)}/check-private?${qs}`, {
+          headers: { 'x-relay-secret': secret },
           signal: AbortSignal.timeout(3000),
         })
-        if (r.ok) { const d = await r.json(); relayOnline = !!d.online; relayCountry = d.country ?? null }
+        if (r.ok) {
+          const d = await r.json()
+          if (d.online) { relayOnline = true; relayCountry = d.country ?? null }
+        }
       } catch {}
-    }
+    }))
 
     if (!relayOnline) {
       return NextResponse.json({ error: 'Private share is currently offline' }, { status: 409 })
@@ -168,6 +164,7 @@ export async function POST(req: Request) {
   return NextResponse.json({
     sessionId: session.id,
     relayEndpoint: relay,
+    relayFallbackList: fallbackList,
     receipt,
     country,
     preferredProviderUserId,

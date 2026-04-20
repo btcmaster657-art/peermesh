@@ -95,8 +95,7 @@ export async function checkDesktop(): Promise<DesktopState> {
   return { ...a, running: isSharing, shareEnabled: isSharing, peer: b }
 }
 
-/** Push auth credentials to the running desktop app */
-export async function syncDesktopAuth(payload: { token: string; userId: string; country: string; trust: number }): Promise<boolean> {
+export async function syncDesktopAuth(payload: { token: string; userId: string; country: string; trust: number }): Promise<{ ok: boolean; error?: string }> {
   try {
     const res = await fetch(`${AGENT_URL}/native/auth`, {
       method: 'POST',
@@ -104,13 +103,17 @@ export async function syncDesktopAuth(payload: { token: string; userId: string; 
       body: JSON.stringify(payload),
       signal: AbortSignal.timeout(3000),
     })
-    return res.ok
+    if (res.status === 403) {
+      const data = await res.json().catch(() => ({}))
+      return { ok: false, error: data.error ?? 'This desktop is signed in as a different user' }
+    }
+    return { ok: res.ok }
   } catch {
-    return false
+    return { ok: false }
   }
 }
 
-export async function startDesktopSharing(payload: { token: string; userId: string; country: string; trust: number }): Promise<boolean> {
+export async function startDesktopSharing(payload: { token: string; userId: string; country: string; trust: number }): Promise<{ ok: boolean; error?: string }> {
   try {
     const res = await fetch(`${AGENT_URL}/native/share/start`, {
       method: 'POST',
@@ -118,9 +121,13 @@ export async function startDesktopSharing(payload: { token: string; userId: stri
       body: JSON.stringify(payload),
       signal: AbortSignal.timeout(4000),
     })
-    return res.ok
+    if (res.status === 403) {
+      const data = await res.json().catch(() => ({}))
+      return { ok: false, error: data.error ?? 'This desktop is signed in as a different user' }
+    }
+    return { ok: res.ok }
   } catch {
-    return false
+    return { ok: false }
   }
 }
 

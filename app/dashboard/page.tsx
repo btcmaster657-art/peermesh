@@ -8,7 +8,6 @@ import { COUNTRIES, formatBytes, getFlagForCountry } from '@/lib/utils'
 import type { Profile, PeerAvailability } from '@/lib/types'
 import type { DesktopState } from '@/lib/agent-client'
 
-const RELAY = process.env.NEXT_PUBLIC_RELAY_ENDPOINT ?? 'ws://localhost:8080'
 
 function CliSection({ label, cmd }: { label: string; cmd: string }) {
   const [copied, setCopied] = useState(false)
@@ -116,17 +115,27 @@ export default function Dashboard() {
         startPolling()
 
         if (dt.available) {
-          const { data: { session } } = await supabase.auth.getSession()
-          if (session) {
-            await syncDesktopAuth({
-              token: session.access_token,
-              userId: user.id,
-              country: data.country_code,
-              trust: data.trust_score,
-            })
+          // Only sync auth / show sharing UI if the desktop belongs to this user
+          // (dt.userId is null when not yet configured — allow sync in that case)
+          const desktopOwnedByOther = dt.userId && dt.userId !== user.id
+          if (desktopOwnedByOther) {
+            setShareError('This desktop app is signed in as a different user. Sign out of the desktop app first.')
+          } else {
+            const { data: { session } } = await supabase.auth.getSession()
+            if (session) {
+              const authResult = await syncDesktopAuth({
+                token: session.access_token,
+                userId: user.id,
+                country: data.country_code,
+                trust: data.trust_score,
+              })
+              if (!authResult.ok && authResult.error) {
+                setShareError(authResult.error)
+              }
+            }
+            setIsSharing(dt.running)
+            if (dt.stats) setSharingStats({ bytesServed: dt.stats.bytesServed, requestsHandled: dt.stats.requestsHandled })
           }
-          setIsSharing(dt.running)
-          if (dt.stats) setSharingStats({ bytesServed: dt.stats.bytesServed, requestsHandled: dt.stats.requestsHandled })
         } else if (data.is_sharing) {
           await fetch('/api/user/sharing', {
             method: 'POST',
@@ -181,7 +190,9 @@ export default function Dashboard() {
       tick++
       const dt = await checkDesktop()
       setDesktop(dt)
-      if (dt.available) {
+      const { data: { user } } = await supabase.auth.getUser()
+      const desktopOwnedByOther = dt.available && dt.userId && user && dt.userId !== user.id
+      if (dt.available && !desktopOwnedByOther) {
         setIsSharing(dt.running)
         if (dt.stats) setSharingStats({ bytesServed: dt.stats.bytesServed, requestsHandled: dt.stats.requestsHandled })
       } else {
@@ -317,8 +328,8 @@ export default function Dashboard() {
       trust: profile!.trust_score,
     })
 
-    if (!ok) {
-      setShareError('desktop_required')
+    if (!ok.ok) {
+      setShareError(ok.error ?? 'desktop_required')
       setShareToggling(false)
       return
     }
@@ -354,7 +365,8 @@ export default function Dashboard() {
       const data = await res.json()
       if (!res.ok || data.error) throw new Error(data.error ?? `Server error (${res.status})`)
       const targetCountry = data.country ?? selectedCountry
-      router.push(`/browse?relay=${encodeURIComponent(data.relayEndpoint)}&country=${encodeURIComponent(targetCountry)}&userId=${profile.id}&dbSessionId=${data.sessionId}&preferredProviderUserId=${encodeURIComponent(data.preferredProviderUserId ?? '')}&privateProviderUserId=${encodeURIComponent(data.privateProviderUserId ?? '')}&privateBaseDeviceId=${encodeURIComponent(data.privateBaseDeviceId ?? '')}&connectionType=${isPrivateConnect ? 'private' : 'public'}`)
+      const fallback = (data.relayFallbackList ?? [data.relayEndpoint]).join(',')
+      router.push(`/browse?relay=${encodeURIComponent(data.relayEndpoint)}&relayFallback=${encodeURIComponent(fallback)}&country=${encodeURIComponent(targetCountry)}&userId=${profile.id}&dbSessionId=${data.sessionId}&preferredProviderUserId=${encodeURIComponent(data.preferredProviderUserId ?? '')}&privateProviderUserId=${encodeURIComponent(data.privateProviderUserId ?? '')}&privateBaseDeviceId=${encodeURIComponent(data.privateBaseDeviceId ?? '')}&connectionType=${isPrivateConnect ? 'private' : 'public'}`)
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Could not connect'
       setConnectError(msg === 'Failed to fetch' ? 'Network error — could not reach server' : msg)

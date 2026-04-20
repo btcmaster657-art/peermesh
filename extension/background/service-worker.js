@@ -1,7 +1,22 @@
 // background/service-worker.js - PeerMesh Extension Service Worker
 
 const APP_URL = 'https://peermesh-beta.vercel.app'
-const RELAY_WS = 'wss://peermesh-relay.fly.dev'
+
+let _liveRelays = null
+let _liveRelaysFetchedAt = 0
+const RELAY_CONFIG_TTL = 5 * 60 * 1000
+
+async function getLiveRelays() {
+  if (_liveRelays && Date.now() - _liveRelaysFetchedAt < RELAY_CONFIG_TTL) return _liveRelays
+  const res = await fetch(`${APP_URL}/api/relay/config`, { signal: AbortSignal.timeout(5000) })
+  if (!res.ok) throw new Error(`relay config fetch failed: status=${res.status}`)
+  const data = await res.json()
+  if (!Array.isArray(data.relays) || data.relays.length === 0) throw new Error('relay config returned empty list')
+  _liveRelays = data.relays
+  _liveRelaysFetchedAt = Date.now()
+  log('info', `[RELAY-CONFIG] fetched ${data.relays.length} relays: ${data.relays.join(', ')}`)
+  return _liveRelays
+}
 const NATIVE_HOST = 'com.peermesh.desktop'
 const CONTROL_PORT = 7654
 
@@ -235,6 +250,10 @@ async function startDesktopSharing({ token, userId, country, trust }) {
       body: JSON.stringify({ token, userId, country, trust }),
       signal: AbortSignal.timeout(4000),
     })
+    if (res.status === 403) {
+      const data = await res.json().catch(() => ({}))
+      return { success: false, error: data.error ?? 'This desktop is signed in as a different user' }
+    }
     if (res.ok) {
       const data = await res.json()
       const helper = {
@@ -334,11 +353,21 @@ async function stopDesktopSharing() {
 // ── Relay connection ──────────────────────────────────────────────────────────
 
 async function connectToRelay(opts, attempt = 0) {
+  const serverFallbackList = opts.relayFallbackList ?? []
+  const liveFallbackList = await getLiveRelays()
+  // Merge: server-ordered list first (health-aware), then any live relays not already included
+  const fallbackList = [...new Set([...serverFallbackList, ...liveFallbackList])]
+  const relay = fallbackList[attempt % fallbackList.length]
   try {
-    return await connectOnce(opts)
+    return await connectOnce({ ...opts, relayEndpoint: relay })
   } catch (error) {
-    if (attempt < 2) {
+    if (attempt < fallbackList.length - 1) {
+      log('warn', `[CONNECT] relay ${relay} failed, trying next fallback`)
       await new Promise(resolve => setTimeout(resolve, 1500))
+      return connectToRelay(opts, attempt + 1)
+    }
+    if (attempt < fallbackList.length + 1) {
+      await new Promise(resolve => setTimeout(resolve, 3000))
       return connectToRelay(opts, attempt + 1)
     }
     throw error
@@ -347,7 +376,7 @@ async function connectToRelay(opts, attempt = 0) {
 
 async function connectOnce({ relayEndpoint, country, userId, dbSessionId, preferredProviderUserId, privateProviderUserId, privateBaseDeviceId }) {
   return new Promise((resolve, reject) => {
-    const wsUrl = relayEndpoint || RELAY_WS
+    const wsUrl = relayEndpoint
     log('info', `[CONNECT] WS connecting to ${wsUrl} country=${country} userId=${userId?.slice(0,8)}`)
     const ws = new WebSocket(wsUrl)
     let keepaliveTimer = null
@@ -396,7 +425,7 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
             await fetch(`http://127.0.0.1:${CONTROL_PORT}/proxy-session`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ sessionId: agentSessionId, relayEndpoint: relayEndpoint || RELAY_WS, country }),
+              body: JSON.stringify({ sessionId: agentSessionId, relayEndpoint, country }),
             })
             log('info', '[CONNECT] proxy-session sent to desktop ✓')
           } catch (e) {
@@ -404,7 +433,7 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
           }
           setProxyDesktop(agentSessionId)
         } else {
-          setProxyRelay(relayEndpoint || RELAY_WS, agentSessionId)
+          setProxyRelay(relayEndpoint, agentSessionId)
         }
         settle(resolve, undefined)
       }
@@ -419,7 +448,7 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
         fetch(`http://127.0.0.1:${CONTROL_PORT}/proxy-session`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sessionId: msg.sessionId, relayEndpoint: relayEndpoint || RELAY_WS, country: msg.country }),
+          body: JSON.stringify({ sessionId: msg.sessionId, relayEndpoint, country: msg.country }),
         }).catch(() => {})
 
         // Update proxy auth credentials with new sessionId
@@ -528,7 +557,7 @@ function setProxyDesktop(sessionId) {
 }
 
 function setProxyRelay(relayEndpoint, sessionId) {
-  const relayUrl = (relayEndpoint || RELAY_WS).replace('wss://', 'https://').replace('ws://', 'http://')
+  const relayUrl = relayEndpoint.replace('wss://', 'https://').replace('ws://', 'http://')
   const relayHost = new URL(relayUrl).hostname
   const pacScript = `
     function FindProxyForURL(url, host) {

@@ -13,10 +13,29 @@ if (process.platform === 'win32') {
 }
 
 const API_BASE = 'https://peermesh-beta.vercel.app'
-const RELAY_WS = 'wss://peermesh-relay.fly.dev'
+const RELAY_FALLBACK = [
+  'wss://peermesh-relay.fly.dev',
+  'wss://peermesh-2ma4.onrender.com',
+]
+let _liveRelays = null
+let _liveRelaysFetchedAt = 0
+const RELAY_CONFIG_TTL = 5 * 60 * 1000
+
+async function getLiveRelays() {
+  if (_liveRelays && Date.now() - _liveRelaysFetchedAt < RELAY_CONFIG_TTL) return _liveRelays
+  const res = await fetch(`${API_BASE}/api/relay/config`, { signal: AbortSignal.timeout(5000) })
+  if (!res.ok) throw new Error(`relay config fetch failed: status=${res.status}`)
+  const data = await res.json()
+  if (!Array.isArray(data.relays) || data.relays.length === 0) throw new Error('relay config returned empty list')
+  _liveRelays = data.relays
+  _liveRelaysFetchedAt = Date.now()
+  clog.info('RELAY', 'relay config fetched', { relays: data.relays })
+  return _liveRelays
+}
+
 const CONFIG_DIR = join(homedir(), '.peermesh')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
-const VERSION     = '1.0.30'
+const VERSION     = '1.0.31'
 const DEBUG_LOG = join(homedir(), 'Desktop', 'peermesh-debug.log')
 
 const CONTROL_PORT = 7654
@@ -559,9 +578,12 @@ function attachSlotSocketHandlers(slot, limitBytes) {
 function connectSlot(slot, limitBytes) {
   if (!config.token || !config.userId) return
   if (slot.ws && (slot.ws.readyState === WebSocket.OPEN || slot.ws.readyState === WebSocket.CONNECTING)) return
-  slotLog(slot, 'connecting to relay')
-  slot.ws = new WebSocket(RELAY_WS)
-  attachSlotSocketHandlers(slot, limitBytes)
+  getLiveRelays().then(relays => {
+    const relay = relays[slot.index % relays.length]
+    slotLog(slot, `connecting to relay ${relay}`)
+    slot.ws = new WebSocket(relay)
+    attachSlotSocketHandlers(slot, limitBytes)
+  })
 }
 
 function connectRelay(limitBytes) {
@@ -659,6 +681,12 @@ function buildHandler(port) {
       req.on('end', () => {
         try {
           const data = JSON.parse(body || '{}')
+          if (config.userId && data.userId && config.userId !== data.userId) {
+            clog.warn('CONTROL', '/native/share/start -- userId mismatch, rejecting', { existing: config.userId, incoming: data.userId })
+            res.writeHead(403, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'This CLI is signed in as a different user' }))
+            return
+          }
           if (data.token) config.token = data.token
           if (data.userId) config.userId = data.userId
           if (data.trust) config.trust = data.trust

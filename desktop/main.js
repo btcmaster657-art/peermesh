@@ -1,4 +1,4 @@
-﻿const { app, Tray, Menu, BrowserWindow, nativeImage, ipcMain, shell, Notification } = require('electron')
+const { app, Tray, Menu, BrowserWindow, nativeImage, ipcMain, shell, Notification } = require('electron')
 const { WebSocket } = require('ws')
 const path = require('path')
 const http = require('http')
@@ -64,7 +64,21 @@ process.on('uncaughtException', (err) => {
 })
 
 const API_BASE = 'https://peermesh-beta.vercel.app'
-const RELAY_WS = 'wss://peermesh-relay.fly.dev'
+let _liveRelays = null
+let _liveRelaysFetchedAt = 0
+const RELAY_CONFIG_TTL = 5 * 60 * 1000
+
+async function getLiveRelays() {
+  if (_liveRelays && Date.now() - _liveRelaysFetchedAt < RELAY_CONFIG_TTL) return _liveRelays
+  const res = await fetch(`${API_BASE}/api/relay/config`, { signal: AbortSignal.timeout(5000) })
+  if (!res.ok) throw new Error(`relay config fetch failed: status=${res.status}`)
+  const data = await res.json()
+  if (!Array.isArray(data.relays) || data.relays.length === 0) throw new Error('relay config returned empty list')
+  _liveRelays = data.relays
+  _liveRelaysFetchedAt = Date.now()
+  log.info('RELAY', 'relay config fetched', { relays: data.relays })
+  return _liveRelays
+}
 const RELAY_PROXY_PORT = 8081
 const CONTROL_PORT = 7654
 const LOCAL_PROXY_PORT = 7655
@@ -532,10 +546,12 @@ function sendHeartbeat(slot) {
 function connectSlot(slot) {
   if (!config.token || !config.userId) return
   if (slot.ws && (slot.ws.readyState === WebSocket.OPEN || slot.ws.readyState === WebSocket.CONNECTING)) return
-  log.info('RELAY', `${slotPrefix(slot)} connecting`, { deviceId: slot.deviceId, relay: RELAY_WS })
-  slot.ws = new WebSocket(RELAY_WS)
+  getLiveRelays().then(relays => {
+    const relay = relays[slot.index % relays.length]
+    log.info('RELAY', `${slotPrefix(slot)} connecting`, { deviceId: slot.deviceId, relay })
+    slot.ws = new WebSocket(relay)
 
-  slot.ws.on('open', () => {
+    slot.ws.on('open', () => {
     slot.reconnectDelay = 2000
     if (!config.shareEnabled) {
       log.warn('RELAY', `${slotPrefix(slot)} shareEnabled=false after open`)
@@ -566,9 +582,9 @@ function connectSlot(slot) {
     updateTray()
   })
 
-  slot.ws.on('ping', () => { try { slot.ws.pong() } catch {} })
+    slot.ws.on('ping', () => { try { slot.ws.pong() } catch {} })
 
-  slot.ws.on('message', async (data) => {
+    slot.ws.on('message', async (data) => {
     try {
       const msg = JSON.parse(data.toString())
       if (msg.type === 'tunnel_data' || msg.type === 'proxy_ws_data') {
@@ -638,7 +654,7 @@ function connectSlot(slot) {
     }
   })
 
-  slot.ws.on('close', (code, reason) => {
+    slot.ws.on('close', (code, reason) => {
     slot.running = false
     slot.connectedAt = null
     closeAllTunnels(slot, false)
@@ -653,7 +669,8 @@ function connectSlot(slot) {
     }
   })
 
-  slot.ws.on('error', (e) => log.error('RELAY', `${slotPrefix(slot)} WebSocket error`, { code: e.code, err: e.message }))
+    slot.ws.on('error', (e) => log.error('RELAY', `${slotPrefix(slot)} WebSocket error`, { code: e.code, err: e.message }))
+  }).catch(e => log.error('RELAY', `${slotPrefix(slot)} getLiveRelays failed`, { err: e.message }))
 }
 
 function connectRelay() {
@@ -669,7 +686,7 @@ function connectRelay() {
   _userStopped = false
   ensureSlotStates().forEach(slot => connectSlot(slot))
   syncAggregateState()
-  log.info('RELAY', 'connectRelay START', { userId: config.userId, country: config.country, relay: RELAY_WS, slots: config.connectionSlots })
+  log.info('RELAY', 'connectRelay START', { userId: config.userId, country: config.country, slots: config.connectionSlots })
   logState('pre-connect')
 }
 
@@ -699,7 +716,7 @@ let proxySession = null
 
 function openTunnelWs(hostname, port, onOpen) {
   if (!proxySession?.sessionId) return null
-  const relayRaw = proxySession.relayEndpoint || RELAY_WS
+  const relayRaw = proxySession.relayEndpoint
   const relayHttp = relayRaw.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
   const relayOrigin = new URL(relayHttp).origin.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:')
   const proxyUrl = `${relayOrigin}/proxy?session=${encodeURIComponent(proxySession.sessionId)}`
@@ -867,6 +884,12 @@ const controlServer = http.createServer((req, res) => {
       try {
         const data = JSON.parse(body || '{}')
         log.info('CONTROL', '/native/auth â€” verifying token', { userId: data.userId })
+        if (config.userId && data.userId && config.userId !== data.userId) {
+          log.warn('CONTROL', '/native/auth -- userId mismatch, rejecting', { existing: config.userId, incoming: data.userId })
+          res.writeHead(403, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'This desktop is signed in as a different user' }))
+          return
+        }
         if (data.token) {
           try {
             const vRes = await fetch(`${API_BASE}/api/extension-auth?verify=1&userId=${encodeURIComponent(data.userId || '')}`, { headers: { 'Authorization': `Bearer ${data.token}` }, signal: AbortSignal.timeout(5000) })
@@ -891,6 +914,12 @@ const controlServer = http.createServer((req, res) => {
       try {
         const data = JSON.parse(body || '{}')
         log.info('CONTROL', '/native/share/start', { userId: data.userId || config.userId, country: data.country || config.country })
+        if (config.userId && data.userId && config.userId !== data.userId) {
+          log.warn('CONTROL', '/native/share/start -- userId mismatch, rejecting', { existing: config.userId, incoming: data.userId })
+          res.writeHead(403, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'This desktop is signed in as a different user' }))
+          return
+        }
         config = { ...config, token: data.token ?? config.token, userId: data.userId ?? config.userId, country: data.country ?? config.country, trust: data.trust ?? config.trust, connectionSlots: clampSlots(data.slots ?? data.connectionSlots ?? config.connectionSlots), shareEnabled: true }
         ensureSlotStates()
         await pollTodayBytes()
