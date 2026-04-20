@@ -4,38 +4,88 @@ import { adminClient } from '@/lib/supabase/admin'
 
 const RELAY_SECRET = process.env.RELAY_SECRET ?? ''
 
-// ── PATCH: relay assigns provider to session ──────────────────────────────────
+function logSession(level: 'info' | 'warn' | 'error', message: string, context: Record<string, unknown>) {
+  const line = `[session/end] ${message} ${JSON.stringify(context)}`
+  if (level === 'error') console.error(line)
+  else if (level === 'warn') console.warn(line)
+  else console.info(line)
+}
+
 export async function PATCH(req: Request) {
   const secret = req.headers.get('x-relay-secret') ?? ''
   if (RELAY_SECRET && secret !== RELAY_SECRET) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
 
-  const { sessionId, providerUserId, providerKind: patchProviderKind } = await req.json().catch(() => ({}))
-  if (!sessionId || !providerUserId) {
-    return NextResponse.json({ error: 'sessionId and providerUserId required' }, { status: 400 })
+  const {
+    sessionId,
+    dbSessionId,
+    providerUserId,
+    providerKind,
+    targetHost,
+  } = await req.json().catch(() => ({}))
+
+  const resolvedSessionId = dbSessionId ?? sessionId ?? null
+  if (!resolvedSessionId || (!providerUserId && !targetHost)) {
+    return NextResponse.json(
+      { error: 'dbSessionId/sessionId plus providerUserId or targetHost required' },
+      { status: 400 },
+    )
   }
 
-  const updatePayload: Record<string, unknown> = { provider_id: providerUserId }
-  if (patchProviderKind) updatePayload.provider_kind = patchProviderKind
+  const updatePayload: Record<string, unknown> = {}
+  if (providerUserId) updatePayload.provider_id = providerUserId
+  if (providerKind) updatePayload.provider_kind = providerKind
+  if (targetHost) updatePayload.target_host = targetHost
 
-  await adminClient
+  const { error, count } = await adminClient
     .from('sessions')
-    .update(updatePayload)
-    .eq('id', sessionId)
-    .eq('status', 'active')
+    .update(updatePayload, { count: 'exact' })
+    .eq('id', resolvedSessionId)
+    .in('status', ['active', 'ended'])
 
-  await adminClient.rpc('finalize_session_accountability', {
-    p_session_id: sessionId,
-    p_provider_id: providerUserId,
+  if (error) {
+    logSession('error', 'PATCH update failed', {
+      sessionId,
+      dbSessionId,
+      resolvedSessionId,
+      providerUserId,
+      targetHost,
+      error: error.message,
+    })
+    return NextResponse.json({ error: 'Could not update session metadata' }, { status: 500 })
+  }
+
+  if (!count) {
+    logSession('warn', 'PATCH session row missing', {
+      sessionId,
+      dbSessionId,
+      resolvedSessionId,
+      providerUserId,
+      targetHost,
+    })
+  }
+
+  const { error: finalizeError } = await adminClient.rpc('finalize_session_accountability', {
+    p_session_id: resolvedSessionId,
+    p_provider_id: providerUserId ?? null,
     p_provider_country: null,
     p_bytes_used: 0,
+    p_target_host: targetHost ?? null,
   })
 
-  return NextResponse.json({ ok: true })
+  if (finalizeError) {
+    logSession('warn', 'PATCH accountability finalize failed', {
+      resolvedSessionId,
+      providerUserId,
+      targetHost,
+      error: finalizeError.message,
+    })
+  }
+
+  return NextResponse.json({ ok: true, updated: count ?? 0 })
 }
 
-// ── POST: end session ─────────────────────────────────────────────────────────
 export async function POST(req: Request) {
   const relaySecret = req.headers.get('x-relay-secret') ?? ''
   const isRelay = RELAY_SECRET !== '' && relaySecret === RELAY_SECRET
@@ -54,27 +104,48 @@ export async function POST(req: Request) {
     userId = user.id
   }
 
-  const { sessionId, bytesUsed = 0, providerUserId, requesterUserId, country, targetHost, providerKind } = await req.json()
+  const {
+    sessionId,
+    bytesUsed = 0,
+    providerUserId,
+    requesterUserId,
+    country,
+    targetHost,
+    providerKind,
+  } = await req.json().catch(() => ({}))
+
   if (!sessionId) return NextResponse.json({ error: 'sessionId is required' }, { status: 400 })
 
   const resolvedRequesterId = isRelay ? (requesterUserId ?? null) : userId
   const resolvedProviderId = providerUserId ?? null
 
-  const { data: session } = await adminClient
+  const { data: session, error: sessionLookupError } = await adminClient
     .from('sessions')
-    .select('provider_id, target_country, user_id, provider_kind')
+    .select('provider_id, provider_kind, target_country, target_host, user_id, status, bytes_used')
     .eq('id', sessionId)
-    .single()
+    .maybeSingle()
+
+  if (sessionLookupError) {
+    logSession('error', 'POST lookup failed', { sessionId, error: sessionLookupError.message })
+    return NextResponse.json({ error: 'Session not found' }, { status: 404 })
+  }
 
   const finalProviderId = resolvedProviderId ?? session?.provider_id ?? null
   const finalRequesterId = resolvedRequesterId ?? session?.user_id ?? null
   const finalCountry = country ?? session?.target_country ?? null
-  // Prefer caller-supplied providerKind, fall back to what was stored on the session row
   const resolvedProviderKind = providerKind ?? session?.provider_kind ?? null
+  const resolvedTargetHost = targetHost ?? session?.target_host ?? null
+
+  const sessionMetadataUpdate: Record<string, unknown> = {
+    provider_id: finalProviderId,
+    target_host: resolvedTargetHost,
+  }
+  if (resolvedProviderKind) sessionMetadataUpdate.provider_kind = resolvedProviderKind
 
   const { error, count } = await adminClient
     .from('sessions')
     .update({
+      ...sessionMetadataUpdate,
       status: 'ended',
       ended_at: new Date().toISOString(),
       bytes_used: bytesUsed,
@@ -82,35 +153,52 @@ export async function POST(req: Request) {
     .eq('id', sessionId)
     .eq('status', 'active')
 
-  if (error) return NextResponse.json({ error: 'Session not found' }, { status: 404 })
-  // Session was already ended by another caller (relay + browser race) — skip RPCs
-  if (count === 0) return NextResponse.json({ success: true })
+  if (error) {
+    logSession('error', 'POST end update failed', {
+      sessionId,
+      providerUserId,
+      targetHost,
+      error: error.message,
+    })
+    return NextResponse.json({ error: 'Session not found' }, { status: 404 })
+  }
 
-  // Run all DB updates in parallel
+  if (count === 0) {
+    const { error: metadataError } = await adminClient
+      .from('sessions')
+      .update(sessionMetadataUpdate)
+      .eq('id', sessionId)
+
+    if (metadataError) {
+      logSession('warn', 'POST metadata fallback failed', {
+        sessionId,
+        providerUserId,
+        targetHost,
+        error: metadataError.message,
+      })
+    }
+  }
+
+  const shouldApplyCounters = count !== 0
+
   await Promise.all([
-    // Increment requester bandwidth
-    bytesUsed > 0 && finalRequesterId
+    shouldApplyCounters && bytesUsed > 0 && finalRequesterId
       ? adminClient.rpc('increment_bandwidth', { p_user_id: finalRequesterId, p_bytes: bytesUsed })
       : Promise.resolve(),
 
-    // Credit provider bytes — skip for relay calls (desktop/CLI flush their own bytes via flushStats)
-    // Also skip for desktop/CLI providers even on browser-client calls to avoid double-credit
-    bytesUsed > 0 && finalProviderId && !isRelay && resolvedProviderKind !== 'desktop' && resolvedProviderKind !== 'cli'
+    shouldApplyCounters && bytesUsed > 0 && finalProviderId && !isRelay && resolvedProviderKind !== 'desktop' && resolvedProviderKind !== 'cli'
       ? adminClient.rpc('increment_bytes_shared', { p_user_id: finalProviderId, p_bytes: bytesUsed })
       : Promise.resolve(),
 
-    // Finalize accountability row
     adminClient.rpc('finalize_session_accountability', {
       p_session_id: sessionId,
       p_provider_id: finalProviderId,
       p_provider_country: finalCountry,
       p_bytes_used: bytesUsed,
-      p_target_host: targetHost ?? null,
+      p_target_host: resolvedTargetHost,
     }),
 
-    // Persist peer affinity — save provider userId as preferred for this requester+country
-    // This survives relay restarts and scales across multiple relay instances
-    finalRequesterId && finalProviderId && finalCountry
+    shouldApplyCounters && finalRequesterId && finalProviderId && finalCountry
       ? adminClient.rpc('set_preferred_provider', {
           p_user_id: finalRequesterId,
           p_country: finalCountry,
@@ -118,6 +206,18 @@ export async function POST(req: Request) {
         })
       : Promise.resolve(),
   ])
+
+  logSession('info', 'POST session finalized', {
+    sessionId,
+    relay: isRelay,
+    finalProviderId,
+    finalRequesterId,
+    finalCountry,
+    resolvedProviderKind,
+    resolvedTargetHost,
+    bytesUsed,
+    updatedActiveRow: count ?? 0,
+  })
 
   return NextResponse.json({ success: true })
 }

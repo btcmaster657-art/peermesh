@@ -7,6 +7,7 @@ const FILE_URL = `file://${path.join(__dirname, '../renderer/index.html').replac
 async function mockPeermesh(page, state) {
   await page.addInitScript((s) => {
     window.peermesh = {
+      version: '1.0.60',
       getState: () => Promise.resolve(s),
       toggleSharing: () => Promise.resolve({ running: !s.running }),
       signIn: () => Promise.resolve({ success: true }),
@@ -14,6 +15,12 @@ async function mockPeermesh(page, state) {
       openAuth: () => Promise.resolve(),
       openDashboard: () => Promise.resolve(),
       checkWebsiteAuth: () => Promise.resolve({ pending: true }),
+      setLaunchOnStartup: () => Promise.resolve({ success: true }),
+      setAutoShareOnLaunch: () => Promise.resolve({ success: true }),
+      setConnectionSlots: () => Promise.resolve({ success: true }),
+      getPrivateShare: () => Promise.resolve({ success: true, privateShare: null, expiryPreset: '24' }),
+      updatePrivateShare: () => Promise.resolve({ success: true, privateShare: null, expiryPreset: '24' }),
+      acceptProviderTerms: () => Promise.resolve({ success: true, accepted: true }),
     }
   }, state)
 }
@@ -50,8 +57,10 @@ test.describe('Main screen — not sharing', () => {
   test.beforeEach(async ({ page }) => {
     await mockPeermesh(page, {
       running: false,
-      config: { userId: 'user-123', country: 'NG', token: '***', trust: 50 },
+      config: { userId: 'user-123', country: 'NG', token: '***', trust: 50, launchOnStartup: false, autoShareOnLaunch: false, hasAcceptedProviderTerms: true },
       stats: { requestsHandled: 0, bytesServed: 0, connectedAt: null },
+      slots: { configured: 1, active: 0, statuses: [] },
+      connectionSlots: 1,
     })
     await page.goto(FILE_URL)
     // Wait for pollState to run and switch screens
@@ -83,6 +92,11 @@ test.describe('Main screen — not sharing', () => {
     await expect(page.locator('#btn-dashboard')).toBeVisible()
   })
 
+  test('startup toggles are visible', async ({ page }) => {
+    await expect(page.locator('#launch-startup-toggle')).toBeVisible()
+    await expect(page.locator('#auto-share-toggle')).toBeVisible()
+  })
+
   test('sign out button is visible', async ({ page }) => {
     await expect(page.locator('#btn-signout')).toBeVisible()
   })
@@ -94,15 +108,17 @@ test.describe('Main screen — sharing active', () => {
   test.beforeEach(async ({ page }) => {
     await mockPeermesh(page, {
       running: true,
-      config: { userId: 'user-123', country: 'NG', token: '***', trust: 50 },
+      config: { userId: 'user-123', country: 'NG', token: '***', trust: 50, launchOnStartup: true, autoShareOnLaunch: true, hasAcceptedProviderTerms: true },
       stats: { requestsHandled: 42, bytesServed: 1048576, connectedAt: new Date().toISOString() },
+      slots: { configured: 1, active: 1, statuses: [{ running: true }] },
+      connectionSlots: 1,
     })
     await page.goto(FILE_URL)
     await expect(page.locator('#main-screen')).toHaveClass(/active/, { timeout: 5000 })
   })
 
   test('status label shows SHARING with country', async ({ page }) => {
-    await expect(page.locator('#status-label')).toHaveText('SHARING — NG')
+    await expect(page.locator('#status-label')).toContainText('SHARING - NG')
   })
 
   test('status card has active class', async ({ page }) => {

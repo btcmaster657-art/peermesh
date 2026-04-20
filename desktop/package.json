@@ -1,11 +1,14 @@
 {
   "name": "peermesh-desktop",
-  "version": "1.0.57",
+  "version": "1.0.62",
   "description": "PeerMesh Desktop — Share your connection from the system tray",
   "author": "PeerMesh",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
+    "prebuild-win": "node ../scripts/generate-desktop-assets.mjs",
+    "prebuild-mac": "node ../scripts/generate-desktop-assets.mjs",
+    "prebuild-linux": "node ../scripts/generate-desktop-assets.mjs",
     "build-win": "electron-builder --win --x64",
     "build-mac": "electron-builder --mac",
     "build-linux": "electron-builder --linux --x64",
@@ -16,7 +19,8 @@
     "productName": "PeerMesh",
     "win": {
       "target": "nsis",
-      "artifactName": "PeerMesh-Setup-${version}.exe"
+      "artifactName": "PeerMesh-Setup-${version}.exe",
+      "icon": "assets/icon.ico"
     },
     "mac": {
       "target": "dmg",
@@ -34,7 +38,12 @@
       "perMachine": false,
       "runAfterFinish": true,
       "createDesktopShortcut": false,
-      "deleteAppDataOnUninstall": false,
+      "deleteAppDataOnUninstall": true,
+      "installerIcon": "assets/installerIcon.ico",
+      "uninstallerIcon": "assets/uninstallerIcon.ico",
+      "installerHeaderIcon": "assets/installerHeaderIcon.ico",
+      "installerSidebar": "assets/installerSidebar.bmp",
+      "uninstallerSidebar": "assets/uninstallerSidebar.bmp",
       "include": "assets/installer.nsh"
     },
     "files": [

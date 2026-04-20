@@ -26,6 +26,14 @@ export type DesktopState = {
   source?: 'desktop' | 'cli'  // legacy compat
   baseDeviceId?: string | null
   connectionSlots?: number
+  privateShareActive?: boolean
+  privateShare?: {
+    base_device_id: string
+    code: string
+    enabled: boolean
+    expires_at: string | null
+    active: boolean
+  } | null
   slots?: {
     configured: number
     active: number
@@ -43,9 +51,12 @@ export type DesktopState = {
   peer?: {                     // the other process if both are running
     available: boolean
     running: boolean
+    shareEnabled?: boolean
     where: 'desktop' | 'cli'
     version: string | null
     baseDeviceId?: string | null
+    privateShareActive?: boolean
+    privateShare?: DesktopState['privateShare']
     stats?: AgentHealth['stats'] | null
     slots?: DesktopState['slots'] | null
     connectionSlots?: number | null
@@ -81,18 +92,67 @@ export async function checkDesktop(): Promise<DesktopState> {
   }
   if (bRes.status === 'fulfilled' && bRes.value.ok) {
     const d = await bRes.value.json()
-    b = { available: true, running: !!d.running, where: d.where ?? 'cli', version: d.version ?? null, baseDeviceId: d.baseDeviceId ?? null, stats: d.stats ?? null, slots: d.slots ?? null, connectionSlots: d.connectionSlots ?? null }
+    b = {
+      available: true,
+      running: !!d.running,
+      shareEnabled: !!d.shareEnabled,
+      where: d.where ?? 'cli',
+      version: d.version ?? null,
+      baseDeviceId: d.baseDeviceId ?? null,
+      privateShareActive: !!d.privateShareActive,
+      privateShare: d.privateShare ?? null,
+      stats: d.stats ?? null,
+      slots: d.slots ?? null,
+      connectionSlots: d.connectionSlots ?? null,
+    }
     // If peer is the active sharer, promote its stats to the top-level
-    if (b.running && d.stats) {
+    if (b.running) {
       if (!a) a = { available: false, running: false, shareEnabled: false, configured: false, country: null, userId: null, version: null, peer: null }
-      a = { ...a, stats: d.stats, slots: d.slots ?? a.slots, connectionSlots: d.connectionSlots ?? a.connectionSlots }
+      a = {
+        ...a,
+        where: d.where ?? a.where,
+        source: d.source ?? d.where ?? a.source,
+        stats: d.stats ?? a.stats,
+        slots: d.slots ?? a.slots,
+        connectionSlots: d.connectionSlots ?? a.connectionSlots,
+        baseDeviceId: d.baseDeviceId ?? a.baseDeviceId,
+        privateShareActive: !!(d.privateShareActive ?? a.privateShareActive),
+        privateShare: d.privateShare ?? a.privateShare ?? null,
+      }
     }
   }
 
   if (!a) return notAvailable
 
   const isSharing = !!a.running || !!(b?.running)
-  return { ...a, running: isSharing, shareEnabled: isSharing, peer: b }
+  const shareEnabled = !!a.shareEnabled || !!a.running || !!(b?.shareEnabled) || !!(b?.running)
+  return { ...a, running: isSharing, shareEnabled, peer: b }
+}
+
+async function postConnectionSlots(url: string, slots: number): Promise<boolean> {
+  try {
+    const res = await fetch(`${url}/native/connection-slots`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ slots }),
+      signal: AbortSignal.timeout(2500),
+    })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+export async function setDesktopConnectionSlots(slots: number): Promise<{ ok: boolean; state?: DesktopState; error?: string }> {
+  const nextSlots = Math.max(1, Math.min(32, Number.parseInt(String(slots), 10) || 1))
+  const [primary, peer] = await Promise.all([
+    postConnectionSlots(AGENT_URL, nextSlots),
+    postConnectionSlots(PEER_URL, nextSlots),
+  ])
+  if (!primary && !peer) {
+    return { ok: false, error: 'Could not reach desktop or CLI helper' }
+  }
+  return { ok: true, state: await checkDesktop() }
 }
 
 export async function syncDesktopAuth(payload: { token: string; userId: string; country: string; trust: number }): Promise<{ ok: boolean; error?: string }> {

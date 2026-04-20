@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
-import { checkDesktop, syncDesktopAuth, startDesktopSharing, stopDesktopSharing } from '@/lib/agent-client'
+import { checkDesktop, syncDesktopAuth, startDesktopSharing, stopDesktopSharing, setDesktopConnectionSlots } from '@/lib/agent-client'
 import { COUNTRIES, formatBytes, getFlagForCountry } from '@/lib/utils'
 import type { Profile, PeerAvailability } from '@/lib/types'
 import type { DesktopState } from '@/lib/agent-client'
@@ -65,6 +65,7 @@ export default function Dashboard() {
   const [privateExpiryHours, setPrivateExpiryHours] = useState('24')
   const [privateShareSaving, setPrivateShareSaving] = useState(false)
   const [privateShareStoppedSharing, setPrivateShareStoppedSharing] = useState(false)
+  const [slotUpdating, setSlotUpdating] = useState(false)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [shareError, setShareError] = useState<string | null>(null)
@@ -133,7 +134,7 @@ export default function Dashboard() {
                 setShareError(authResult.error)
               }
             }
-            setIsSharing(dt.running)
+            setIsSharing(!!(dt.running || dt.shareEnabled))
             if (dt.stats) setSharingStats({ bytesServed: dt.stats.bytesServed, requestsHandled: dt.stats.requestsHandled })
           }
         } else if (data.is_sharing) {
@@ -190,10 +191,11 @@ export default function Dashboard() {
       tick++
       const dt = await checkDesktop()
       setDesktop(dt)
+      const currentBaseDeviceId = dt.baseDeviceId ?? dt.peer?.baseDeviceId ?? null
       const { data: { user } } = await supabase.auth.getUser()
       const desktopOwnedByOther = dt.available && dt.userId && user && dt.userId !== user.id
       if (dt.available && !desktopOwnedByOther) {
-        setIsSharing(dt.running)
+        setIsSharing(!!(dt.running || dt.shareEnabled))
         if (dt.stats) setSharingStats({ bytesServed: dt.stats.bytesServed, requestsHandled: dt.stats.requestsHandled })
       } else {
         setIsSharing(false)
@@ -216,6 +218,13 @@ export default function Dashboard() {
             setPeerCounts(counts)
           })
           .catch(() => {})
+      }
+      if (tick % 2 === 0) {
+        if (currentBaseDeviceId && !desktopOwnedByOther) {
+          loadPrivateShare(currentBaseDeviceId).catch(() => {})
+        } else {
+          setPrivateShare(null)
+        }
       }
     }, 3000)
   }
@@ -264,6 +273,33 @@ export default function Dashboard() {
       setShareError(err instanceof Error ? err.message : 'Could not update private sharing')
     } finally {
       setPrivateShareSaving(false)
+    }
+  }
+
+  async function updateConnectionSlots(nextSlots: number) {
+    if (slotUpdating) return
+    if (!desktopAvailable && !cliRunning && !desktopRunning) {
+      setShareError('Desktop or CLI not running. Start a local helper before changing connection slots.')
+      return
+    }
+
+    setSlotUpdating(true)
+    setShareError(null)
+    try {
+      const result = await setDesktopConnectionSlots(nextSlots)
+      if (!result.ok || !result.state) throw new Error(result.error ?? 'Could not update connection slots')
+      setDesktop(result.state)
+      setIsSharing(result.state.running)
+      if (result.state.stats) {
+        setSharingStats({
+          bytesServed: result.state.stats.bytesServed,
+          requestsHandled: result.state.stats.requestsHandled,
+        })
+      }
+    } catch (err: unknown) {
+      setShareError(err instanceof Error ? err.message : 'Could not update connection slots')
+    } finally {
+      setSlotUpdating(false)
     }
   }
 
@@ -436,6 +472,8 @@ export default function Dashboard() {
   const showExtBanner          = !extInstalled || extUpdateAvailable
   const helperBaseDeviceId = desktop?.baseDeviceId ?? desktop?.peer?.baseDeviceId ?? null
   const helperSlots = desktop?.slots ?? desktop?.peer?.slots ?? null
+  const slotDisplayCount = helperSlots?.configured ?? desktop?.connectionSlots ?? desktop?.peer?.connectionSlots ?? 1
+  const slotDisplayActive = helperSlots?.active ?? 0
   const privateConnectReady = !selectedCountry && !!privateCodeInput.trim()
 
   // Detect OS for CLI docs default tab
@@ -701,14 +739,52 @@ export default function Dashboard() {
           </button>
         </div>
 
-        {helperSlots && (
-          <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid var(--border)' }}>
-            <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--muted)', letterSpacing: '0.5px', marginBottom: '4px' }}>CONNECTION SLOTS</div>
-            <div style={{ fontSize: '11px', color: 'var(--muted)' }}>
-              {helperSlots.active} / {helperSlots.configured} active{helperSlots.warning ? ` — ${helperSlots.warning}` : ''}
+        <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid var(--border)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap' }}>
+            <div>
+              <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--muted)', letterSpacing: '0.5px', marginBottom: '4px' }}>CONNECTION SLOTS</div>
+              <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginBottom: '8px' }}>
+                {Array.from({ length: slotDisplayCount }, (_, index) => {
+                  const running = !!helperSlots?.statuses?.[index]?.running || index < slotDisplayActive
+                  return (
+                    <span
+                      key={`slot-dot-${index}`}
+                      style={{
+                        width: '10px',
+                        height: '10px',
+                        borderRadius: '999px',
+                        background: running ? 'var(--accent)' : 'var(--border)',
+                        boxShadow: running ? '0 0 8px rgba(0,255,136,0.35)' : 'none',
+                      }}
+                    />
+                  )
+                })}
+              </div>
+              <div style={{ fontSize: '11px', color: 'var(--muted)' }}>
+                {slotDisplayActive} / {slotDisplayCount} active{helperSlots?.warning ? ` — ${helperSlots.warning}` : ''}
+              </div>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
+              <button
+                onClick={() => updateConnectionSlots(slotDisplayCount - 1)}
+                disabled={slotUpdating || slotDisplayCount <= 1 || (!desktopAvailable && !cliRunning && !desktopRunning)}
+                style={{ width: '30px', height: '30px', borderRadius: '8px', border: '1px solid var(--border)', background: 'var(--bg)', color: slotDisplayCount <= 1 ? 'var(--muted)' : 'var(--text)', cursor: slotUpdating || slotDisplayCount <= 1 || (!desktopAvailable && !cliRunning && !desktopRunning) ? 'not-allowed' : 'pointer', fontFamily: 'var(--font-geist-mono)', fontSize: '16px' }}
+              >
+                -
+              </button>
+              <div style={{ minWidth: '28px', textAlign: 'center', fontFamily: 'var(--font-geist-mono)', fontSize: '12px', color: 'var(--text)' }}>
+                {slotUpdating ? '...' : slotDisplayCount}
+              </div>
+              <button
+                onClick={() => updateConnectionSlots(slotDisplayCount + 1)}
+                disabled={slotUpdating || slotDisplayCount >= 32 || (!desktopAvailable && !cliRunning && !desktopRunning)}
+                style={{ width: '30px', height: '30px', borderRadius: '8px', border: '1px solid var(--border)', background: 'var(--bg)', color: slotDisplayCount >= 32 ? 'var(--muted)' : 'var(--text)', cursor: slotUpdating || slotDisplayCount >= 32 || (!desktopAvailable && !cliRunning && !desktopRunning) ? 'not-allowed' : 'pointer', fontFamily: 'var(--font-geist-mono)', fontSize: '16px' }}
+              >
+                +
+              </button>
             </div>
           </div>
-        )}
+        </div>
 
         {/* Daily limit setter — always visible so user can set before sharing */}
         <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px' }}>

@@ -1,6 +1,10 @@
 // background/service-worker.js - PeerMesh Extension Service Worker
 
 const APP_URL = 'https://peermesh-beta.vercel.app'
+const EXTENSION_VERSION = chrome.runtime.getManifest().version
+const BLOCKED_HOSTS = [/\.onion$/i, /^smtp\./i, /^mail\./i, /torrent/i]
+const PRIVATE_HOSTS = [/^localhost$/i, /^127\./, /^10\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./]
+const FORBIDDEN_REQUEST_HEADERS = new Set(['host', 'content-length', 'connection', 'proxy-authorization', 'proxy-connection', 'transfer-encoding'])
 
 let _liveRelays = null
 let _liveRelaysFetchedAt = 0
@@ -27,9 +31,35 @@ let supabaseToken = null
 let desktopToken = null
 let sharingUserId = null
 let sharingCountry = null
+let sharingMode = null
 let heartbeatInterval = null
+let providerWs = null
+let providerShareEnabled = false
+let providerRegistered = false
+let providerReconnectDelay = 2000
+let providerReconnectTimer = null
+let providerPeerId = null
+let providerStats = { bytesServed: 0, requestsHandled: 0, connectedAt: null, peerId: null }
+let providerPrivateShare = null
 
 const pendingRequests = new Map()
+
+async function getExtensionIdentity() {
+  const stored = await chrome.storage.local.get(['extId'])
+  const extId = stored.extId ?? null
+  if (!extId) return { extId: null, baseDeviceId: null, deviceId: null }
+  const baseDeviceId = `ext_${extId}`
+  return {
+    extId,
+    baseDeviceId,
+    deviceId: `${baseDeviceId}_slot_0`,
+  }
+}
+
+function isAllowedHost(hostname) {
+  return !BLOCKED_HOSTS.some((pattern) => pattern.test(hostname)) &&
+    !PRIVATE_HOSTS.some((pattern) => pattern.test(hostname))
+}
 
 // ── Logger ────────────────────────────────────────────────────────────────────
 
@@ -73,22 +103,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             sharingCountry = msg.country
             await chrome.storage.local.set({ supabaseToken, desktopToken, sharingCountry, sharingUserId })
           }
-          const result = await startDesktopSharing(msg)
-          if (result.success) startExtensionHeartbeat()
+          const result = await startSharingTransport(msg)
           sendResponse(result)
           break
         }
         case 'STOP_SHARING': {
-          stopExtensionHeartbeat()
-          const result = await stopDesktopSharing()
+          const result = await stopSharingTransport()
+          sendResponse(result)
+          break
+        }
+        case 'SET_CONNECTION_SLOTS': {
+          const result = await setHelperConnectionSlots(msg.slots)
           sendResponse(result)
           break
         }
         case 'GET_STATUS': {
-          const helper = await getDesktopHelperStatus()
+          const helper = await getSharingStatus()
           const isSharing = helper.available && (helper.running || helper.shareEnabled)
           log('info', 'GET_STATUS helper.available=' + helper.available + ' running=' + helper.running + ' isSharing=' + isSharing)
-          await chrome.storage.local.set({ isSharing, helper })
+          await chrome.storage.local.set({ isSharing, helper, sharingMode })
           sendResponse({ connected: !!currentSession, session: currentSession, isSharing, helper })
           break
         }
@@ -131,39 +164,237 @@ function proxyFetch(url, { method = 'GET', headers = {}, body = null } = {}) {
 
 // ── Extension heartbeat ───────────────────────────────────────────────────────
 
-function startExtensionHeartbeat() {
-  stopExtensionHeartbeat()
-  sendExtensionHeartbeat()
-  heartbeatInterval = setInterval(sendExtensionHeartbeat, 30_000)
+function getShareAuthToken() {
+  return desktopToken || supabaseToken || null
 }
 
-function stopExtensionHeartbeat() {
-  if (heartbeatInterval) { clearInterval(heartbeatInterval); heartbeatInterval = null }
-  const token = desktopToken || supabaseToken
+async function loadSharingContext() {
+  const stored = await chrome.storage.local.get(['user', 'supabaseToken', 'desktopToken', 'sharingCountry', 'sharingUserId', 'sharingMode', 'providerPrivateShare'])
+  if (!supabaseToken) supabaseToken = stored.supabaseToken ?? stored.user?.supabaseToken ?? null
+  if (!desktopToken) desktopToken = stored.desktopToken ?? stored.user?.token ?? null
+  if (!sharingCountry) sharingCountry = stored.sharingCountry ?? stored.user?.country_code ?? stored.user?.country ?? null
+  if (!sharingUserId) sharingUserId = stored.sharingUserId ?? stored.user?.id ?? null
+  if (stored.sharingMode !== undefined) sharingMode = stored.sharingMode ?? null
+  if (stored.providerPrivateShare !== undefined) providerPrivateShare = stored.providerPrivateShare ?? null
+  return stored
+}
+
+function syncActionBadge() {
+  if (currentSession) {
+    chrome.action.setBadgeText({ text: 'ON' })
+    chrome.action.setBadgeBackgroundColor({ color: '#00ff88' })
+    return
+  }
+  if (sharingMode) {
+    chrome.action.setBadgeText({ text: 'SHR' })
+    chrome.action.setBadgeBackgroundColor({ color: '#00ff88' })
+    return
+  }
+  chrome.action.setBadgeText({ text: '' })
+}
+
+function clearProviderReconnect() {
+  if (!providerReconnectTimer) return
+  clearTimeout(providerReconnectTimer)
+  providerReconnectTimer = null
+}
+
+function sanitizeFetchHeaders(headers = {}) {
+  const out = {}
+  for (const [rawKey, rawValue] of Object.entries(headers || {})) {
+    const key = String(rawKey).trim().toLowerCase()
+    if (!key) continue
+    if (FORBIDDEN_REQUEST_HEADERS.has(key)) continue
+    if (key === 'cookie' || key === 'origin' || key === 'referer') continue
+    if (key.startsWith('sec-')) continue
+    if (rawValue == null) continue
+    out[key] = Array.isArray(rawValue) ? rawValue.join(', ') : String(rawValue)
+  }
+  return out
+}
+
+async function handleProviderFetch(sessionId, request) {
+  const { requestId, url, method = 'GET', headers = {}, body = null } = request ?? {}
+  try {
+    const parsed = new URL(url)
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      return { requestId, status: 400, headers: {}, body: '', error: 'Unsupported protocol' }
+    }
+    if (!isAllowedHost(parsed.hostname)) {
+      return { requestId, status: 403, headers: {}, body: '', error: 'Blocked host' }
+    }
+
+    providerStats.requestsHandled += 1
+    const response = await fetch(url, {
+      method,
+      headers: sanitizeFetchHeaders(headers),
+      body: method === 'GET' || method === 'HEAD' ? undefined : body ?? undefined,
+      redirect: 'follow',
+      signal: AbortSignal.timeout(20_000),
+    })
+    const responseBody = method === 'HEAD' ? '' : await response.text()
+    const responseHeaders = {}
+    response.headers.forEach((value, key) => {
+      if (!['content-encoding', 'content-length', 'connection', 'keep-alive', 'transfer-encoding'].includes(key)) {
+        responseHeaders[key] = value
+      }
+    })
+    providerStats.bytesServed += responseBody.length
+    log('info', `[PROVIDER] session=${sessionId?.slice(0, 8) ?? 'unknown'} ${method} ${parsed.hostname} status=${response.status} bytes=${responseBody.length}`)
+    return {
+      requestId,
+      status: response.status,
+      headers: responseHeaders,
+      body: responseBody,
+      finalUrl: response.url,
+    }
+  } catch (error) {
+    log('error', `[PROVIDER] fetch failed session=${sessionId?.slice(0, 8) ?? 'unknown'} url=${url} err=${error.message}`)
+    return { requestId, status: 502, headers: {}, body: '', error: error.message }
+  }
+}
+
+async function getStandaloneProviderStatus() {
+  await loadSharingContext()
+  const { baseDeviceId, deviceId } = await getExtensionIdentity()
+  const configured = !!(sharingUserId && sharingCountry && baseDeviceId)
+  const active = providerRegistered ? 1 : 0
+  return {
+    available: !!baseDeviceId,
+    source: 'extension',
+    running: providerRegistered,
+    shareEnabled: providerShareEnabled,
+    configured,
+    country: sharingCountry ?? null,
+    userId: sharingUserId ?? null,
+    version: EXTENSION_VERSION,
+    baseDeviceId,
+    deviceId,
+    connectionSlots: 1,
+    slots: {
+      configured: 1,
+      active,
+      warning: providerShareEnabled ? 'Standalone extension mode: single slot, web requests only.' : null,
+    },
+    stats: {
+      ...providerStats,
+      activeSlots: active,
+      configuredSlots: 1,
+      warning: providerShareEnabled ? 'Standalone extension mode: single slot, web requests only.' : null,
+    },
+  }
+}
+
+async function persistSharingState(helperOverride = null) {
+  const helper = helperOverride ?? await getSharingStatus()
+  const isSharing = !!(helper?.available && (helper.running || helper.shareEnabled))
+  await chrome.storage.local.set({
+    isSharing,
+    helper,
+    sharingMode,
+    sharingCountry,
+    sharingUserId,
+  })
+  syncActionBadge()
+  return helper
+}
+
+function startExtensionHeartbeat() {
+  stopExtensionHeartbeat(false)
+  void sendExtensionHeartbeat()
+  heartbeatInterval = setInterval(() => {
+    void sendExtensionHeartbeat()
+  }, 30_000)
+}
+
+function stopExtensionHeartbeat(removeDevice = true) {
+  if (heartbeatInterval) {
+    clearInterval(heartbeatInterval)
+    heartbeatInterval = null
+  }
+  if (!removeDevice) return
+  const token = getShareAuthToken()
   if (!token || !sharingUserId) return
-  chrome.storage.local.get(['extId'], ({ extId }) => {
-    if (!extId) return
+  void getExtensionIdentity().then(({ deviceId }) => {
+    if (!deviceId) return
     fetch(`${APP_URL}/api/user/sharing`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-      body: JSON.stringify({ device_id: extId }),
+      body: JSON.stringify({ device_id: deviceId }),
     }).catch(() => {})
   })
 }
 
-function sendExtensionHeartbeat() {
-  const token = desktopToken || supabaseToken
+async function sendExtensionHeartbeat() {
+  if (sharingMode !== 'extension' || !providerShareEnabled) return
+  await loadSharingContext()
+  const token = getShareAuthToken()
   if (!token || !sharingCountry) return
-  chrome.storage.local.get(['extId'], ({ extId }) => {
-    if (!extId) return
-    fetch(`${APP_URL}/api/user/sharing`, {
+  const { deviceId } = await getExtensionIdentity()
+  if (!deviceId) return
+  try {
+    const response = await fetch(`${APP_URL}/api/user/sharing`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-      body: JSON.stringify({ device_id: `ext_${extId}`, country: sharingCountry }),
+      body: JSON.stringify({ device_id: deviceId, country: sharingCountry }),
     })
-      .then(r => { if (!r.ok) r.json().then(b => log('warn', `[HEARTBEAT] PUT failed status=${r.status} body=${JSON.stringify(b)}`)) })
-      .catch(e => log('error', `[HEARTBEAT] PUT error: ${e.message}`))
-  })
+    if (response.status === 401 || response.status === 403) {
+      log('warn', `[HEARTBEAT] auth rejected status=${response.status} - stopping standalone provider`)
+      await stopStandaloneProvider({ clearMode: true, removeDevice: false })
+      return
+    }
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}))
+      log('warn', `[HEARTBEAT] PUT failed status=${response.status} body=${JSON.stringify(body)}`)
+    }
+  } catch (error) {
+    log('error', `[HEARTBEAT] PUT error: ${error.message}`)
+  }
+}
+
+async function syncProviderPrivateShareState({ source = 'sync', stopOnToggle = false } = {}) {
+  await loadSharingContext()
+  const token = getShareAuthToken()
+  const { baseDeviceId } = await getExtensionIdentity()
+  if (!token || !baseDeviceId) {
+    providerPrivateShare = null
+    return null
+  }
+  try {
+    const response = await fetch(`${APP_URL}/api/user/sharing?baseDeviceId=${encodeURIComponent(baseDeviceId)}`, {
+      headers: { 'Authorization': `Bearer ${token}` },
+      signal: AbortSignal.timeout(5000),
+    })
+    if (response.status === 401 || response.status === 403) {
+      log('warn', `[PRIVATE] state sync rejected status=${response.status}`)
+      if (providerShareEnabled && sharingMode === 'extension') {
+        await stopStandaloneProvider({ clearMode: true, removeDevice: false })
+      }
+      return null
+    }
+    if (!response.ok) {
+      log('warn', `[PRIVATE] state sync failed status=${response.status}`)
+      return providerPrivateShare
+    }
+
+    const data = await response.json()
+    const previousEnabled = !!providerPrivateShare?.enabled
+    const hasPreviousState = providerPrivateShare !== null
+    const nextPrivateShare = data.private_share ?? null
+    const nextEnabled = !!nextPrivateShare?.enabled
+    providerPrivateShare = nextPrivateShare
+    await chrome.storage.local.set({ providerPrivateShare })
+
+    if (stopOnToggle && hasPreviousState && previousEnabled !== nextEnabled && providerShareEnabled && sharingMode === 'extension') {
+      log('info', `[PRIVATE] sharing mode changed via ${source} - stopping standalone provider until manually restarted`)
+      await stopStandaloneProvider({ clearMode: false, removeDevice: true })
+    }
+
+    return providerPrivateShare
+  } catch (error) {
+    log('warn', `[PRIVATE] state sync error via ${source}: ${error.message}`)
+    return providerPrivateShare
+  }
 }
 
 // ── Native messaging / desktop detection ─────────────────────────────────────
@@ -187,6 +418,7 @@ async function getDesktopHelperStatusHttp() {
       const data = await res.json()
       primary = {
         available: true,
+        source: data.where ?? 'desktop',
         running: !!data.running,
         shareEnabled: !!data.shareEnabled,
         configured: !!data.configured,
@@ -194,6 +426,8 @@ async function getDesktopHelperStatusHttp() {
         userId: data.userId ?? null,
         version: data.version ?? null,
         baseDeviceId: data.baseDeviceId ?? null,
+        privateShareActive: !!data.privateShareActive,
+        privateShare: data.privateShare ?? null,
         connectionSlots: data.connectionSlots ?? null,
         slots: data.slots ?? null,
         stats: data.stats ?? null,
@@ -214,9 +448,23 @@ async function getDesktopHelperStatusHttp() {
   // If peer is the active sharer, use its stats for live display
   const stats = (peerRunning && peerState?.stats) ? peerState.stats : (primary.stats ?? null)
   const activeBaseDeviceId = peerRunning ? (peerState?.baseDeviceId ?? primary.baseDeviceId ?? null) : primary.baseDeviceId
+  const activeSource = peerRunning ? (peerState?.where ?? peerState?.source ?? primary.source ?? 'desktop') : (primary.source ?? 'desktop')
   const activeSlots = peerRunning ? (peerState?.slots ?? primary.slots ?? null) : primary.slots
   const activeConnectionSlots = peerRunning ? (peerState?.connectionSlots ?? primary.connectionSlots ?? null) : primary.connectionSlots
-  return { ...primary, running: eitherRunning, shareEnabled: eitherRunning || primary.shareEnabled, baseDeviceId: activeBaseDeviceId, slots: activeSlots, connectionSlots: activeConnectionSlots, stats }
+  const activePrivateShare = peerRunning ? (peerState?.privateShare ?? primary.privateShare ?? null) : (primary.privateShare ?? null)
+  const activePrivateShareActive = peerRunning ? !!(peerState?.privateShareActive ?? primary.privateShareActive) : !!primary.privateShareActive
+  return {
+    ...primary,
+    source: activeSource,
+    running: eitherRunning,
+    shareEnabled: eitherRunning || primary.shareEnabled,
+    baseDeviceId: activeBaseDeviceId,
+    privateShareActive: activePrivateShareActive,
+    privateShare: activePrivateShare,
+    slots: activeSlots,
+    connectionSlots: activeConnectionSlots,
+    stats,
+  }
 }
 
 async function getDesktopHelperStatus() {
@@ -226,6 +474,7 @@ async function getDesktopHelperStatus() {
     const response = await sendNativeMessage({ type: 'status' })
     return {
       available: !!response.success,
+      source: response.where ?? 'desktop',
       running: !!response.running,
       shareEnabled: !!response.shareEnabled,
       configured: !!response.configured,
@@ -233,12 +482,14 @@ async function getDesktopHelperStatus() {
       userId: response.userId ?? null,
       version: response.version ?? null,
       baseDeviceId: response.baseDeviceId ?? null,
+      privateShareActive: !!response.privateShareActive,
+      privateShare: response.privateShare ?? null,
       connectionSlots: response.connectionSlots ?? null,
       slots: response.slots ?? null,
       stats: response.stats ?? null,
     }
   } catch {
-    return { available: false, running: false, shareEnabled: false, configured: false, country: null, userId: null, version: null }
+    return { available: false, source: 'desktop', running: false, shareEnabled: false, configured: false, country: null, userId: null, version: null }
   }
 }
 
@@ -258,6 +509,7 @@ async function startDesktopSharing({ token, userId, country, trust }) {
       const data = await res.json()
       const helper = {
         available: true,
+        source: data.where ?? 'desktop',
         running: !!data.running,
         shareEnabled: !!data.shareEnabled,
         configured: !!data.configured,
@@ -265,6 +517,8 @@ async function startDesktopSharing({ token, userId, country, trust }) {
         userId: data.userId ?? userId ?? null,
         version: data.version ?? null,
         baseDeviceId: data.baseDeviceId ?? null,
+        privateShareActive: !!data.privateShareActive,
+        privateShare: data.privateShare ?? null,
         connectionSlots: data.connectionSlots ?? null,
         slots: data.slots ?? null,
         stats: data.stats ?? null,
@@ -281,11 +535,12 @@ async function startDesktopSharing({ token, userId, country, trust }) {
       return {
         success: false,
         error: `Desktop helper required. Download from: ${APP_URL}/api/desktop-download`,
-        helper: { available: false, running: false, shareEnabled: false, configured: false, country: null, userId: null, version: null },
+        helper: { available: false, source: 'desktop', running: false, shareEnabled: false, configured: false, country: null, userId: null, version: null },
       }
     }
     const helper = {
       available: true,
+      source: response.where ?? 'desktop',
       running: !!response.running,
       shareEnabled: !!response.shareEnabled,
       configured: !!response.configured,
@@ -293,6 +548,8 @@ async function startDesktopSharing({ token, userId, country, trust }) {
       userId: response.userId ?? userId ?? null,
       version: response.version ?? null,
       baseDeviceId: response.baseDeviceId ?? null,
+      privateShareActive: !!response.privateShareActive,
+      privateShare: response.privateShare ?? null,
       connectionSlots: response.connectionSlots ?? null,
       slots: response.slots ?? null,
       stats: response.stats ?? null,
@@ -304,24 +561,39 @@ async function startDesktopSharing({ token, userId, country, trust }) {
     return {
       success: false,
       error: `Desktop helper required for full-browser sharing. Download: ${APP_URL}/api/desktop-download`,
-      helper: { available: false, running: false, shareEnabled: false, configured: false, country: null, userId: null, version: null },
+      helper: { available: false, source: 'desktop', running: false, shareEnabled: false, configured: false, country: null, userId: null, version: null },
     }
   }
 }
 
 async function stopDesktopSharing() {
+  const stopPrimary = fetch(`http://127.0.0.1:${CONTROL_PORT}/native/share/stop`, {
+    method: 'POST',
+    signal: AbortSignal.timeout(4000),
+  }).then(async (res) => {
+    if (!res.ok) return null
+    return await res.json().catch(() => null)
+  }).catch(() => null)
+
+  const stopPeer = fetch(`http://127.0.0.1:${PEER_PORT}/native/share/stop`, {
+    method: 'POST',
+    signal: AbortSignal.timeout(3000),
+  }).then(async (res) => {
+    if (!res.ok) return null
+    return await res.json().catch(() => null)
+  }).catch(() => null)
+
   try {
-    const res = await fetch(`http://127.0.0.1:${CONTROL_PORT}/native/share/stop`, {
-      method: 'POST',
-      signal: AbortSignal.timeout(4000),
-    })
-    if (res.ok) {
-      const data = await res.json()
+    const [primaryData, peerData] = await Promise.all([stopPrimary, stopPeer])
+    const data = primaryData ?? peerData
+    if (data) {
       const helper = {
-        available: true, running: !!data.running, shareEnabled: false,
+        available: true, source: data.where ?? 'desktop', running: !!data.running, shareEnabled: false,
         configured: !!data.configured, country: data.country ?? null,
         userId: data.userId ?? null, version: data.version ?? null,
         baseDeviceId: data.baseDeviceId ?? null,
+        privateShareActive: !!data.privateShareActive,
+        privateShare: data.privateShare ?? null,
         connectionSlots: data.connectionSlots ?? null,
         slots: data.slots ?? null,
         stats: data.stats ?? null,
@@ -334,10 +606,12 @@ async function stopDesktopSharing() {
   try {
     const response = await sendNativeMessage({ type: 'stop_sharing' })
     const helper = {
-      available: true, running: !!response.running, shareEnabled: false,
+      available: true, source: response.where ?? 'desktop', running: !!response.running, shareEnabled: false,
       configured: !!response.configured, country: response.country ?? null,
       userId: response.userId ?? null, version: response.version ?? null,
       baseDeviceId: response.baseDeviceId ?? null,
+      privateShareActive: !!response.privateShareActive,
+      privateShare: response.privateShare ?? null,
       connectionSlots: response.connectionSlots ?? null,
       slots: response.slots ?? null,
       stats: response.stats ?? null,
@@ -351,6 +625,265 @@ async function stopDesktopSharing() {
 }
 
 // ── Relay connection ──────────────────────────────────────────────────────────
+
+function scheduleProviderReconnect(reason) {
+  if (sharingMode !== 'extension' || !providerShareEnabled) return
+  clearProviderReconnect()
+  const delay = providerReconnectDelay
+  providerReconnectTimer = setTimeout(() => {
+    providerReconnectTimer = null
+    void connectStandaloneProvider().catch((error) => {
+      log('warn', `[PROVIDER] reconnect failed reason=${reason} err=${error.message}`)
+      scheduleProviderReconnect('retry')
+    })
+  }, delay)
+  providerReconnectDelay = Math.min(providerReconnectDelay * 2, 30_000)
+  log('warn', `[PROVIDER] reconnect scheduled in ${delay}ms (${reason})`)
+}
+
+async function connectStandaloneProvider() {
+  await loadSharingContext()
+  if (sharingMode !== 'extension' || !providerShareEnabled) return
+  const token = getShareAuthToken()
+  if (!token || !sharingUserId || !sharingCountry) {
+    throw new Error('Missing sharing credentials for standalone mode')
+  }
+  if (providerWs && (providerWs.readyState === WebSocket.OPEN || providerWs.readyState === WebSocket.CONNECTING)) {
+    return
+  }
+
+  const { baseDeviceId, deviceId } = await getExtensionIdentity()
+  if (!baseDeviceId || !deviceId) throw new Error('Extension identity is missing')
+
+  const relays = await getLiveRelays()
+  const relay = relays[0]
+  clearProviderReconnect()
+  providerWs = new WebSocket(relay)
+  providerRegistered = false
+
+  return await new Promise((resolve, reject) => {
+    let settled = false
+
+    const settle = (fn, value) => {
+      if (settled) return
+      settled = true
+      fn(value)
+    }
+
+    providerWs.onopen = () => {
+      log('info', `[PROVIDER] standalone WS open relay=${relay}`)
+      providerWs.send(JSON.stringify({
+        type: 'register_provider',
+        userId: sharingUserId,
+        country: sharingCountry,
+        trustScore: 50,
+        agentMode: true,
+        providerKind: 'extension',
+        supportsHttp: true,
+        supportsTunnel: false,
+        deviceId,
+        baseDeviceId,
+      }))
+    }
+
+    providerWs.onmessage = async (event) => {
+      const msg = JSON.parse(event.data)
+      if (msg.type !== 'pong') log('info', `[PROVIDER] msg=${msg.type}${msg.sessionId ? ' session=' + msg.sessionId.slice(0, 8) : ''}`)
+
+      if (msg.type === 'registered') {
+        providerRegistered = true
+        providerPeerId = msg.peerId ?? null
+        providerReconnectDelay = 2000
+        providerStats.connectedAt = new Date().toISOString()
+        providerStats.peerId = providerPeerId
+        startExtensionHeartbeat()
+        await persistSharingState()
+        settle(resolve, undefined)
+        return
+      }
+
+      if (msg.type === 'session_request') {
+        providerWs?.send(JSON.stringify({ type: 'agent_ready', sessionId: msg.sessionId }))
+        return
+      }
+
+      if (msg.type === 'proxy_request') {
+        const response = await handleProviderFetch(msg.sessionId, msg.request)
+        if (providerWs?.readyState === WebSocket.OPEN) {
+          providerWs.send(JSON.stringify({ type: 'proxy_response', sessionId: msg.sessionId, response }))
+        }
+        await persistSharingState()
+        return
+      }
+
+      if (msg.type === 'error') {
+        log('warn', `[PROVIDER] relay error: ${msg.message}`)
+        providerWs?.close(1000)
+      }
+    }
+
+    providerWs.onerror = () => {
+      settle(reject, new Error('Standalone provider websocket failed'))
+    }
+
+    providerWs.onclose = async (event) => {
+      log('warn', `[PROVIDER] standalone WS closed code=${event.code} reason=${event.reason || 'none'}`)
+      providerWs = null
+      providerRegistered = false
+      providerPeerId = null
+      providerStats.connectedAt = null
+      providerStats.peerId = null
+      stopExtensionHeartbeat(false)
+      await persistSharingState()
+      if (sharingMode === 'extension' && providerShareEnabled) {
+        scheduleProviderReconnect(`close:${event.code}`)
+      }
+      settle(reject, new Error('Standalone provider websocket closed'))
+    }
+  })
+}
+
+async function startStandaloneProvider() {
+  await loadSharingContext()
+  await syncProviderPrivateShareState({ source: 'start', stopOnToggle: false })
+  providerShareEnabled = true
+  sharingMode = 'extension'
+  providerStats = {
+    bytesServed: providerStats.bytesServed ?? 0,
+    requestsHandled: providerStats.requestsHandled ?? 0,
+    connectedAt: null,
+    peerId: providerPeerId,
+  }
+  await chrome.storage.local.set({ sharingMode, sharingCountry, sharingUserId })
+  try {
+    await connectStandaloneProvider()
+    const helper = await persistSharingState()
+    return { success: true, helper }
+  } catch (error) {
+    scheduleProviderReconnect(error.message)
+    const helper = await persistSharingState(await getStandaloneProviderStatus())
+    return { success: true, helper }
+  }
+}
+
+async function stopStandaloneProvider({ clearMode = true, removeDevice = true } = {}) {
+  clearProviderReconnect()
+  providerShareEnabled = false
+  providerRegistered = false
+  providerPeerId = null
+  providerStats.connectedAt = null
+  providerStats.peerId = null
+  if (providerWs) {
+    const ws = providerWs
+    providerWs = null
+    ws.onclose = null
+    ws.onerror = null
+    ws.onmessage = null
+    ws.close(1000)
+  }
+  stopExtensionHeartbeat(removeDevice)
+  if (clearMode) sharingMode = null
+  const helper = await persistSharingState(await getStandaloneProviderStatus())
+  return { success: true, helper }
+}
+
+async function startSharingTransport({ token, userId, country, trust }) {
+  await loadSharingContext()
+  if (token) desktopToken = token
+  if (userId) sharingUserId = userId
+  if (country) sharingCountry = country
+
+  const helper = await getDesktopHelperStatus()
+  if (helper.available) {
+    if (providerShareEnabled) await stopStandaloneProvider({ clearMode: false, removeDevice: true })
+    const result = await startDesktopSharing({ token, userId, country, trust })
+    if (result.success) {
+      sharingMode = 'desktop'
+      result.helper = await persistSharingState(result.helper ?? null)
+      return result
+    }
+    log('warn', `[SHARE] helper start failed, falling back to standalone mode: ${result.error || 'unknown error'}`)
+  }
+
+  return startStandaloneProvider()
+}
+
+async function stopSharingTransport() {
+  await loadSharingContext()
+  if (providerShareEnabled || sharingMode === 'extension') {
+    return stopStandaloneProvider()
+  }
+  const result = await stopDesktopSharing()
+  sharingMode = null
+  result.helper = await persistSharingState(result.helper ?? null)
+  return result
+}
+
+async function setHelperConnectionSlots(slots) {
+  const nextSlots = Math.max(1, Math.min(32, parseInt(String(slots), 10) || 1))
+  const helper = await getSharingStatus()
+
+  if (!helper?.available) {
+    return { success: false, error: 'No local sharing helper is available', helper }
+  }
+
+  if (helper.source === 'extension') {
+    const standaloneHelper = await getStandaloneProviderStatus()
+    await chrome.storage.local.set({ helper: standaloneHelper })
+    return { success: true, helper: standaloneHelper }
+  }
+
+  const updatePort = async (port) => {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/native/connection-slots`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ slots: nextSlots }),
+        signal: AbortSignal.timeout(2500),
+      })
+      return response.ok
+    } catch {
+      return false
+    }
+  }
+
+  const [primary, peer] = await Promise.all([updatePort(CONTROL_PORT), updatePort(PEER_PORT)])
+  if (!primary && !peer) {
+    return { success: false, error: 'Could not reach desktop or CLI helper', helper: await getSharingStatus() }
+  }
+
+  const updatedHelper = await persistSharingState(await getSharingStatus())
+  return { success: true, helper: updatedHelper }
+}
+
+async function getSharingStatus() {
+  await loadSharingContext()
+  const desktopStatus = await getDesktopHelperStatus()
+  const standaloneStatus = await getStandaloneProviderStatus()
+  const desktopActive = desktopStatus.available && (desktopStatus.running || desktopStatus.shareEnabled)
+  const standaloneActive = standaloneStatus.available && (standaloneStatus.running || standaloneStatus.shareEnabled)
+
+  if (desktopActive && providerShareEnabled) {
+    log('info', '[SHARE] helper became active - stopping standalone provider and syncing to local helper')
+    await stopStandaloneProvider({ clearMode: false, removeDevice: true })
+  }
+
+  if (desktopActive) {
+    sharingMode = 'desktop'
+    return { ...desktopStatus, source: desktopStatus.source ?? 'desktop' }
+  }
+
+  if (standaloneActive) {
+    sharingMode = 'extension'
+    return standaloneStatus
+  }
+
+  if (desktopStatus.available) {
+    return { ...desktopStatus, source: desktopStatus.source ?? 'desktop' }
+  }
+
+  return standaloneStatus
+}
 
 async function connectToRelay(opts, attempt = 0) {
   const serverFallbackList = opts.relayFallbackList ?? []
@@ -399,7 +932,7 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
         preferredProviderUserId: preferredProviderUserId ?? null,
         privateProviderUserId: privateProviderUserId ?? null,
         privateBaseDeviceId: privateBaseDeviceId ?? null,
-        requireTunnel: false,
+        requireTunnel: true,
       }))
       keepaliveTimer = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' }))
@@ -551,8 +1084,7 @@ function setProxyDesktop(sessionId) {
     }
   )
   chrome.storage.session.set({ proxySessionId: sessionId, proxyHost: '127.0.0.1', proxyPort: 7655 })
-  chrome.action.setBadgeText({ text: 'ON' })
-  chrome.action.setBadgeBackgroundColor({ color: '#00ff88' })
+  syncActionBadge()
   blockWebRTC()
 }
 
@@ -573,8 +1105,7 @@ function setProxyRelay(relayEndpoint, sessionId) {
     }
   )
   chrome.storage.session.set({ proxySessionId: sessionId, proxyHost: relayHost, proxyPort: 8081 })
-  chrome.action.setBadgeText({ text: 'ON' })
-  chrome.action.setBadgeBackgroundColor({ color: '#00ff88' })
+  syncActionBadge()
   blockWebRTC()
 }
 
@@ -582,7 +1113,7 @@ function clearProxy() {
   log('info', 'proxy cleared')
   chrome.proxy.settings.clear({ scope: 'regular' })
   chrome.storage.session.remove(['proxySessionId', 'proxyHost', 'proxyPort'])
-  chrome.action.setBadgeText({ text: '' })
+  syncActionBadge()
   restoreWebRTC()
 }
 
@@ -618,18 +1149,30 @@ async function disconnect() {
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
 
-chrome.runtime.onStartup.addListener(async () => {
+async function restoreSharingRuntime() {
   clearProxy()
   await chrome.storage.local.set({ session: null })
-  const stored = await chrome.storage.local.get(['supabaseToken', 'desktopToken', 'extId', 'sharingCountry', 'sharingUserId'])
-  if (stored.supabaseToken) supabaseToken = stored.supabaseToken
-  if (stored.desktopToken) desktopToken = stored.desktopToken
-  if (stored.sharingCountry) sharingCountry = stored.sharingCountry
-  if (stored.sharingUserId) sharingUserId = stored.sharingUserId
-  const helper = await getDesktopHelperStatus()
-  const isSharing = helper.available && (helper.running || helper.shareEnabled)
-  await chrome.storage.local.set({ isSharing, helper })
-  if (isSharing && supabaseToken) startExtensionHeartbeat()
+  await loadSharingContext()
+  await syncProviderPrivateShareState({ source: 'restore', stopOnToggle: false })
+  const helper = await getSharingStatus()
+  await persistSharingState(helper)
+  if (sharingMode === 'extension') {
+    providerShareEnabled = true
+    if (!providerRegistered && (!providerWs || providerWs.readyState === WebSocket.CLOSED)) {
+      try {
+        await connectStandaloneProvider()
+      } catch (error) {
+        scheduleProviderReconnect(`restore:${error.message}`)
+      }
+    }
+  } else {
+    providerShareEnabled = false
+    stopExtensionHeartbeat(false)
+  }
+}
+
+chrome.runtime.onStartup.addListener(async () => {
+  await restoreSharingRuntime()
 })
 
 chrome.runtime.onInstalled.addListener(async ({ reason }) => {
@@ -656,22 +1199,24 @@ chrome.alarms.create('syncSharingState', { periodInMinutes: 0.17 })
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name !== 'syncSharingState') return
 
-  if (!supabaseToken || !sharingCountry) {
-    const stored = await chrome.storage.local.get(['supabaseToken', 'desktopToken', 'sharingCountry', 'sharingUserId'])
-    if (stored.supabaseToken) supabaseToken = stored.supabaseToken
-    if (stored.desktopToken) desktopToken = stored.desktopToken
-    if (stored.sharingCountry) sharingCountry = stored.sharingCountry
-    if (stored.sharingUserId) sharingUserId = stored.sharingUserId
+  await loadSharingContext()
+  if (sharingMode === 'extension' || providerShareEnabled) {
+    await syncProviderPrivateShareState({ source: 'alarm', stopOnToggle: true })
   }
+  const helper = await getSharingStatus()
+  await persistSharingState(helper)
 
-  const helper = await getDesktopHelperStatus()
-  const isSharing = helper.available && (helper.running || helper.shareEnabled)
-  await chrome.storage.local.set({ isSharing, helper })
-  if (isSharing) {
-    if (supabaseToken && sharingCountry && !heartbeatInterval) startExtensionHeartbeat()
-    chrome.action.setBadgeText({ text: 'SHR' })
-    chrome.action.setBadgeBackgroundColor({ color: '#00ff88' })
-  } else if (!currentSession) {
-    chrome.action.setBadgeText({ text: '' })
+  if (sharingMode === 'extension' && providerShareEnabled) {
+    if (!providerWs || providerWs.readyState === WebSocket.CLOSED) {
+      try {
+        await connectStandaloneProvider()
+      } catch (error) {
+        scheduleProviderReconnect(`alarm:${error.message}`)
+      }
+    } else if (!heartbeatInterval) {
+      startExtensionHeartbeat()
+    }
   }
 })
+
+void restoreSharingRuntime()

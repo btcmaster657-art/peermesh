@@ -87,14 +87,23 @@ const NATIVE_HOST_NAME = 'com.peermesh.desktop'
 const EXTENSION_ID = 'chpkbnnohdiohlejmpmjmnmjgokalllm'
 const EXTENSION_ORIGIN = `chrome-extension://${EXTENSION_ID}/`
 const DESKTOP_VERSION = require('./package.json').version
-const CONFIG_FILE = path.join(app.getPath('userData'), 'config.json')
+const USER_DATA_DIR = app.getPath('userData')
+const CONFIG_FILE = path.join(USER_DATA_DIR, 'config.json')
+const SHARED_IDENTITY_FILE = path.join(os.homedir(), '.peermesh', 'machine-identity.json')
+const APP_ICON_PATH = path.join(__dirname, 'assets', 'icon.png')
+const TRAY_ICON_PATH = path.join(__dirname, 'assets', 'tray-icon.png')
 const IS_NATIVE_HOST_MODE = process.argv.some(arg => arg.startsWith('chrome-extension://')) || process.argv.some(arg => arg.startsWith('--parent-window='))
 const IS_BACKGROUND_LAUNCH = process.argv.includes('--background')
+const HAS_SINGLE_INSTANCE_LOCK = IS_NATIVE_HOST_MODE ? true : app.requestSingleInstanceLock()
 
 let peerPort = null
 let peerSharing = false
 let _sharingToggleBusy = false
 let _cliWatchTimer = null
+let _shutdownStarted = false
+let _quitRequested = false
+let _sharingConfigSyncTimer = null
+let _sharingConfigSyncBusy = false
 
 function notifyPeer(p, body) {
   if (!peerPort) return
@@ -109,13 +118,125 @@ function notifyPeer(p, body) {
 let tray = null
 let settingsWindow = null
 let running = false
-let config = { token: '', userId: '', country: 'RW', trust: 50, extId: '', baseDeviceId: '', shareEnabled: false, connectionSlots: 1, todaySharedBytes: 0, todaySharedBytesDate: null, dailyShareLimitMb: null }
+let config = {
+  token: '',
+  userId: '',
+  country: 'RW',
+  trust: 50,
+  extId: '',
+  baseDeviceId: '',
+  hasAcceptedProviderTerms: false,
+  shareEnabled: false,
+  connectionSlots: 1,
+  launchOnStartup: false,
+  autoShareOnLaunch: false,
+  todaySharedBytes: 0,
+  todaySharedBytesDate: null,
+  dailyShareLimitMb: null,
+  privateShareActive: false,
+  privateShare: null,
+}
 let stats = { bytesServed: 0, requestsHandled: 0, connectedAt: null }
 const activeTunnels = new Map()
 const SLOT_CAP = 32
 let slotStates = []
 let _userStopped = false
 let limitHit = false
+let previousLaunchExtId = null
+
+function createDesktopIdentity() {
+  return require('crypto').randomUUID()
+}
+
+function createSharedBaseDeviceId() {
+  return `pm_${require('crypto').randomUUID().replace(/-/g, '')}`
+}
+
+function readSharedBaseDeviceId() {
+  try {
+    if (!fs.existsSync(SHARED_IDENTITY_FILE)) return null
+    const raw = JSON.parse(fs.readFileSync(SHARED_IDENTITY_FILE, 'utf-8'))
+    const baseDeviceId = typeof raw?.baseDeviceId === 'string' ? raw.baseDeviceId.trim() : ''
+    return baseDeviceId || null
+  } catch (e) {
+    log.warn('CONFIG', 'readSharedBaseDeviceId failed', { err: e.message, path: SHARED_IDENTITY_FILE })
+    return null
+  }
+}
+
+function writeSharedBaseDeviceId(baseDeviceId) {
+  if (!baseDeviceId) return
+  try {
+    fs.mkdirSync(path.dirname(SHARED_IDENTITY_FILE), { recursive: true })
+    fs.writeFileSync(SHARED_IDENTITY_FILE, JSON.stringify({
+      baseDeviceId,
+      updatedAt: new Date().toISOString(),
+    }, null, 2))
+  } catch (e) {
+    log.warn('CONFIG', 'writeSharedBaseDeviceId failed', { err: e.message, path: SHARED_IDENTITY_FILE })
+  }
+}
+
+function getOrCreateSharedBaseDeviceId(fallback) {
+  const existing = readSharedBaseDeviceId()
+  if (existing) return existing
+  const next = fallback || createSharedBaseDeviceId()
+  writeSharedBaseDeviceId(next)
+  return next
+}
+
+function rotateDesktopIdentity({ rotateBaseDeviceId = false } = {}) {
+  config.extId = createDesktopIdentity()
+  if (rotateBaseDeviceId) {
+    config.baseDeviceId = createSharedBaseDeviceId()
+    writeSharedBaseDeviceId(config.baseDeviceId)
+  } else if (!config.baseDeviceId) {
+    config.baseDeviceId = getOrCreateSharedBaseDeviceId(createSharedBaseDeviceId())
+  }
+  ensureSlotStates()
+}
+
+async function revokeExtensionAuthToken(extId) {
+  if (!extId) return
+  try {
+    await fetch(`${API_BASE}/api/extension-auth/revoke`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ext_id: extId }),
+      signal: AbortSignal.timeout(4000),
+    })
+  } catch (e) {
+    log.warn('AUTH', 'revokeExtensionAuthToken failed', { extId, err: e.message })
+  }
+}
+
+async function clearDesktopAuth(reason, { rotateIdentity = false, revoke = true } = {}) {
+  const oldExtId = config.extId
+  const oldBaseDeviceId = config.baseDeviceId
+  stopRelay()
+  stopSharingConfigSync()
+  if (revoke && oldExtId) await revokeExtensionAuthToken(oldExtId)
+  config = {
+    ...config,
+    token: '',
+    userId: '',
+    country: 'RW',
+    trust: 50,
+    shareEnabled: false,
+    hasAcceptedProviderTerms: false,
+    autoShareOnLaunch: false,
+    todaySharedBytes: 0,
+    todaySharedBytesDate: null,
+    dailyShareLimitMb: null,
+    privateShareActive: false,
+    privateShare: null,
+  }
+  if (rotateIdentity) rotateDesktopIdentity({ rotateBaseDeviceId: true })
+  else ensureSlotStates()
+  saveConfig()
+  updateTray()
+  log.info('AUTH', 'desktop auth cleared', { reason, rotated: rotateIdentity, oldExtId, oldBaseDeviceId, newExtId: config.extId, newBaseDeviceId: config.baseDeviceId })
+}
 
 function clampSlots(value) {
   const parsed = parseInt(value, 10)
@@ -217,6 +338,56 @@ function enforceLocalLimit() {
   stopRelay()
 }
 
+function applySharingProfileData(data, { source = 'remote' } = {}) {
+  const previousPrivateShareEnabled = !!config.privateShare?.enabled
+  const previousPrivateShareActive = !!config.privateShareActive
+  const previousPrivateShareCode = config.privateShare?.code ?? null
+
+  const nextPrivateShare = data.private_share ?? null
+  const nextPrivateShareEnabled = !!nextPrivateShare?.enabled
+  const nextPrivateShareActive = !!(nextPrivateShare?.enabled && nextPrivateShare?.active)
+  const nextPrivateShareCode = nextPrivateShare?.code ?? null
+
+  config.hasAcceptedProviderTerms = data.has_accepted_provider_terms ?? config.hasAcceptedProviderTerms
+  config.todaySharedBytes = data.total_bytes_today ?? 0
+  config.todaySharedBytesDate = new Date().toISOString().slice(0, 10)
+  config.dailyShareLimitMb = data.daily_share_limit_mb ?? null
+  config.privateShare = nextPrivateShare
+  config.privateShareActive = nextPrivateShareActive
+  limitHit = data.daily_limit_bytes == null
+    ? false
+    : ((config.todaySharedBytes ?? 0) + getAggregateStats().bytesServed) >= data.daily_limit_bytes
+  saveConfig()
+
+  if (limitHit && config.shareEnabled) enforceLocalLimit()
+
+  const privacyToggleChanged = previousPrivateShareEnabled !== nextPrivateShareEnabled
+  const visibilityChanged = previousPrivateShareActive !== nextPrivateShareActive || previousPrivateShareCode !== nextPrivateShareCode
+
+  if (privacyToggleChanged && (config.shareEnabled || activeSlotCount() > 0)) {
+    log.warn('PRIVATE', 'private sharing mode changed - stopping provider until manually restarted', {
+      source,
+      from: previousPrivateShareEnabled,
+      to: nextPrivateShareEnabled,
+    })
+    stopRelay()
+    config.shareEnabled = false
+    saveConfig()
+    updateTray()
+    showNotification('PeerMesh sharing paused', 'Private sharing changed. Start sharing again to apply the new mode.')
+  } else if (visibilityChanged) {
+    log.info('PRIVATE', 'private sharing state synced', {
+      source,
+      enabled: nextPrivateShareEnabled,
+      active: nextPrivateShareActive,
+      codeChanged: previousPrivateShareCode !== nextPrivateShareCode,
+    })
+    updateTray()
+  }
+
+  return data
+}
+
 async function pollTodayBytes() {
   if (!config.token) return null
   syncTodaySharedBytesDay()
@@ -227,18 +398,13 @@ async function pollTodayBytes() {
       signal: AbortSignal.timeout(4000),
     })
     logResponse('GET', `${API_BASE}/api/user/sharing`, res.status)
+    if (res.status === 401 || res.status === 403) {
+      await clearDesktopAuth(`poll_today_bytes_${res.status}`)
+      return null
+    }
     if (!res.ok) return null
     const data = await res.json()
-    config.todaySharedBytes = data.total_bytes_today ?? 0
-    config.todaySharedBytesDate = new Date().toISOString().slice(0, 10)
-    config.dailyShareLimitMb = data.daily_share_limit_mb ?? null
-    config.privateShareActive = !!(data.private_share?.enabled && data.private_share?.active)
-    limitHit = data.daily_limit_bytes == null
-      ? false
-      : ((config.todaySharedBytes ?? 0) + getAggregateStats().bytesServed) >= data.daily_limit_bytes
-    saveConfig()
-    if (limitHit && config.shareEnabled) enforceLocalLimit()
-    return data
+    return applySharingProfileData(data, { source: 'pollTodayBytes' })
   } catch (e) {
     log.warn('API', 'pollTodayBytes failed', { err: e.message })
     return null
@@ -267,29 +433,195 @@ function closeAllTunnels(slot, notifyRelay = false) {
   if (count > 0) log.info('TUNNEL', `closeAllTunnels â€” closed ${count} tunnels`)
 }
 
+function closeAllSlotTunnels(notifyRelay = false) {
+  for (const slot of slotStates) closeAllTunnels(slot, notifyRelay)
+}
+
+function getDefaultLaunchOnStartup() {
+  try {
+    return app.getLoginItemSettings().openAtLogin === true
+  } catch {
+    return false
+  }
+}
+
+function applyLaunchOnStartupPreference(enabled = config.launchOnStartup) {
+  config.launchOnStartup = !!enabled
+  try {
+    if (!app.isPackaged) {
+      log.debug('CONFIG', 'launch-on-startup preference stored locally (dev mode)', { enabled: config.launchOnStartup })
+      return { enabled: config.launchOnStartup, applied: false }
+    }
+    if (process.platform === 'win32') {
+      app.setLoginItemSettings({
+        openAtLogin: config.launchOnStartup,
+        openAsHidden: config.launchOnStartup,
+        path: process.execPath,
+        args: config.launchOnStartup ? ['--background'] : [],
+      })
+    } else if (process.platform === 'darwin') {
+      app.setLoginItemSettings({
+        openAtLogin: config.launchOnStartup,
+        openAsHidden: config.launchOnStartup,
+      })
+    }
+    log.info('CONFIG', 'launch-on-startup preference applied', { enabled: config.launchOnStartup, platform: process.platform })
+    return { enabled: config.launchOnStartup, applied: true }
+  } catch (e) {
+    log.warn('CONFIG', 'launch-on-startup preference apply failed', { enabled: config.launchOnStartup, err: e.message })
+    return { enabled: config.launchOnStartup, applied: false, error: e.message }
+  }
+}
+
+async function refreshSharingConfig() {
+  if (!config.token) return null
+  logRequest('GET', `${API_BASE}/api/user/sharing`)
+  const res = await fetch(`${API_BASE}/api/user/sharing${config.baseDeviceId ? `?baseDeviceId=${encodeURIComponent(config.baseDeviceId)}` : ''}`, {
+    headers: { 'Authorization': `Bearer ${config.token}` },
+    signal: AbortSignal.timeout(4000),
+  })
+  logResponse('GET', `${API_BASE}/api/user/sharing`, res.status)
+  if (res.status === 401 || res.status === 403) {
+    await clearDesktopAuth(`refresh_sharing_config_${res.status}`)
+    return null
+  }
+  if (!res.ok) throw new Error(`sharing config fetch failed: status=${res.status}`)
+  const data = await res.json()
+  return applySharingProfileData(data, { source: 'refreshSharingConfig' })
+}
+
+function stopSharingConfigSync() {
+  if (!_sharingConfigSyncTimer) return
+  clearInterval(_sharingConfigSyncTimer)
+  _sharingConfigSyncTimer = null
+}
+
+function startSharingConfigSync() {
+  stopSharingConfigSync()
+  if (!config.token || !config.userId) return
+  if (!_sharingConfigSyncBusy) {
+    _sharingConfigSyncBusy = true
+    refreshSharingConfig()
+      .catch((e) => log.warn('API', 'sharing config initial sync failed', { err: e.message }))
+      .finally(() => { _sharingConfigSyncBusy = false })
+  }
+  _sharingConfigSyncTimer = setInterval(() => {
+    if (_sharingConfigSyncBusy || !config.token || !config.userId) return
+    _sharingConfigSyncBusy = true
+    refreshSharingConfig()
+      .catch((e) => log.warn('API', 'sharing config sync tick failed', { err: e.message }))
+      .finally(() => { _sharingConfigSyncBusy = false })
+  }, 5_000)
+}
+
 // â”€â”€ Config â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function loadConfig() {
+  try { fs.mkdirSync(USER_DATA_DIR, { recursive: true }) } catch {}
   try {
     if (fs.existsSync(CONFIG_FILE)) {
-      config = { ...config, ...JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8')) }
-      log.info('CONFIG', 'loaded', { userId: config.userId || '(none)', shareEnabled: config.shareEnabled, country: config.country })
+      try {
+        config = { ...config, ...JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8')) }
+        log.info('CONFIG', 'loaded', { userId: config.userId || '(none)', shareEnabled: config.shareEnabled, country: config.country, path: CONFIG_FILE })
+      } catch (e) {
+        const backupPath = path.join(USER_DATA_DIR, `config.corrupt.${Date.now()}.json`)
+        try { fs.renameSync(CONFIG_FILE, backupPath) } catch {}
+        log.error('CONFIG', 'invalid config reset to defaults', { err: e.message, backupPath })
+      }
     } else {
       log.warn('CONFIG', 'no config file found', { path: CONFIG_FILE })
     }
   } catch (e) { log.error('CONFIG', 'loadConfig error', { err: e.message }) }
-  if (!config.extId) {
-    config.extId = require('crypto').randomUUID()
-    log.info('CONFIG', 'generated new extId', { extId: config.extId })
-  }
-  if (!config.baseDeviceId) config.baseDeviceId = config.extId
+  const previousExtId = config.extId || null
+  const previousBaseDeviceId = config.baseDeviceId || null
+  previousLaunchExtId = previousExtId
+  config.baseDeviceId = getOrCreateSharedBaseDeviceId(previousBaseDeviceId || previousExtId || createSharedBaseDeviceId())
+  config.extId = createDesktopIdentity()
+  log.info('CONFIG', 'rotated launch extId', {
+    oldExtId: previousExtId,
+    extId: config.extId,
+    previousBaseDeviceId,
+    baseDeviceId: config.baseDeviceId,
+    sharedIdentityFile: SHARED_IDENTITY_FILE,
+  })
+  config.hasAcceptedProviderTerms = !!config.hasAcceptedProviderTerms
   config.connectionSlots = clampSlots(config.connectionSlots ?? 1)
+  if (typeof config.launchOnStartup !== 'boolean') config.launchOnStartup = getDefaultLaunchOnStartup()
+  if (typeof config.autoShareOnLaunch !== 'boolean') {
+    config.autoShareOnLaunch = !!(config.shareEnabled && config.hasAcceptedProviderTerms)
+  }
+  config.privateShareActive = !!config.privateShareActive
+  config.privateShare = config.privateShare ?? null
   ensureSlotStates()
   saveConfig()
 }
 
 function saveConfig() {
-  try { fs.writeFileSync(CONFIG_FILE, JSON.stringify(config)) } catch {}
+  try {
+    fs.mkdirSync(USER_DATA_DIR, { recursive: true })
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(config))
+  } catch (e) {
+    log.error('CONFIG', 'saveConfig error', { err: e.message, path: CONFIG_FILE })
+  }
+}
+
+async function verifyStoredDesktopAuth() {
+  if (!config.token || !config.userId) return true
+  try {
+    const res = await fetch(`${API_BASE}/api/extension-auth?verify=1&userId=${encodeURIComponent(config.userId)}`, {
+      headers: { 'Authorization': `Bearer ${config.token}` },
+      signal: AbortSignal.timeout(5000),
+    })
+    if (res.ok) return true
+    log.warn('AUTH', 'stored desktop token rejected', { status: res.status, userId: config.userId })
+    await clearDesktopAuth('stored_token_rejected')
+    return false
+  } catch (e) {
+    log.warn('AUTH', 'stored desktop token verify skipped', { err: e.message })
+    return true
+  }
+}
+
+async function initializeDesktopRuntime(reason) {
+  loadConfig()
+  if (previousLaunchExtId && previousLaunchExtId !== config.extId) {
+    revokeExtensionAuthToken(previousLaunchExtId).catch(() => {})
+  }
+  try {
+    registerNativeMessagingHost()
+  } catch (e) {
+    log.warn('NATIVE', 'registerNativeMessagingHost failed during bootstrap', { err: e.message, reason })
+  }
+  try {
+    await verifyStoredDesktopAuth()
+  } catch (e) {
+    log.warn('AUTH', 'startup auth verify failed', { err: e.message, reason })
+  }
+  startSharingConfigSync()
+}
+
+function shutdownDesktopRuntime(reason = 'quit') {
+  if (_shutdownStarted) return
+  _shutdownStarted = true
+  log.info('PROCESS', 'shutdownDesktopRuntime', { reason })
+  logState(`shutdown:${reason}`)
+  stopSharingConfigSync()
+  if (_cliWatchTimer) {
+    clearInterval(_cliWatchTimer)
+    _cliWatchTimer = null
+    log.info('PROCESS', '_cliWatchTimer cleared on shutdown')
+  }
+  try { stopRelay() } catch (e) { log.warn('PROCESS', 'stopRelay during shutdown failed', { err: e.message }) }
+  try { closeAllSlotTunnels(false) } catch (e) { log.warn('PROCESS', 'closeAllSlotTunnels during shutdown failed', { err: e.message }) }
+  try { controlServer.close(); log.debug('PROCESS', 'controlServer closed') } catch {}
+  try { localProxyServer.close(); log.debug('PROCESS', 'localProxyServer closed') } catch {}
+  if (config.token && config.userId) {
+    fetch(`${API_BASE}/api/user/sharing`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
+      body: JSON.stringify({ isSharing: false }),
+    }).catch(() => {})
+  }
 }
 
 function getPublicState() {
@@ -301,6 +633,7 @@ function getPublicState() {
     baseDeviceId: config.baseDeviceId || null,
     connectionSlots: clampSlots(config.connectionSlots ?? 1),
     privateShareActive: !!(config.privateShareActive),
+    privateShare: config.privateShare ?? null,
     slots: {
       configured: clampSlots(config.connectionSlots ?? 1),
       active: activeSlotCount(),
@@ -323,6 +656,122 @@ async function persistSharingState(isSharing) {
     })
     logResponse('POST', `${API_BASE}/api/user/sharing`, r.status)
   } catch (e) { log.warn('API', 'persistSharingState failed', { err: e.message }) }
+}
+
+function getPrivateShareExpiryPreset(expiresAt) {
+  if (!expiresAt) return 'none'
+  const hours = Math.max(0, Math.round((new Date(expiresAt).getTime() - Date.now()) / 3600000))
+  if (hours <= 2) return '1'
+  if (hours <= 30) return '24'
+  if (hours <= 24 * 8) return '168'
+  return 'none'
+}
+
+async function getPrivateShareState(forceRefresh = true) {
+  if (!config.token || !config.baseDeviceId) return null
+  if (forceRefresh) await pollTodayBytes()
+  return config.privateShare ?? null
+}
+
+async function updatePrivateShareState({ enabled, refresh = false, expiryHours } = {}) {
+  if (!config.token || !config.baseDeviceId) throw new Error('Sign in required')
+  const expiryValue = expiryHours === undefined
+    ? undefined
+    : (expiryHours === 'none' || expiryHours === null ? null : parseInt(expiryHours, 10))
+
+  const previousEnabled = !!config.privateShare?.enabled
+  logRequest('POST', `${API_BASE}/api/user/sharing`, {
+    privateSharing: {
+      baseDeviceId: config.baseDeviceId,
+      enabled,
+      refresh: refresh === true,
+      expiryHours: expiryValue,
+    },
+  })
+  const res = await fetch(`${API_BASE}/api/user/sharing`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
+    body: JSON.stringify({
+      privateSharing: {
+        baseDeviceId: config.baseDeviceId,
+        enabled,
+        refresh: refresh === true,
+        expiryHours: expiryValue,
+      },
+    }),
+    signal: AbortSignal.timeout(5000),
+  })
+  logResponse('POST', `${API_BASE}/api/user/sharing`, res.status)
+  const data = await res.json().catch(() => ({}))
+  if (res.status === 401 || res.status === 403) {
+    await clearDesktopAuth(`private_share_${res.status}`)
+    throw new Error('Session expired - please sign in again')
+  }
+  if (!res.ok || data.error) throw new Error(data.error || 'Could not update private sharing')
+
+  config.privateShare = data.private_share ?? null
+  config.privateShareActive = !!(config.privateShare?.enabled && config.privateShare?.active)
+  saveConfig()
+
+  if (previousEnabled !== !!config.privateShare?.enabled && (config.shareEnabled || activeSlotCount() > 0)) {
+    log.info('PRIVATE', 'private sharing mode changed locally - stopping until manually restarted', {
+      from: previousEnabled,
+      to: !!config.privateShare?.enabled,
+    })
+    stopRelay()
+    config.shareEnabled = false
+    saveConfig()
+    updateTray()
+    showNotification('PeerMesh sharing paused', 'Private sharing changed. Start sharing again to apply the new mode.')
+  }
+
+  updateTray()
+  return {
+    privateShare: config.privateShare,
+    expiryPreset: getPrivateShareExpiryPreset(config.privateShare?.expires_at ?? null),
+  }
+}
+
+async function applyConnectionSlots(nextSlots, { syncPeer = true } = {}) {
+  const normalizedSlots = clampSlots(nextSlots)
+  const shouldResumeLocal = !!config.shareEnabled
+
+  config.connectionSlots = normalizedSlots
+  ensureSlotStates()
+  saveConfig()
+
+  let peerState = null
+  if (syncPeer && peerPort) {
+    try {
+      const response = await fetch(`http://127.0.0.1:${peerPort}/native/connection-slots`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ slots: normalizedSlots }),
+        signal: AbortSignal.timeout(2500),
+      })
+      if (response.ok) peerState = await response.json().catch(() => null)
+    } catch (e) {
+      log.warn('CONTROL', 'peer slot sync failed', { err: e.message, peerPort, slots: normalizedSlots })
+    }
+  }
+
+  if (shouldResumeLocal) {
+    stopRelay()
+    config.shareEnabled = true
+    saveConfig()
+    connectRelay()
+  } else {
+    updateTray()
+  }
+
+  const state = getPublicState()
+  if (peerState?.slots) {
+    state.peerSlots = peerState.slots
+    state.peerConnectionSlots = peerState.connectionSlots ?? peerState.slots.configured
+    state.peerPrivateShareActive = !!peerState.privateShareActive
+  }
+
+  return { success: true, slots: normalizedSlots, state }
 }
 
 function getNativeHostManifestPath() {
@@ -460,53 +909,48 @@ async function handleFetch(slot, request) {
       log.warn('PROXY', 'blocked URL', { hostname: parsed.hostname, requestId: requestId?.slice(0,8), slot: slot.index })
       return { requestId, status: 403, headers: {}, body: '', error: 'URL not allowed' }
     }
-    // Route through CONNECT tunnel so TLS fingerprint is the browser's, not Node's
-    const port = parsed.port ? parseInt(parsed.port) : (parsed.protocol === 'https:' ? 443 : 80)
-    const hostname = parsed.hostname
-    return await new Promise((resolve) => {
-      const tunnelWs = openTunnelWs(hostname, port)
-      if (!tunnelWs) { resolve({ requestId, status: 503, headers: {}, body: '', error: 'No proxy session' }); return }
-      let responseData = Buffer.alloc(0)
-      let ready = false
-      const timer = setTimeout(() => { tunnelWs.terminate(); resolve({ requestId, status: 504, headers: {}, body: '', error: 'Timeout' }) }, 20000)
-      tunnelWs.on('message', (data) => {
-        const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data)
-        if (!ready) {
-          responseData = Buffer.concat([responseData, chunk])
-          const headerEnd = responseData.indexOf('\r\n\r\n')
-          if (headerEnd === -1) return
-          const firstLine = responseData.slice(0, responseData.indexOf('\r\n')).toString()
-          if (!firstLine.includes('200')) { clearTimeout(timer); tunnelWs.close(); resolve({ requestId, status: 502, headers: {}, body: '', error: 'Tunnel rejected' }); return }
-          ready = true
-          const path = parsed.pathname + parsed.search
-          const reqHeaders = Object.entries({ 'Host': hostname, 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36', 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8', 'Accept-Language': 'en-US,en;q=0.5', 'Cache-Control': 'no-cache', 'Connection': 'close', ...headers }).map(([k, v]) => `${k}: ${v}`).join('\r\n')
-          const reqBody = body ? Buffer.from(body) : null
-          const contentLength = reqBody ? `\r\nContent-Length: ${reqBody.length}` : ''
-          tunnelWs.send(Buffer.from(`${method} ${path} HTTP/1.1\r\n${reqHeaders}${contentLength}\r\n\r\n`))
-          if (reqBody) tunnelWs.send(reqBody)
-          responseData = responseData.slice(headerEnd + 4)
-          return
-        }
-        responseData = Buffer.concat([responseData, chunk])
-      })
-      tunnelWs.on('close', () => {
-        clearTimeout(timer)
-        const headerEnd = responseData.indexOf('\r\n\r\n')
-        if (headerEnd === -1) { resolve({ requestId, status: 502, headers: {}, body: '', error: 'Bad Gateway' }); return }
-        const headerStr = responseData.slice(0, headerEnd).toString()
-        const lines = headerStr.split('\r\n')
-        const statusMatch = lines[0].match(/HTTP\/\S+ (\d+)/)
-        const status = statusMatch ? parseInt(statusMatch[1]) : 200
-        const responseHeaders = {}
-        for (const line of lines.slice(1)) { const idx = line.indexOf(':'); if (idx > 0) responseHeaders[line.slice(0, idx).trim().toLowerCase()] = line.slice(idx + 1).trim() }
-        delete responseHeaders['transfer-encoding']; delete responseHeaders['content-encoding']
-        const responseBody = responseData.slice(headerEnd + 4).toString()
-        addBytes(slot, responseBody.length)
-        log.info('PROXY', `${slotPrefix(slot)} fetch response via tunnel`, { requestId: requestId?.slice(0,8), status, bytes: responseBody.length })
-        resolve({ requestId, status, headers: responseHeaders, body: responseBody })
-      })
-      tunnelWs.on('error', (err) => { clearTimeout(timer); resolve({ requestId, status: 502, headers: {}, body: '', error: err.message }) })
+    // HTTP-only requester traffic must not depend on a local proxy session.
+    const outboundHeaders = {}
+    for (const [key, value] of Object.entries(headers ?? {})) {
+      const normalizedKey = String(key).trim().toLowerCase()
+      if (!normalizedKey) continue
+      if (['host', 'content-length', 'connection', 'proxy-authorization', 'proxy-connection', 'transfer-encoding', 'cookie', 'origin', 'referer'].includes(normalizedKey)) continue
+      if (normalizedKey.startsWith('sec-')) continue
+      if (value == null) continue
+      outboundHeaders[normalizedKey] = Array.isArray(value) ? value.join(', ') : String(value)
+    }
+    const requestBody = method === 'GET' || method === 'HEAD'
+      ? undefined
+      : (Buffer.isBuffer(body) ? body : body == null ? undefined : typeof body === 'string' ? body : JSON.stringify(body))
+    const res = await fetch(url, {
+      method,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Cache-Control': 'no-cache',
+        ...outboundHeaders,
+      },
+      body: requestBody,
+      redirect: 'follow',
+      signal: AbortSignal.timeout(20000),
     })
+    const responseBody = method === 'HEAD' ? '' : await res.text()
+    const responseHeaders = {}
+    res.headers.forEach((value, key) => {
+      if (!['content-encoding', 'content-length', 'transfer-encoding', 'connection', 'keep-alive'].includes(key)) {
+        responseHeaders[key] = value
+      }
+    })
+    addBytes(slot, responseBody.length)
+    log.info('PROXY', `${slotPrefix(slot)} fetch response`, { requestId: requestId?.slice(0,8), status: res.status, bytes: responseBody.length, finalUrl: res.url })
+    return {
+      requestId,
+      status: res.status,
+      headers: responseHeaders,
+      body: responseBody,
+      finalUrl: res.url,
+    }
   } catch (err) {
     log.error('PROXY', `${slotPrefix(slot)} fetch error`, { requestId: requestId?.slice(0,8), url, err: err.message })
     return { requestId, status: 502, headers: {}, body: '', error: err.message }
@@ -537,9 +981,19 @@ function sendHeartbeat(slot) {
   fetch(`${API_BASE}/api/user/sharing`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
-    body: JSON.stringify({ device_id: slot.deviceId }),
+    body: JSON.stringify({ device_id: slot.deviceId, user_id: config.userId }),
   })
-    .then(r => { logResponse('PUT', `${API_BASE}/api/user/sharing`, r.status); if (!r.ok) r.json().then(b => log.warn('HEARTBEAT', 'PUT failed', { status: r.status, body: b, slot: slot.index })) })
+    .then(async (r) => {
+      logResponse('PUT', `${API_BASE}/api/user/sharing`, r.status)
+      if (r.status === 401 || r.status === 403) {
+        await clearDesktopAuth(`heartbeat_${r.status}`)
+        return
+      }
+      if (!r.ok) {
+        const body = await r.json().catch(() => null)
+        log.warn('HEARTBEAT', 'PUT failed', { status: r.status, body, slot: slot.index })
+      }
+    })
     .catch(e => log.warn('HEARTBEAT', 'PUT error', { err: e.message, slot: slot.index }))
 }
 
@@ -944,6 +1398,23 @@ const controlServer = http.createServer((req, res) => {
     res.end(JSON.stringify({ available: true, configured: !!(config.token && config.userId), country: config.country, userId: config.userId, where: 'desktop', ...getPublicState() }))
     return
   }
+  if (req.method === 'POST' && url.pathname === '/native/connection-slots') {
+    let body = ''
+    req.on('data', d => body += d)
+    req.on('end', async () => {
+      try {
+        const data = JSON.parse(body || '{}')
+        const result = await applyConnectionSlots(data.slots, { syncPeer: true })
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ available: true, configured: !!(config.token && config.userId), country: config.country, userId: config.userId, where: 'desktop', ...result.state }))
+      } catch (e) {
+        log.error('CONTROL', '/native/connection-slots error', { err: e.message })
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: e.message }))
+      }
+    })
+    return
+  }
   if (req.method === 'POST' && url.pathname === '/native/peer/register') {
     let body = ''
     req.on('data', d => body += d)
@@ -982,9 +1453,9 @@ const controlServer = http.createServer((req, res) => {
     return
   }
   if (req.method === 'POST' && url.pathname === '/quit') {
-    log.info('CONTROL', '/quit called â€” scheduling app.quit')
+    log.info('CONTROL', '/quit called â€” requesting app quit')
     res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: true }))
-    setTimeout(() => app.quit(), 500)
+    setTimeout(() => requestAppQuit('control-quit'), 250)
     return
   }
   if (req.method === 'POST' && url.pathname === '/stop') {
@@ -1020,6 +1491,8 @@ const controlServer = http.createServer((req, res) => {
 // â”€â”€ Tray â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function createTrayIcon() {
+  const icon = nativeImage.createFromPath(TRAY_ICON_PATH)
+  if (!icon.isEmpty()) return icon.resize({ width: 18, height: 18 })
   return nativeImage.createFromDataURL(
     'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAABHNCSVQICAgIfAhkiAAAAAlwSFlzAAALEwAACxMBAJqcGAAAABZ0RVh0Q3JlYXRpb24gVGltZQAxMC8yOS8xMiCqmi3JAAAAB3RJTUUH3QodEQkWMFCEAAAAGXRFWHRTb2Z0d2FyZQBBZG9iZSBJbWFnZVJlYWR5ccllPAAAAMFJREFUeNpi/P//PwMlgImBQjDwBrCgC4SGhjIwMzMzIGMwMzMzoGNkZGQgxoAFY2JiYmBiYmJAYWBgYGBiYmJAZmBgYGBiYmJAZWBgYGBiYmJAYmBgYGBiYmJAYGBgYGBiYmJAX2BgYGBiYmJAXmBgYGBiYmJAXGBgYGBiYmJAWmBgYGBiYmJAWGBgYGBiYmJAVmBgYGBiYmJAVGBgYGBiYmJAUmBgYGBiYmJAUGBgYGBiYmJATmBgYGBiYmIAAQYAoZAD/kexdGUAAAAASUVORK5CYII='
   )
@@ -1038,17 +1511,20 @@ function updateTray() {
   const configuredSlots = clampSlots(config.connectionSlots ?? 1)
   const activeSlots = activeSlotCount()
   const slotWarning = getSlotWarning(configuredSlots)
+  const privateBadge = config.privateShareActive ? ' [PRIVATE]' : ''
+  const starting = !!config.shareEnabled && !running && !peerSharing
   const menuItems = [
     { label: 'PeerMesh', enabled: false },
     { type: 'separator' },
-    { label: running ? `Sharing - ${config.country} (${configuredSlots} slots)` : (peerSharing ? 'Sharing (via CLI)' : 'Not sharing'), enabled: false },
-    { label: running ? `${activeSlots} / ${configuredSlots} slots active - ${stats.requestsHandled} requests - ${formatBytes(stats.bytesServed)} served` : (peerSharing ? 'CLI is the active provider' : 'Click to start sharing'), enabled: false },
+    { label: running ? `Sharing - ${config.country} (${configuredSlots} slots)${privateBadge}` : (peerSharing ? 'Sharing (via CLI)' : (starting ? `Starting - ${config.country} (${configuredSlots} slots)` : 'Not sharing')), enabled: false },
+    { label: running ? `${activeSlots} / ${configuredSlots} slots active - ${stats.requestsHandled} requests - ${formatBytes(stats.bytesServed)} served` : (peerSharing ? 'CLI is the active provider' : (starting ? `Connecting ${configuredSlots} slot${configuredSlots === 1 ? '' : 's'}...` : 'Click to start sharing')), enabled: false },
   ]
   if (slotWarning) menuItems.push({ label: slotWarning, enabled: false })
   menuItems.push(
     { type: 'separator' },
     {
-      label: running ? 'Stop Sharing' : (peerSharing ? 'Stop Sharing (CLI)' : 'Start Sharing'),
+      label: running ? 'Stop Sharing' : (peerSharing ? 'Stop Sharing (CLI)' : (starting ? 'Starting...' : 'Start Sharing')),
+      enabled: !starting,
       click: async () => {
         if (_sharingToggleBusy) { log.warn('TRAY', 'toggle click ignored - busy'); return }
         _sharingToggleBusy = true
@@ -1072,6 +1548,7 @@ function updateTray() {
         } else if (config.token && config.userId) {
           config.shareEnabled = true
           saveConfig()
+          updateTray()
           connectRelay()
         } else {
           shell.openExternal(`${API_BASE}/dashboard`)
@@ -1081,15 +1558,42 @@ function updateTray() {
         logState('post-toggle')
       },
     },
+    {
+      type: 'checkbox',
+      label: 'Launch on system start',
+      checked: !!config.launchOnStartup,
+      click: async (item) => {
+        await setLaunchOnStartupPreference(item.checked)
+      },
+    },
+    {
+      type: 'checkbox',
+      label: 'Auto-start sharing on launch',
+      checked: !!config.autoShareOnLaunch,
+      enabled: !!config.userId,
+      click: async (item) => {
+        try {
+          await setAutoShareOnLaunchPreference(item.checked)
+        } catch (e) {
+          showNotification('PeerMesh', e.message)
+          showWindow()
+          updateTray()
+        }
+      },
+    },
     { type: 'separator' },
     { label: 'Settings', click: showWindow },
     { label: 'Open Dashboard', click: () => shell.openExternal(`${API_BASE}/dashboard`) },
     { label: 'Open Debug Log', click: () => shell.openPath(LOG_FILE) },
     { type: 'separator' },
-    { label: 'Quit', click: () => { stopRelay(); if (settingsWindow) { settingsWindow.removeAllListeners('close'); settingsWindow.destroy() } app.quit() } },
+    { label: 'Quit', click: () => requestAppQuit('tray-quit') },
   )
   tray.setContextMenu(Menu.buildFromTemplate(menuItems))
-  tray.setToolTip(running ? `PeerMesh - Sharing (${config.country}, ${configuredSlots} slots)` : 'PeerMesh - Inactive')
+  tray.setToolTip(
+    running
+      ? `PeerMesh - Sharing (${config.country}, ${configuredSlots} slots${config.privateShareActive ? ', private' : ''})`
+      : (starting ? `PeerMesh - Starting (${config.country}, ${configuredSlots} slots)` : 'PeerMesh - Inactive')
+  )
 }
 
 function showWindow() {
@@ -1099,17 +1603,47 @@ function showWindow() {
     return
   }
   settingsWindow = new BrowserWindow({
-    width: 380, height: 520, resizable: false, title: 'PeerMesh', backgroundColor: '#0a0a0f',
+    width: 392, height: 640, resizable: false, title: 'PeerMesh', backgroundColor: '#0a0a0f', icon: APP_ICON_PATH,
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false },
   })
   settingsWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'))
   settingsWindow.setMenuBarVisibility(false)
-  settingsWindow.on('close', (e) => { e.preventDefault(); settingsWindow.hide() })
+  settingsWindow.on('close', (e) => {
+    if (_quitRequested) return
+    e.preventDefault()
+    settingsWindow.hide()
+  })
+  settingsWindow.on('closed', () => {
+    settingsWindow = null
+  })
   log.info('WINDOW', 'settings window created')
 }
 
 function showNotification(title, body) {
   if (Notification.isSupported()) new Notification({ title, body, silent: true }).show()
+}
+
+function requestAppQuit(reason = 'quit', { forceExitMs = 4000 } = {}) {
+  if (_quitRequested) return
+  _quitRequested = true
+  log.info('PROCESS', 'requestAppQuit', { reason })
+  shutdownDesktopRuntime(`request:${reason}`)
+  try {
+    if (settingsWindow) {
+      settingsWindow.removeAllListeners('close')
+      settingsWindow.close()
+    }
+  } catch {}
+  try {
+    if (tray) {
+      tray.destroy()
+      tray = null
+    }
+  } catch {}
+  setTimeout(() => {
+    try { app.exit(0) } catch {}
+  }, forceExitMs)
+  app.quit()
 }
 
 // â”€â”€ IPC â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -1186,21 +1720,80 @@ ipcMain.handle('get-state', () => {
   return state
 })
 
-ipcMain.handle('set-connection-slots', async (_, slots) => {
-  const nextSlots = clampSlots(slots)
-  const restart = running
-  config.connectionSlots = nextSlots
-  ensureSlotStates()
+async function setLaunchOnStartupPreference(enabled) {
+  config.launchOnStartup = !!enabled
   saveConfig()
-  if (restart) {
-    stopRelay()
-    config.shareEnabled = true
-    saveConfig()
-    connectRelay()
-  } else {
-    updateTray()
+  const result = applyLaunchOnStartupPreference(config.launchOnStartup)
+  updateTray()
+  return {
+    success: true,
+    enabled: config.launchOnStartup,
+    applied: result.applied,
+    state: getPublicState(),
   }
-  return { success: true, slots: nextSlots, state: getPublicState() }
+}
+
+async function setAutoShareOnLaunchPreference(enabled) {
+  if (enabled) {
+    if (!config.token || !config.userId) {
+      throw new Error('Sign in before enabling auto-start sharing')
+    }
+    try {
+      await refreshSharingConfig()
+    } catch (e) {
+      log.warn('IPC', 'auto-share-on-launch refresh failed', { err: e.message })
+    }
+    if (!config.hasAcceptedProviderTerms) {
+      throw new Error('Review and accept the sharing disclosure before enabling auto-start sharing')
+    }
+  }
+  config.autoShareOnLaunch = !!enabled
+  saveConfig()
+  updateTray()
+  return {
+    success: true,
+    enabled: config.autoShareOnLaunch,
+    state: getPublicState(),
+  }
+}
+
+ipcMain.handle('set-launch-on-startup', async (_, enabled) => setLaunchOnStartupPreference(enabled))
+
+ipcMain.handle('set-auto-share-on-launch', async (_, enabled) => {
+  try {
+    return await setAutoShareOnLaunchPreference(enabled)
+  } catch (e) {
+    return { success: false, error: e.message, state: getPublicState() }
+  }
+})
+
+ipcMain.handle('set-connection-slots', async (_, slots) => {
+  return applyConnectionSlots(slots, { syncPeer: true })
+})
+
+ipcMain.handle('get-private-share', async () => {
+  const privateShare = await getPrivateShareState(true)
+  return {
+    success: true,
+    baseDeviceId: config.baseDeviceId || null,
+    privateShare,
+    expiryPreset: getPrivateShareExpiryPreset(privateShare?.expires_at ?? null),
+  }
+})
+
+ipcMain.handle('update-private-share', async (_, payload = {}) => {
+  try {
+    const result = await updatePrivateShareState(payload)
+    return {
+      success: true,
+      baseDeviceId: config.baseDeviceId || null,
+      privateShare: result.privateShare,
+      expiryPreset: result.expiryPreset,
+      state: getPublicState(),
+    }
+  } catch (e) {
+    return { success: false, error: e.message }
+  }
 })
 
 ipcMain.handle('sign-in', async (_, { token, userId, country, trust }) => {
@@ -1217,18 +1810,9 @@ ipcMain.handle('sign-in', async (_, { token, userId, country, trust }) => {
   } catch (e) { log.warn('IPC', 'sign-in verify error (offline?)', { err: e.message }) }
   config = { ...config, token, userId, country, trust }
   try {
-    logRequest('GET', `${API_BASE}/api/user/sharing`)
-    const res = await fetch(`${API_BASE}/api/user/sharing`, { headers: { 'Authorization': `Bearer ${token}` }, signal: AbortSignal.timeout(4000) })
-    logResponse('GET', `${API_BASE}/api/user/sharing`, res.status)
-    if (res.ok) {
-      const data = await res.json()
-      config.hasAcceptedProviderTerms = data.has_accepted_provider_terms ?? false
-      config.todaySharedBytes = data.total_bytes_today ?? 0
-      config.todaySharedBytesDate = new Date().toISOString().slice(0, 10)
-      config.dailyShareLimitMb = data.daily_share_limit_mb ?? null
-      limitHit = data.daily_limit_bytes == null ? false : (config.todaySharedBytes ?? 0) >= data.daily_limit_bytes
-    }
+    await refreshSharingConfig()
   } catch {}
+  startSharingConfigSync()
   saveConfig(); updateTray(); showWindow()
   log.info('IPC', 'sign-in success', { userId, country })
   return { success: true }
@@ -1262,18 +1846,16 @@ ipcMain.handle('toggle-sharing', async () => {
     updateTray()
   } else if (config.token) {
     log.info('IPC', 'toggle-sharing ON â€” starting sharing')
-    config.shareEnabled = true; saveConfig(); connectRelay()
+    config.shareEnabled = true; saveConfig(); updateTray(); connectRelay()
   }
   _sharingToggleBusy = false
   logState('post-toggle-sharing')
   return { running, shareEnabled: !!config.shareEnabled }
 })
 
-ipcMain.handle('sign-out', () => {
+ipcMain.handle('sign-out', async () => {
   logIpc('sign-out', { userId: config.userId })
-  stopRelay()
-  config = { token: '', userId: '', country: 'RW', trust: 50, extId: config.extId, baseDeviceId: config.baseDeviceId, shareEnabled: false, connectionSlots: clampSlots(config.connectionSlots ?? 1), hasAcceptedProviderTerms: false }
-  saveConfig(); persistSharingState(false); updateTray()
+  await clearDesktopAuth('ipc_sign_out')
   log.info('IPC', 'signed out')
   return { success: true }
 })
@@ -1285,13 +1867,9 @@ ipcMain.handle('accept-provider-terms', async (_, { checkOnly } = {}) => {
   if (!config.token) return { success: false }
   if (checkOnly) {
     try {
-      const res = await fetch(`${API_BASE}/api/user/sharing`, { headers: { 'Authorization': `Bearer ${config.token}` }, signal: AbortSignal.timeout(3000) })
-      if (res.ok) {
-        const data = await res.json()
-        if (data.has_accepted_provider_terms === true) { config.hasAcceptedProviderTerms = true; saveConfig() }
-        log.info('IPC', 'accept-provider-terms checkOnly result', { accepted: data.has_accepted_provider_terms })
-        return { success: true, accepted: data.has_accepted_provider_terms === true }
-      }
+      const data = await refreshSharingConfig()
+      log.info('IPC', 'accept-provider-terms checkOnly result', { accepted: data?.has_accepted_provider_terms })
+      return { success: true, accepted: data?.has_accepted_provider_terms === true }
     } catch {}
     return { success: true, accepted: config.hasAcceptedProviderTerms ?? false }
   }
@@ -1304,22 +1882,25 @@ ipcMain.handle('accept-provider-terms', async (_, { checkOnly } = {}) => {
 
 // â”€â”€ App lifecycle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-if (IS_NATIVE_HOST_MODE) {
-  loadConfig()
-  registerNativeMessagingHost()
+async function bootstrapNativeHostMode() {
+  await app.whenReady()
+  log.info('PROCESS', '=== NATIVE HOST START ===', { argv: process.argv.slice(1).join(' ') })
+  await initializeDesktopRuntime('native_host')
   runNativeHostMode()
-} else app.whenReady().then(() => {
-  if (!app.requestSingleInstanceLock()) {
-    log.warn('PROCESS', 'Another instance is already running â€” quitting')
-    app.quit(); return
-  }
+}
+
+async function bootstrapDesktopApp() {
+  await app.whenReady()
   app.on('second-instance', () => { log.info('PROCESS', 'second-instance event â€” showing window'); showWindow() })
 
-  log.info('PROCESS', '=== APP START ===', { version: DESKTOP_VERSION, background: IS_BACKGROUND_LAUNCH, argv: process.argv.slice(1).join(' ') })
-  app.on('window-all-closed', (e) => e.preventDefault())
-  app.setLoginItemSettings({ openAtLogin: true, openAsHidden: true })
-
-  loadConfig()
+  log.info('PROCESS', '=== APP START ===', { version: DESKTOP_VERSION, background: IS_BACKGROUND_LAUNCH, argv: process.argv.slice(1).join(' '), userDataDir: USER_DATA_DIR })
+  app.on('window-all-closed', (e) => {
+    if (_quitRequested) return
+    e.preventDefault()
+  })
+  if (process.platform === 'win32') app.setAppUserModelId('com.peermesh.desktop')
+  await initializeDesktopRuntime('desktop_app')
+  applyLaunchOnStartupPreference(config.launchOnStartup)
 
   tray = new Tray(createTrayIcon())
   tray.setToolTip('PeerMesh')
@@ -1466,9 +2047,21 @@ if (IS_NATIVE_HOST_MODE) {
           }
         } catch (e) { log.debug('PORT', 'no CLI on PEER_PORT at startup', { err: e.message }) }
 
-        log.info('PORT', 'startup check complete', { cliAlreadySharing, hasToken: !!config.token, hasUserId: !!config.userId, shareEnabled: config.shareEnabled })
+        const shouldAutoShare = !cliAlreadySharing && !!(config.token && config.userId && config.autoShareOnLaunch && config.hasAcceptedProviderTerms)
+        log.info('PORT', 'startup check complete', {
+          cliAlreadySharing,
+          hasToken: !!config.token,
+          hasUserId: !!config.userId,
+          shareEnabled: config.shareEnabled,
+          autoShareOnLaunch: config.autoShareOnLaunch,
+          hasAcceptedProviderTerms: config.hasAcceptedProviderTerms,
+          shouldAutoShare,
+        })
         logState('startup')
-        if (!cliAlreadySharing && config.token && config.userId && config.shareEnabled) {
+        if (shouldAutoShare) {
+          config.shareEnabled = true
+          saveConfig()
+          updateTray()
           log.info('PORT', 'auto-connecting relay on startup')
           connectRelay()
         }
@@ -1477,23 +2070,26 @@ if (IS_NATIVE_HOST_MODE) {
   })
   tester.listen(CONTROL_PORT, '127.0.0.1')
 
-  if (config.token && config.userId && config.shareEnabled) {
-    if (!IS_BACKGROUND_LAUNCH) showWindow()
-  } else { showWindow() }
-})
+  if (!IS_BACKGROUND_LAUNCH) showWindow()
+}
+
+if (!HAS_SINGLE_INSTANCE_LOCK) {
+  log.warn('PROCESS', 'Another instance is already running - quitting')
+  app.quit()
+} else if (IS_NATIVE_HOST_MODE) {
+  void bootstrapNativeHostMode().catch((e) => {
+    log.error('PROCESS', 'native host bootstrap failed', { err: e.message, stack: e.stack })
+    app.quit()
+  })
+} else {
+  void bootstrapDesktopApp().catch((e) => {
+    log.error('PROCESS', 'desktop bootstrap failed', { err: e.message, stack: e.stack })
+    app.quit()
+  })
+}
 
 app.on('before-quit', () => {
+  _quitRequested = true
   log.info('PROCESS', '=== APP QUIT ===')
-  logState('before-quit')
-  if (_cliWatchTimer) { clearInterval(_cliWatchTimer); _cliWatchTimer = null; log.info('PROCESS', '_cliWatchTimer cleared on quit') }
-  stopRelay()
-  closeAllTunnels(false)
-  try { controlServer.close(); log.debug('PROCESS', 'controlServer closed') } catch {}
-  try { localProxyServer.close(); log.debug('PROCESS', 'localProxyServer closed') } catch {}
-  if (config.token && config.userId && config.extId) {
-    fetch(`${API_BASE}/api/user/sharing`, { method: 'DELETE', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` }, body: JSON.stringify({ device_id: config.extId }) }).catch(() => {})
-    fetch(`${API_BASE}/api/user/sharing`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` }, body: JSON.stringify({ isSharing: false }) }).catch(() => {})
-  }
-  if (process.platform === 'win32') { try { spawnSync('taskkill', ['/F', '/IM', 'node.exe', '/T'], { stdio: 'ignore' }) } catch {} }
-  else { try { spawnSync('pkill', ['-f', 'peermesh'], { stdio: 'ignore' }) } catch {} }
+  shutdownDesktopRuntime('before-quit')
 })

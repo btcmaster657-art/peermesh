@@ -26,7 +26,9 @@ export type Session = {
   id: string
   user_id: string
   provider_id: string | null
+  provider_kind: string | null
   target_country: string
+  target_host: string | null
   relay_endpoint: string | null
   status: 'pending' | 'active' | 'ended' | 'flagged'
   bytes_used: number

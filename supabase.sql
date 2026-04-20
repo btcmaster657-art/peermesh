@@ -81,7 +81,9 @@ create table sessions (
   id uuid primary key default gen_random_uuid(),
   user_id uuid references profiles(id) on delete cascade not null,
   provider_id uuid references profiles(id) on delete set null,
+  provider_kind text,
   target_country text not null,
+  target_host text,
   relay_endpoint text,
   status text default 'pending' check (status in ('pending','active','ended','flagged')),
   bytes_used bigint default 0,
@@ -354,7 +356,7 @@ begin
     provider_id      = coalesce(p_provider_id, provider_id),
     provider_country = coalesce(p_provider_country, provider_country),
     target_host      = coalesce(p_target_host, target_host),
-    bytes_used       = p_bytes_used,
+    bytes_used       = greatest(coalesce(bytes_used, 0), coalesce(p_bytes_used, 0)),
     ended_at         = now()
   where session_id = p_session_id;
 end;
@@ -466,3 +468,5 @@ alter table profiles add column if not exists daily_share_limit_mb integer defau
 -- ================================
 alter table profiles add column if not exists share_bytes_today bigint default 0;
 alter table profiles add column if not exists share_bytes_today_date date default current_date;
+alter table sessions add column if not exists provider_kind text;
+alter table sessions add column if not exists target_host text;

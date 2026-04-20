@@ -13,10 +13,16 @@ export type SessionInfo = {
   relayEndpoint: string
 }
 
+type PendingRequest = {
+  resolve: (response: ProxyResponse) => void
+  timer: ReturnType<typeof setTimeout>
+}
+
 export class PeerRequester {
   private ws: WebSocket | null = null
-  private pending = new Map<string, (r: ProxyResponse) => void>()
-  private onDisconnect?: () => void
+  private pending = new Map<string, PendingRequest>()
+  private onDisconnect?: (reason?: string) => void
+  private onReconnect?: (sessionInfo: SessionInfo, attempt?: number) => void
   private agentSessionId = ''
   sessionInfo: SessionInfo | null = null
 
@@ -25,19 +31,53 @@ export class PeerRequester {
     dbSessionId: string,
     country: string,
     userId: string,
-    onDisconnect?: () => void,
+    onDisconnect?: (reason?: string) => void,
     preferredProviderUserId?: string | null,
     privateProviderUserId?: string | null,
     privateBaseDeviceId?: string | null,
-    relayFallbackList?: string[]
+    relayFallbackList?: string[],
+    onReconnect?: (sessionInfo: SessionInfo, attempt?: number) => void
   ): Promise<void> {
     this.onDisconnect = onDisconnect
+    this.onReconnect = onReconnect
+    this.agentSessionId = ''
+    this.sessionInfo = null
     const fallbackList = (relayFallbackList && relayFallbackList.length > 0)
       ? relayFallbackList
       : [relayEndpoint]
 
     return new Promise((resolve, reject) => {
       let attemptIndex = 0
+      let settled = false
+      let disconnected = false
+      let connectTimer: ReturnType<typeof setTimeout> | null = null
+
+      const clearConnectTimer = () => {
+        if (!connectTimer) return
+        clearTimeout(connectTimer)
+        connectTimer = null
+      }
+
+      const resolveOnce = () => {
+        if (settled) return
+        settled = true
+        clearConnectTimer()
+        resolve()
+      }
+
+      const rejectOnce = (error: Error) => {
+        if (settled) return
+        settled = true
+        clearConnectTimer()
+        reject(error)
+      }
+
+      const notifyDisconnect = (reason = 'Connection lost') => {
+        if (disconnected) return
+        disconnected = true
+        this.flushPending(reason)
+        this.onDisconnect?.(reason)
+      }
 
       const tryConnect = () => {
         const relay = fallbackList[attemptIndex % fallbackList.length]
@@ -65,44 +105,60 @@ export class PeerRequester {
 
           if (msg.type === 'agent_session_ready') {
             this.agentSessionId = msg.sessionId
-            resolve()
+            resolveOnce()
+          }
+
+          if (msg.type === 'session_reconnected') {
+            this.agentSessionId = msg.sessionId
+            this.sessionInfo = {
+              sessionId: msg.sessionId,
+              country: msg.country ?? country,
+              relayEndpoint: relay,
+            }
+            this.onReconnect?.(this.sessionInfo, msg.attempt)
           }
 
           if (msg.type === 'proxy_response') {
             const response = msg.response as ProxyResponse
-            const cb = this.pending.get(response.requestId)
-            if (cb) {
-              cb(response)
+            const pending = this.pending.get(response.requestId)
+            if (pending) {
+              clearTimeout(pending.timer)
               this.pending.delete(response.requestId)
+              pending.resolve(response)
             }
           }
 
           if (msg.type === 'error') {
-            reject(new Error(msg.message))
+            if (!settled) {
+              rejectOnce(new Error(msg.message))
+            } else {
+              notifyDisconnect(msg.message)
+            }
           }
 
           if (msg.type === 'session_ended') {
-            this.onDisconnect?.()
+            notifyDisconnect(msg.reason ?? 'Peer session ended')
           }
         }
 
         this.ws.onerror = () => {
-          if (attemptIndex < fallbackList.length - 1) {
+          if (!settled && attemptIndex < fallbackList.length - 1) {
             attemptIndex++
             setTimeout(tryConnect, 1500)
-          } else {
-            reject(new Error('WebSocket connection failed'))
+          } else if (!settled) {
+            rejectOnce(new Error('WebSocket connection failed'))
           }
         }
 
         this.ws.onclose = () => {
-          if (this.sessionInfo) this.onDisconnect?.()
+          if (!settled) return
+          if (this.sessionInfo) notifyDisconnect('Peer connection closed')
         }
 
-        setTimeout(() => {
+        connectTimer = setTimeout(() => {
           if (!this.agentSessionId) {
             this.ws?.close()
-            reject(new Error('No peer available in ' + country + ' — try another country'))
+            rejectOnce(new Error('No peer available in ' + country + ' - try another country'))
           }
         }, 20_000)
       }
@@ -117,7 +173,14 @@ export class PeerRequester {
     }
     const requestId = crypto.randomUUID()
     return new Promise((resolve) => {
-      this.pending.set(requestId, resolve)
+      const timer = setTimeout(() => {
+        const pending = this.pending.get(requestId)
+        if (!pending) return
+        this.pending.delete(requestId)
+        pending.resolve({ requestId, status: 504, headers: {}, body: '', error: 'Request timed out' })
+      }, 30_000)
+
+      this.pending.set(requestId, { resolve, timer })
       this.ws!.send(JSON.stringify({
         type: 'proxy_request',
         sessionId: this.agentSessionId,
@@ -129,13 +192,15 @@ export class PeerRequester {
           body: options.body ?? null,
         },
       }))
-      setTimeout(() => {
-        if (this.pending.has(requestId)) {
-          this.pending.delete(requestId)
-          resolve({ requestId, status: 504, headers: {}, body: '', error: 'Request timed out' })
-        }
-      }, 30_000)
     })
+  }
+
+  private flushPending(reason: string) {
+    for (const [requestId, pending] of this.pending.entries()) {
+      clearTimeout(pending.timer)
+      pending.resolve({ requestId, status: 503, headers: {}, body: '', error: reason })
+    }
+    this.pending.clear()
   }
 
   disconnect() {
@@ -145,7 +210,7 @@ export class PeerRequester {
     this.ws?.close()
     this.ws = null
     this.sessionInfo = null
-    this.pending.clear()
+    this.flushPending('Disconnected')
   }
 
   get isConnected(): boolean {

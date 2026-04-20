@@ -6,6 +6,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync } fr
 import { homedir } from 'os'
 import { join } from 'path'
 import http from 'http'
+import { randomUUID } from 'crypto'
 
 if (process.platform === 'win32') {
   try { process.stdout.setEncoding('utf8') } catch {}
@@ -35,7 +36,8 @@ async function getLiveRelays() {
 
 const CONFIG_DIR = join(homedir(), '.peermesh')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
-const VERSION     = '1.0.31'
+const SHARED_IDENTITY_FILE = join(CONFIG_DIR, 'machine-identity.json')
+const VERSION     = '1.0.34'
 const DEBUG_LOG = join(homedir(), 'Desktop', 'peermesh-debug.log')
 
 const CONTROL_PORT = 7654
@@ -50,7 +52,13 @@ const limitIdx = args.indexOf('--limit')
 const limitArg = limitIdx !== -1 ? args[limitIdx + 1] : undefined
 const slotsIdx = args.indexOf('--slots')
 const slotsArg = slotsIdx !== -1 ? args[slotsIdx + 1] : undefined
+const privateExpiryIdx = args.indexOf('--private-expiry')
+const privateExpiryArg = privateExpiryIdx !== -1 ? args[privateExpiryIdx + 1] : undefined
 const noLimit = args.includes('--no-limit')
+const privateOnFlag = args.includes('--private-on')
+const privateOffFlag = args.includes('--private-off')
+const privateRefreshFlag = args.includes('--private-refresh')
+const privateStatusFlag = args.includes('--private-status')
 const resetFlag = args.includes('--reset')
 const statusFlag = args.includes('--status')
 const serveFlag = args.includes('--serve')
@@ -151,11 +159,46 @@ if (config.country?.startsWith('--')) {
   saveConfig(config)
 }
 
-if (!config.baseDeviceId) config.baseDeviceId = config.deviceId || ('cli_' + Math.random().toString(36).slice(2, 10))
-if (!config.deviceId) config.deviceId = config.baseDeviceId
-if (!config.connectionSlots) config.connectionSlots = 1
+function createSharedBaseDeviceId() {
+  return `pm_${randomUUID().replace(/-/g, '')}`
+}
 
-const BASE_DEVICE_ID = config.baseDeviceId
+function readSharedBaseDeviceId() {
+  try {
+    if (!existsSync(SHARED_IDENTITY_FILE)) return null
+    const raw = JSON.parse(readFileSync(SHARED_IDENTITY_FILE, 'utf-8'))
+    const baseDeviceId = typeof raw?.baseDeviceId === 'string' ? raw.baseDeviceId.trim() : ''
+    return baseDeviceId || null
+  } catch (e) {
+    clog.warn('CONFIG', 'readSharedBaseDeviceId failed', { err: e.message, path: SHARED_IDENTITY_FILE })
+    return null
+  }
+}
+
+function writeSharedBaseDeviceId(baseDeviceId) {
+  if (!baseDeviceId) return
+  try {
+    if (!existsSync(CONFIG_DIR)) mkdirSync(CONFIG_DIR, { recursive: true })
+    writeFileSync(SHARED_IDENTITY_FILE, JSON.stringify({
+      baseDeviceId,
+      updatedAt: new Date().toISOString(),
+    }, null, 2))
+  } catch (e) {
+    clog.warn('CONFIG', 'writeSharedBaseDeviceId failed', { err: e.message, path: SHARED_IDENTITY_FILE })
+  }
+}
+
+function getOrCreateSharedBaseDeviceId(fallback) {
+  const existing = readSharedBaseDeviceId()
+  if (existing) return existing
+  const next = fallback || createSharedBaseDeviceId()
+  writeSharedBaseDeviceId(next)
+  return next
+}
+
+config.baseDeviceId = getOrCreateSharedBaseDeviceId(config.baseDeviceId || config.deviceId || createSharedBaseDeviceId())
+if (!config.deviceId || config.deviceId !== config.baseDeviceId) config.deviceId = config.baseDeviceId
+if (!config.connectionSlots) config.connectionSlots = 1
 
 let slotStates = []
 let limitHit = false
@@ -165,6 +208,39 @@ let peerPort = null
 let _controlLimitBytes = null
 let _pendingBytes = 0
 let _flushTimer = null
+let _profileSyncTimer = null
+
+function getBaseDeviceId() {
+  return config.baseDeviceId
+}
+
+function rotateCliIdentity() {
+  config.baseDeviceId = createSharedBaseDeviceId()
+  config.deviceId = config.baseDeviceId
+  writeSharedBaseDeviceId(config.baseDeviceId)
+  ensureSlotStates()
+}
+
+async function clearCliCredentials(reason, { rotateIdentity = false } = {}) {
+  stopProfileSync()
+  stopRelay()
+  config.token = null
+  config.userId = null
+  config.username = null
+  config.country = 'RW'
+  config.trust = 50
+  config.shareEnabled = false
+  config.todaySharedBytes = 0
+  config.privateShareActive = false
+  config.privateShare = null
+  if (rotateIdentity) rotateCliIdentity()
+  saveConfig(config)
+  clog.warn('AUTH', 'credentials cleared', {
+    reason,
+    rotateIdentity,
+    baseDeviceId: config.baseDeviceId,
+  })
+}
 
 function getConnectionSlots() {
   return clampSlots(config.connectionSlots ?? 1)
@@ -181,7 +257,7 @@ function slotLog(slot, message, level = 'info') {
 function createSlotState(index) {
   return {
     index,
-    deviceId: `${BASE_DEVICE_ID}_slot_${index}`,
+    deviceId: `${getBaseDeviceId()}_slot_${index}`,
     ws: null,
     running: false,
     reconnectTimer: null,
@@ -198,6 +274,7 @@ function ensureSlotStates() {
   const desired = getConnectionSlots()
   while (slotStates.length < desired) slotStates.push(createSlotState(slotStates.length))
   if (slotStates.length > desired) slotStates = slotStates.slice(0, desired)
+  for (const slot of slotStates) slot.deviceId = `${getBaseDeviceId()}_slot_${slot.index}`
   return slotStates
 }
 
@@ -247,14 +324,15 @@ function getStatePayload() {
   return {
     available: true,
     running: isRunning(),
-    shareEnabled: isRunning(),
+    shareEnabled: !!config.shareEnabled,
     configured: !!(config.token && config.userId),
     userId: config.userId ?? null,
     version: VERSION,
     where: 'cli',
-    baseDeviceId: BASE_DEVICE_ID,
+    baseDeviceId: getBaseDeviceId(),
     connectionSlots: getConnectionSlots(),
     privateShareActive: !!(config.privateShareActive),
+    privateShare: config.privateShare ?? null,
     slots: {
       configured: getConnectionSlots(),
       active: activeSlotCount(),
@@ -328,6 +406,67 @@ function enforceLocalLimit(limitBytes) {
   process.exit(0)
 }
 
+function applySharingProfileData(data, { source = 'remote' } = {}) {
+  const previousPrivateShareEnabled = !!config.privateShare?.enabled
+  const previousPrivateShareActive = !!config.privateShareActive
+  const previousPrivateShareCode = config.privateShare?.code ?? null
+
+  const nextPrivateShare = data.private_share ?? null
+  const nextPrivateShareEnabled = !!nextPrivateShare?.enabled
+  const nextPrivateShareActive = !!(nextPrivateShare?.enabled && nextPrivateShare?.active)
+  const nextPrivateShareCode = nextPrivateShare?.code ?? null
+  if (data.daily_limit_bytes != null) _controlLimitBytes = data.daily_limit_bytes
+  else if (data.daily_share_limit_mb != null) _controlLimitBytes = data.daily_share_limit_mb * 1024 * 1024
+
+  config.todaySharedBytes = data.total_bytes_today ?? 0
+  config.privateShare = nextPrivateShare
+  config.privateShareActive = nextPrivateShareActive
+  if (data.has_accepted_provider_terms != null) config.hasAcceptedProviderTerms = !!data.has_accepted_provider_terms
+  saveConfig(config)
+
+  const privacyToggleChanged = previousPrivateShareEnabled !== nextPrivateShareEnabled
+  const visibilityChanged = previousPrivateShareActive !== nextPrivateShareActive || previousPrivateShareCode !== nextPrivateShareCode
+
+  if (privacyToggleChanged && config.shareEnabled && isRunning()) {
+    clog.warn('PRIVATE', 'private sharing mode changed - stopping provider until manually restarted', {
+      source,
+      from: previousPrivateShareEnabled,
+      to: nextPrivateShareEnabled,
+    })
+    stopRelay()
+    config.shareEnabled = false
+    saveConfig(config)
+    console.log('')
+    console.log('  Private sharing changed.')
+    console.log('  Sharing stopped. Start sharing again manually to apply the new mode.')
+    console.log('')
+  } else if (visibilityChanged) {
+    clog.info('PRIVATE', 'private sharing state synced', {
+      source,
+      enabled: nextPrivateShareEnabled,
+      active: nextPrivateShareActive,
+      codeChanged: previousPrivateShareCode !== nextPrivateShareCode,
+    })
+  }
+
+  return data
+}
+
+function stopProfileSync() {
+  if (!_profileSyncTimer) return
+  clearInterval(_profileSyncTimer)
+  _profileSyncTimer = null
+}
+
+function startProfileSync() {
+  stopProfileSync()
+  if (!config.token || !config.userId) return
+  void pollTodayBytes()
+  _profileSyncTimer = setInterval(() => {
+    void pollTodayBytes()
+  }, 5_000)
+}
+
 function addBytes(slot, bytes, limitBytes) {
   slot.sessionBytes += bytes
   _pendingBytes += bytes
@@ -340,19 +479,108 @@ async function pollTodayBytes() {
   syncUsageDay()
   clogRequest('GET', `${API_BASE}/api/user/sharing`)
   try {
-    const res = await fetch(`${API_BASE}/api/user/sharing${BASE_DEVICE_ID ? `?baseDeviceId=${encodeURIComponent(BASE_DEVICE_ID)}` : ''}`, {
+    const res = await fetch(`${API_BASE}/api/user/sharing${getBaseDeviceId() ? `?baseDeviceId=${encodeURIComponent(getBaseDeviceId())}` : ''}`, {
       headers: { Authorization: `Bearer ${config.token}` },
     })
     clogResponse('GET', `${API_BASE}/api/user/sharing`, res.status)
+    if (res.status === 401 || res.status === 403) {
+      await clearCliCredentials(`poll_today_bytes_${res.status}`)
+      return
+    }
     if (!res.ok) return
     const data = await res.json()
-    config.todaySharedBytes = data.total_bytes_today ?? 0
-    config.privateShareActive = !!(data.private_share?.enabled && data.private_share?.active)
-    saveConfig(config)
-    return data
+    return applySharingProfileData(data, { source: 'pollTodayBytes' })
   } catch (e) {
     clog.warn('API', 'pollTodayBytes error', { err: e.message })
   }
+}
+
+function getPrivateShareExpiryPreset(expiresAt) {
+  if (!expiresAt) return 'none'
+  const hours = Math.max(0, Math.round((new Date(expiresAt).getTime() - Date.now()) / 3600000))
+  if (hours <= 2) return '1'
+  if (hours <= 30) return '24'
+  if (hours <= 24 * 8) return '168'
+  return 'none'
+}
+
+function parsePrivateExpiryArg(value) {
+  if (value === undefined) return undefined
+  if (value === 'none' || value === 'null') return 'none'
+  const parsed = parseInt(value, 10)
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 720) {
+    throw new Error('--private-expiry must be "none" or an integer between 1 and 720')
+  }
+  return String(parsed)
+}
+
+async function updatePrivateShareState({ enabled, refresh = false, expiryHours } = {}) {
+  if (!config.token || !config.userId) throw new Error('Sign in required')
+  const expiryValue = expiryHours === undefined
+    ? undefined
+    : (expiryHours === 'none' ? null : parseInt(expiryHours, 10))
+  const previousEnabled = !!config.privateShare?.enabled
+
+  clogRequest('POST', `${API_BASE}/api/user/sharing`, {
+    privateSharing: {
+      baseDeviceId: getBaseDeviceId(),
+      enabled,
+      refresh: refresh === true,
+      expiryHours: expiryValue,
+    },
+  })
+
+  const res = await fetch(`${API_BASE}/api/user/sharing`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
+    body: JSON.stringify({
+      privateSharing: {
+        baseDeviceId: getBaseDeviceId(),
+        enabled,
+        refresh: refresh === true,
+        expiryHours: expiryValue,
+      },
+    }),
+    signal: AbortSignal.timeout(5000),
+  })
+  clogResponse('POST', `${API_BASE}/api/user/sharing`, res.status)
+  if (res.status === 401 || res.status === 403) {
+    await clearCliCredentials(`private_share_${res.status}`)
+    throw new Error('Session expired - please sign in again')
+  }
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok || data.error) throw new Error(data.error || 'Could not update private sharing')
+
+  config.privateShare = data.private_share ?? null
+  config.privateShareActive = !!(data.private_share?.enabled && data.private_share?.active)
+  saveConfig(config)
+
+  if (config.shareEnabled && isRunning() && previousEnabled !== !!config.privateShare?.enabled) {
+    clog.info('PRIVATE', 'private sharing mode changed locally - stopping until manually restarted', {
+      from: previousEnabled,
+      to: !!config.privateShare?.enabled,
+    })
+    stopRelay()
+    config.shareEnabled = false
+    saveConfig(config)
+    console.log('')
+    console.log('  Private sharing changed.')
+    console.log('  Sharing stopped. Start sharing again manually to apply the new mode.')
+    console.log('')
+  }
+
+  return config.privateShare
+}
+
+function printPrivateShareState(privateShare) {
+  const code = privateShare?.code ?? '---------'
+  const mode = privateShare?.enabled
+    ? (privateShare?.active ? 'ACTIVE' : 'ENABLED (inactive/expired)')
+    : 'DISABLED'
+  const expires = privateShare?.expires_at ? new Date(privateShare.expires_at).toLocaleString() : 'none'
+  console.log(`  Private sharing: ${mode}`)
+  console.log(`  Private code:    ${code}`)
+  console.log(`  Private expiry:  ${expires}`)
 }
 
 function sendMsg(slot, data) {
@@ -381,10 +609,19 @@ function sendHeartbeat(slot) {
   fetch(`${API_BASE}/api/user/sharing`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
-    body: JSON.stringify({ device_id: slot.deviceId }),
+    body: JSON.stringify({ device_id: slot.deviceId, user_id: config.userId }),
   })
-    .then(res => { clogResponse('PUT', `${API_BASE}/api/user/sharing`, res.status); return res.ok ? res.json() : null })
-    .then(data => { if (data) clog.debug('HEARTBEAT', 'PUT ok', { slot: slot.index, data: JSON.stringify(data).slice(0, 80) }) })
+    .then(async (res) => {
+      clogResponse('PUT', `${API_BASE}/api/user/sharing`, res.status)
+      if (res.status === 401) {
+        clog.warn('HEARTBEAT', 'token expired — clearing credentials for re-auth', { slot: slot.index })
+        await clearCliCredentials('heartbeat_401')
+        stopRelay()
+        main()
+      } else if (res.ok) {
+        return res.json().then(data => { if (data) clog.debug('HEARTBEAT', 'PUT ok', { slot: slot.index, data: JSON.stringify(data).slice(0, 80) }) })
+      }
+    })
     .catch(e => clog.warn('HEARTBEAT', 'PUT error', { slot: slot.index, err: e.message }))
 }
 
@@ -459,7 +696,7 @@ function attachSlotSocketHandlers(slot, limitBytes) {
       supportsHttp: true,
       supportsTunnel: true,
       deviceId: slot.deviceId,
-      baseDeviceId: BASE_DEVICE_ID,
+      baseDeviceId: getBaseDeviceId(),
     }
     clogRelay('SEND', 'register_provider', { slot: slot.index, deviceId: slot.deviceId })
     slot.ws.send(JSON.stringify(reg))
@@ -620,6 +857,24 @@ function stopRelay() {
   if (config.token) persistSharingState(false)
 }
 
+function applyConnectionSlots(nextSlots) {
+  const normalizedSlots = clampSlots(nextSlots)
+  const shouldResume = !!config.shareEnabled
+
+  config.connectionSlots = normalizedSlots
+  ensureSlotStates()
+  saveConfig(config)
+
+  if (shouldResume) {
+    stopRelay()
+    config.shareEnabled = true
+    saveConfig(config)
+    connectRelay(_controlLimitBytes)
+  }
+
+  return { success: true, slots: normalizedSlots, state: getStatePayload() }
+}
+
 function getSlotWarning(slots) {
   if (slots > 16) return 'Very high resource usage — recommended for servers or dedicated machines only.'
   if (slots > 8) return 'High resource usage — ensure a stable connection.'
@@ -639,6 +894,7 @@ function printStatus(limitBytes) {
   console.log(`  Sharing active [${privBadge}] — ${active} / ${configured} slots active`)
   console.log(`  ${aggregate.requestsHandled} requests — ${formatBytes(aggregate.bytesServed)} served`)
   console.log(`  ${limitStr}`)
+  if (config.privateShare?.code) console.log(`  Private code: ${config.privateShare.code}`)
   const warning = getSlotWarning(configured)
   if (warning) console.log(`  ${warning}`)
   console.log('')
@@ -713,6 +969,23 @@ function buildHandler(port) {
       res.end(JSON.stringify(getStatePayload()))
       stopRelay()
       setTimeout(() => process.exit(0), 300)
+      return
+    }
+
+    if (req.method === 'POST' && url.pathname === '/native/connection-slots') {
+      let body = ''
+      req.on('data', chunk => { body += chunk })
+      req.on('end', () => {
+        try {
+          const data = JSON.parse(body || '{}')
+          const result = applyConnectionSlots(data.slots)
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify(result.state))
+        } catch (e) {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: e.message }))
+        }
+      })
       return
     }
 
@@ -857,10 +1130,11 @@ async function main() {
   console.log('')
 
   if (resetFlag) {
-    const keep = { baseDeviceId: config.baseDeviceId, deviceId: config.deviceId, connectionSlots: config.connectionSlots ?? 1 }
+    const keep = { connectionSlots: config.connectionSlots ?? 1 }
     config = keep
+    rotateCliIdentity()
     saveConfig(config)
-    log('Credentials cleared — please sign in again')
+    log('Credentials cleared and local device identity rotated — please sign in again')
     console.log('')
   }
 
@@ -880,7 +1154,7 @@ async function main() {
   clog.info('PROCESS', '=== CLI START ===', {
     version: VERSION,
     argv: process.argv.slice(2).join(' '),
-    baseDeviceId: BASE_DEVICE_ID,
+    baseDeviceId: getBaseDeviceId(),
     connectionSlots: getConnectionSlots(),
     logFile: DEBUG_LOG,
   })
@@ -909,9 +1183,7 @@ async function main() {
       })
       clogResponse('GET', `${API_BASE}/api/extension-auth?verify`, res.status)
       if (!res.ok) {
-        config.token = null
-        config.userId = null
-        saveConfig(config)
+        await clearCliCredentials(`startup_verify_${res.status}`)
         return main()
       }
     } catch {
@@ -922,6 +1194,26 @@ async function main() {
 
   syncUsageDay()
   const profile = await pollTodayBytes()
+  startProfileSync()
+
+  if (privateStatusFlag || privateOnFlag || privateOffFlag || privateRefreshFlag || privateExpiryArg !== undefined) {
+    try {
+      const expiryHours = parsePrivateExpiryArg(privateExpiryArg)
+      const targetEnabled = privateOnFlag ? true : privateOffFlag ? false : (privateRefreshFlag ? true : undefined)
+      const updated = (privateOnFlag || privateOffFlag || privateRefreshFlag || expiryHours !== undefined)
+        ? await updatePrivateShareState({ enabled: targetEnabled, refresh: privateRefreshFlag, expiryHours })
+        : (profile?.private_share ?? config.privateShare ?? null)
+      config.privateShare = updated ?? null
+      config.privateShareActive = !!(updated?.enabled && updated?.active)
+      saveConfig(config)
+      console.log('')
+      printPrivateShareState(config.privateShare)
+      console.log('')
+    } catch (e) {
+      console.error(`  x ${e.message}`)
+      process.exit(1)
+    }
+  }
 
   if (noLimit || limitArg !== undefined) {
     const newLimit = noLimit ? null : parseInt(limitArg, 10)
@@ -957,6 +1249,7 @@ async function main() {
     console.log(`  Shared today:  ${formatBytes(config.todaySharedBytes ?? 0)}`)
     console.log(`  Requests today:${String(config.todayRequestsHandled ?? 0).padStart(2)} `)
     console.log(`  Daily limit:   ${limitMb ? `${limitMb}MB` : 'none'}`)
+    printPrivateShareState(config.privateShare)
     console.log('')
     process.exit(0)
   }
@@ -1020,6 +1313,7 @@ async function main() {
   async function shutdown(calledByPeer = false) {
     console.log('')
     log('Stopping...')
+    stopProfileSync()
     if (peerPort && !calledByPeer) {
       try {
         await fetch(`http://127.0.0.1:${peerPort}/native/share/stop`, { method: 'POST', signal: AbortSignal.timeout(2000) })
@@ -1036,6 +1330,7 @@ async function main() {
 
   process.on('SIGINT', () => shutdown())
   process.on('SIGTERM', () => {
+    stopProfileSync()
     stopRelay()
     process.exit(0)
   })

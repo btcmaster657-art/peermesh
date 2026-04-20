@@ -229,7 +229,7 @@ function sendHeartbeat() {
   fetch(`${config.apiBase}/api/user/sharing`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
-    body: JSON.stringify({ device_id: DEVICE_ID, country: config.country }),
+    body: JSON.stringify({ device_id: DEVICE_ID, country: config.country, user_id: config.userId }),
   }).catch(err => log(`Heartbeat failed: ${err.message}`))
 }
 

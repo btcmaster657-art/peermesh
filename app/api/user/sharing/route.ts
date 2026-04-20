@@ -258,7 +258,18 @@ export async function PUT(req: Request) {
     return NextResponse.json({ error: 'device_id required' }, { status: 400 })
   }
 
-  const userId = await resolveUserId(req, user_id)
+  let userId = await resolveUserId(req, user_id)
+
+  // Fallback: token expired but body has user_id — verify the user exists before trusting it
+  if (!userId && user_id) {
+    const { data: profile } = await adminClient
+      .from('profiles')
+      .select('id')
+      .eq('id', user_id)
+      .maybeSingle()
+    if (profile) userId = user_id
+  }
+
   if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   // Detect country from the request IP

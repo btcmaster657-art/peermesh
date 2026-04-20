@@ -42,7 +42,7 @@
       letter-spacing: 1px;
       margin-top: 3px;
     }
-    .screen { display: none; flex-direction: column; flex: 1; padding: 20px; }
+    .screen { display: none; flex-direction: column; flex: 1; padding: 20px; overflow-y: auto; }
     .screen.active { display: flex; }
 
     /* ── Auth screen ── */
@@ -105,6 +105,19 @@
     }
     .toggle-info h4 { font-size: 13px; font-weight: 500; margin-bottom: 2px; }
     .toggle-info p { font-size: 11px; color: var(--muted); }
+    .toggle-row.compact {
+      margin-bottom: 8px;
+      padding: 12px;
+      background: #0d0d14;
+    }
+    .toggle-row.compact:last-child { margin-bottom: 0; }
+    .toggle-note {
+      margin-top: 8px;
+      font-size: 10px;
+      color: var(--muted);
+      line-height: 1.5;
+      font-family: 'Courier New', monospace;
+    }
     .slots-card {
       background: var(--surface);
       border: 1px solid var(--border);
@@ -120,15 +133,32 @@
       margin-bottom: 10px;
     }
     .slots-header label { font-size: 12px; font-weight: 600; }
-    .slots-input {
-      width: 72px;
-      padding: 8px 10px;
+    .slots-stepper {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .slots-step-btn {
+      width: 30px;
+      height: 30px;
       border-radius: 8px;
       border: 1px solid var(--border);
       background: #0d0d14;
       color: var(--text);
       font-family: 'Courier New', monospace;
+      font-size: 16px;
+      cursor: pointer;
+    }
+    .slots-step-btn:disabled {
+      color: var(--muted);
+      cursor: not-allowed;
+    }
+    .slots-value {
+      min-width: 28px;
       text-align: center;
+      font-family: 'Courier New', monospace;
+      font-size: 12px;
+      color: var(--text);
     }
     .slots-hint { font-size: 11px; color: var(--muted); line-height: 1.5; }
     .slots-warning {
@@ -164,6 +194,84 @@
       font-size: 10px;
       color: var(--muted);
       font-family: 'Courier New', monospace;
+    }
+    .private-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px;
+      margin-bottom: 10px;
+    }
+    .private-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+    .private-title {
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .private-subtitle {
+      font-size: 10px;
+      color: var(--muted);
+      line-height: 1.5;
+      margin-top: 4px;
+    }
+    .private-code-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .private-code {
+      flex: 1;
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: #0d0d14;
+      color: var(--accent);
+      font-family: 'Courier New', monospace;
+      font-size: 16px;
+      letter-spacing: 3px;
+      text-align: center;
+    }
+    .mini-btn {
+      padding: 8px 10px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--text);
+      cursor: pointer;
+      font-family: 'Courier New', monospace;
+      font-size: 10px;
+    }
+    .mini-btn:disabled {
+      cursor: not-allowed;
+      color: var(--muted);
+    }
+    .private-controls {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .private-select {
+      width: 100%;
+      padding: 8px 10px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: #0d0d14;
+      color: var(--text);
+      font-family: 'Courier New', monospace;
+      font-size: 11px;
+    }
+    .private-status {
+      font-size: 10px;
+      color: var(--muted);
+      font-family: 'Courier New', monospace;
+      line-height: 1.5;
     }
 
     .toggle {
@@ -285,17 +393,71 @@
       <button class="toggle" id="share-toggle"><span class="toggle-spinner"><span style="width:10px;height:10px;border:2px solid rgba(255,255,255,0.3);border-top-color:white;border-radius:50%;animation:spin 0.7s linear infinite;display:inline-block"></span></span></button>
     </div>
 
+    <div class="private-card">
+      <div class="private-head">
+        <div>
+          <div class="private-title">Startup behavior</div>
+          <div class="private-subtitle">Control whether PeerMesh starts with Windows and whether sharing begins automatically after launch.</div>
+        </div>
+      </div>
+      <div class="toggle-row compact">
+        <div class="toggle-info">
+          <h4>Launch on PC start</h4>
+          <p id="launch-startup-desc">Open PeerMesh quietly in the tray when you sign in to Windows.</p>
+        </div>
+        <button class="toggle" id="launch-startup-toggle"><span class="toggle-spinner"><span style="width:10px;height:10px;border:2px solid rgba(255,255,255,0.3);border-top-color:white;border-radius:50%;animation:spin 0.7s linear infinite;display:inline-block"></span></span></button>
+      </div>
+      <div class="toggle-row compact">
+        <div class="toggle-info">
+          <h4>Auto-start sharing on launch</h4>
+          <p id="auto-share-desc">When PeerMesh launches, begin sharing automatically after your prior disclosure acceptance.</p>
+        </div>
+        <button class="toggle" id="auto-share-toggle"><span class="toggle-spinner"><span style="width:10px;height:10px;border:2px solid rgba(255,255,255,0.3);border-top-color:white;border-radius:50%;animation:spin 0.7s linear infinite;display:inline-block"></span></span></button>
+      </div>
+      <div class="toggle-note" id="startup-note">These settings apply to this desktop only.</div>
+    </div>
+
     <div class="slots-card">
       <div class="slots-header">
         <div>
-          <label for="slots-input">Connection slots</label>
+          <label>Connection slots</label>
           <div class="slots-hint">One slot = one relay WebSocket and one independent provider slot.</div>
         </div>
-        <input id="slots-input" class="slots-input" type="number" min="1" max="32" step="1" value="1">
+        <div class="slots-stepper">
+          <button id="slots-decrement" class="slots-step-btn" type="button">-</button>
+          <div id="slots-value" class="slots-value">1</div>
+          <button id="slots-increment" class="slots-step-btn" type="button">+</button>
+        </div>
       </div>
       <div id="slots-warning" class="slots-warning"></div>
       <div class="slots-dots" id="slots-dots"></div>
       <div class="slot-summary" id="slots-summary">1 / 1 slots active</div>
+    </div>
+
+    <div class="private-card">
+      <div class="private-head">
+        <div>
+          <div class="private-title">Private sharing</div>
+          <div class="private-subtitle">Optional 9-digit access code for trusted connections. Applies to every slot on this desktop.</div>
+        </div>
+      </div>
+      <div class="private-code-row">
+        <div class="private-code" id="private-share-code">---------</div>
+        <button class="mini-btn" id="copy-private-share" disabled>COPY</button>
+      </div>
+      <div class="private-controls">
+        <select class="private-select" id="private-share-expiry">
+          <option value="1">1 HOUR</option>
+          <option value="24">24 HOURS</option>
+          <option value="168">7 DAYS</option>
+          <option value="none">NO EXPIRY</option>
+        </select>
+        <button class="mini-btn" id="refresh-private-share">REFRESH CODE</button>
+      </div>
+      <div class="private-controls">
+        <button class="mini-btn" id="toggle-private-share">ENABLE PRIVATE</button>
+        <div class="private-status" id="private-share-status">Sign in to manage private sharing.</div>
+      </div>
     </div>
 
     <!-- Stats -->

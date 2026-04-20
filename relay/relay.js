@@ -159,6 +159,8 @@ function createSession(requesterWs, provider, country, dbSessionId) {
     bytesProvider: 0,
     dbSessionId: dbSessionId ?? null,
     targetHost: null,
+    targetHostSynced: false,
+    providerMetadataSynced: false,
     reconnectAttempts: 0,
     privateBaseDeviceId: requesterWs.privateBaseDeviceId ?? null,
   })
@@ -167,6 +169,32 @@ function createSession(requesterWs, provider, country, dbSessionId) {
   send(requesterWs, { type: 'session_created', sessionId })
   log(requesterWs.peerId.slice(0,8), `SESSION_CREATED id=${sessionId.slice(0,8)} provider=${provider.peerId.slice(0,8)} country=${country}`)
   return sessionId
+}
+
+function syncSessionMetadata(session, reason = 'update') {
+  if (!API_BASE || !RELAY_SECRET || !session?.dbSessionId) return
+
+  const payload = {
+    dbSessionId: session.dbSessionId,
+    providerUserId: session.providerUserId ?? null,
+    providerKind: session.providerKind ?? null,
+    targetHost: session.targetHost ?? null,
+  }
+
+  fetch(`${API_BASE}/api/session/end`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', 'x-relay-secret': RELAY_SECRET },
+    body: JSON.stringify(payload),
+  })
+    .then(async (res) => {
+      if (!res.ok) {
+        const body = await res.text().catch(() => '')
+        log('RELAY', `SESSION_METADATA_${reason.toUpperCase()} status=${res.status} dbSessionId=${session.dbSessionId?.slice(0,8)} body=${body.slice(0,120)}`)
+        return
+      }
+      log('RELAY', `SESSION_METADATA_${reason.toUpperCase()} dbSessionId=${session.dbSessionId?.slice(0,8)} provider=${session.providerUserId?.slice(0,8) ?? 'none'} host=${session.targetHost ?? 'none'}`)
+    })
+    .catch((err) => logErr('RELAY', `SESSION_METADATA_${reason.toUpperCase()} failed dbSessionId=${session.dbSessionId?.slice(0,8)}`, err))
 }
 
 // ── Auto-reconnect — called when provider drops while requester is still live ─
@@ -306,7 +334,10 @@ proxyWss.on('connection', (ws, req) => {
         tunnelOpen = true
         send(provider, { type: 'open_tunnel', tunnelId, sessionId, hostname, port })
         const sess = sessions.get(sessionId)
-        if (sess && !sess.targetHost) sess.targetHost = hostname
+        if (sess && !sess.targetHost) {
+          sess.targetHost = hostname
+          syncSessionMetadata(sess, 'target_host')
+        }
         return
       }
       return
@@ -487,13 +518,7 @@ async function handleMessage(ws, msg) {
       }
       agentSession.providerUserId = ws.userId
       agentSession.providerKind = ws.providerKind ?? null
-      if (ws.userId && API_BASE) {
-        fetch(`${API_BASE}/api/session/end`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json', 'x-relay-secret': RELAY_SECRET },
-          body: JSON.stringify({ sessionId: msg.sessionId, providerUserId: ws.userId, providerKind: ws.providerKind ?? null }),
-        }).catch(() => {})
-      }
+      syncSessionMetadata(agentSession, 'provider_assign')
       break
     }
 
@@ -505,7 +530,10 @@ async function handleMessage(ws, msg) {
       const reqBytes = JSON.stringify(msg.request ?? {}).length
       proxySession.bytesRequester = (proxySession.bytesRequester ?? 0) + reqBytes
       if (msg.request?.url && !proxySession.targetHost) {
-        try { proxySession.targetHost = new URL(msg.request.url).hostname } catch {}
+        try {
+          proxySession.targetHost = new URL(msg.request.url).hostname
+          syncSessionMetadata(proxySession, 'target_host')
+        } catch {}
       }
       log(ws.peerId.slice(0,8), `PROXY_REQUEST → provider=${provider.peerId.slice(0,8)} url=${msg.request?.url?.slice(0,60)}`)
       send(provider, { type: 'proxy_request', sessionId: msg.sessionId, request: msg.request })
@@ -586,7 +614,14 @@ function reportSessionEnd(session, sessionId) {
       providerKind: provider?.providerKind ?? null,
     }),
   })
-    .then(r => log('RELAY', `SESSION_END_REPORT sessionId=${sessionId.slice(0,8)} status=${r.status} bytes=${bytesUsed}`))
+    .then(async (r) => {
+      if (!r.ok) {
+        const body = await r.text().catch(() => '')
+        log('RELAY', `SESSION_END_REPORT relaySession=${sessionId.slice(0,8)} dbSession=${dbSessionId.slice(0,8)} status=${r.status} bytes=${bytesUsed} body=${body.slice(0,120)}`)
+        return
+      }
+      log('RELAY', `SESSION_END_REPORT relaySession=${sessionId.slice(0,8)} dbSession=${dbSessionId.slice(0,8)} status=${r.status} bytes=${bytesUsed} provider=${session.providerUserId?.slice(0,8) ?? 'none'} host=${session.targetHost ?? 'none'}`)
+    })
     .catch(err => logErr('RELAY', 'SESSION_END_REPORT failed', err))
 }
 

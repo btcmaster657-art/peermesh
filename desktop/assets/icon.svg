@@ -1,0 +1,37 @@
+
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="48" y1="32" x2="460" y2="476" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#081922"/>
+      <stop offset="1" stop-color="#0B2C34"/>
+    </linearGradient>
+    <linearGradient id="line" x1="96" y1="88" x2="430" y2="432" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#5AF7C5"/>
+      <stop offset="1" stop-color="#10BCE5"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(256 164) rotate(90) scale(220)">
+      <stop stop-color="#8CFFF1" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#8CFFF1" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect x="32" y="32" width="448" height="448" rx="112" fill="url(#bg)"/>
+  <rect x="32" y="32" width="448" height="448" rx="112" fill="url(#glow)"/>
+  <rect x="58" y="58" width="396" height="396" rx="96" stroke="rgba(255,255,255,0.08)" stroke-width="2"/>
+
+  <path d="M144 130C186 106 230 94 276 94C361 94 421 141 421 210C421 258 389 297 331 323" stroke="url(#line)" stroke-width="22" stroke-linecap="round"/>
+  <path d="M106 296C106 374 165 420 251 420C305 420 348 406 382 377" stroke="url(#line)" stroke-width="22" stroke-linecap="round"/>
+  <path d="M162 170L230 230" stroke="url(#line)" stroke-width="20" stroke-linecap="round"/>
+  <path d="M352 170L282 236" stroke="url(#line)" stroke-width="20" stroke-linecap="round"/>
+  <path d="M166 346L234 282" stroke="url(#line)" stroke-width="20" stroke-linecap="round"/>
+  <path d="M350 346L280 286" stroke="url(#line)" stroke-width="20" stroke-linecap="round"/>
+
+  <circle cx="256" cy="256" r="68" fill="#081922" stroke="url(#line)" stroke-width="20"/>
+  <path d="M230 230H282C304 230 322 248 322 270C322 292 304 310 282 310H230V202H278" stroke="#E9FFF7" stroke-width="24" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M230 256H278" stroke="#E9FFF7" stroke-width="24" stroke-linecap="round"/>
+
+  <circle cx="142" cy="132" r="28" fill="#0F3943" stroke="url(#line)" stroke-width="14"/>
+  <circle cx="370" cy="132" r="28" fill="#0F3943" stroke="url(#line)" stroke-width="14"/>
+  <circle cx="142" cy="352" r="28" fill="#0F3943" stroke="url(#line)" stroke-width="14"/>
+  <circle cx="370" cy="352" r="28" fill="#0F3943" stroke="url(#line)" stroke-width="14"/>
+</svg>

@@ -37,6 +37,8 @@ let state = {
   privateShare: null,
   privateExpiryHours: '24',
   privateShareSaving: false,
+  privateShareRestartRequired: false,
+  slotUpdating: false,
   connectionType: 'public', // 'public' | 'private'
 }
 
@@ -46,6 +48,7 @@ window.addEventListener('offline', () => { state.isOnline = false; render() })
 // ── Session expiry ────────────────────────────────────────────────────────────
 
 async function handleExpiredSession() {
+  await chrome.runtime.sendMessage({ type: 'STOP_SHARING' }).catch(() => {})
   await chrome.runtime.sendMessage({ type: 'DISCONNECT' }).catch(() => {})
   state.user = null
   state.session = null
@@ -127,7 +130,8 @@ async function refreshRuntimeStatus() {
     if (!status) return
     state.session = status.session || null
     state.helper = status.helper || null
-    state.isSharing = !!(state.helper?.available && state.helper?.running)
+    state.isSharing = !!(state.helper?.available && (state.helper?.running || state.helper?.shareEnabled))
+    if (state.isSharing) state.privateShareRestartRequired = false
     await chrome.storage.local.set({
       session: state.session,
       isSharing: state.isSharing,
@@ -164,7 +168,7 @@ async function loadPrivateShareState(baseDeviceId) {
 async function savePrivateShareState(input) {
   const baseDeviceId = state.helper?.baseDeviceId
   if (!state.user || !baseDeviceId) {
-    state.error = 'A local desktop app or CLI device is required to manage private sharing'
+    state.error = 'A local sharing device is required to manage private sharing'
     render()
     return
   }
@@ -172,6 +176,7 @@ async function savePrivateShareState(input) {
   state.error = null
   render()
   try {
+    const previousEnabled = !!state.privateShare?.enabled
     const expiryHours = input.expiryHours === undefined
       ? undefined
       : (input.expiryHours === 'none' ? null : parseInt(input.expiryHours, 10))
@@ -194,6 +199,16 @@ async function savePrivateShareState(input) {
     if (!res.ok || data.error) throw new Error(data.error || 'Could not update private sharing')
     state.privateShare = data.private_share ?? null
     if (input.expiryHours !== undefined) state.privateExpiryHours = input.expiryHours
+    const enabledChanged = input.enabled !== undefined && previousEnabled !== !!state.privateShare?.enabled
+    if (enabledChanged && state.isSharing) {
+      state.shareToggling = true
+      render()
+      await chrome.runtime.sendMessage({ type: 'STOP_SHARING' }).catch(() => {})
+      state.isSharing = false
+      state.privateShareRestartRequired = true
+      await refreshRuntimeStatus()
+      state.shareToggling = false
+    }
   } catch (err) {
     state.error = err.message || 'Could not update private sharing'
   } finally {
@@ -223,7 +238,7 @@ function startPeerPolling() {
     statusPollInterval = setInterval(async () => {
       await refreshRuntimeStatus()
       await loadPrivateShareState(state.helper?.baseDeviceId ?? null)
-      const desktopSharing = !!(state.helper?.available && state.helper?.running)
+      const desktopSharing = !!(state.helper?.available && (state.helper?.running || state.helper?.shareEnabled))
       if (state.isSharing !== desktopSharing) {
         state.isSharing = desktopSharing
         await chrome.storage.local.set({ isSharing: desktopSharing })
@@ -334,10 +349,22 @@ function renderDashboard(app) {
   const { session, isSharing, selectedCountry, user, helper } = state
   const helperReady = !!helper?.available
   const helperBaseDeviceId = helper?.baseDeviceId ?? null
-  const helperSource = helper?.source === 'cli' ? 'CLI' : 'Desktop'
-  const helperLabel = helperReady
-    ? (isSharing ? `${helperSource} helper active — full-browser sharing enabled.` : `${helperSource} helper detected — ready to share.`)
-    : 'Desktop app or CLI required for full-browser sharing.'
+  const standaloneHelper = helper?.source === 'extension'
+  const configuredSlots = helper?.slots?.configured ?? helper?.connectionSlots ?? 1
+  const activeSlots = helper?.slots?.active ?? 0
+  const slotMax = standaloneHelper ? 1 : 32
+  const slotDots = Array.from({ length: configuredSlots }, (_, index) => {
+    const running = !!helper?.slots?.statuses?.[index]?.running || index < activeSlots
+    return `<span style="width:8px;height:8px;border-radius:999px;background:${running ? 'var(--accent)' : 'var(--border)'};box-shadow:${running ? '0 0 8px rgba(0,255,136,0.35)' : 'none'}"></span>`
+  }).join('')
+  const helperSource = standaloneHelper ? 'Extension' : helper?.source === 'cli' ? 'CLI' : helperReady ? 'Desktop' : 'PeerMesh'
+  const helperLabel = standaloneHelper
+    ? (isSharing
+      ? 'Extension standalone sharing active — single-slot web mode.'
+      : 'Extension standalone ready — one slot. Desktop or CLI adds full-browser tunnels and up to 32 slots.')
+    : helperReady
+      ? (isSharing ? `${helperSource} sharing active — earning credits.` : `${helperSource} helper detected — ready to share.`)
+      : 'Sharing is unavailable right now.'
 
   const offlineBanner = !state.isOnline
     ? `<div style="display:flex;align-items:center;gap:8px;background:rgba(255,170,0,0.08);border:1px solid rgba(255,170,0,0.35);border-radius:8px;padding:8px 12px;margin:0 16px 8px;font-family:'Courier New',monospace;font-size:10px;color:#ffaa00">⚠ NO INTERNET — features unavailable</div>`
@@ -422,7 +449,21 @@ function renderDashboard(app) {
           <p>${isSharing ? 'Sharing active — earning credits' : helperLabel}</p>
           ${isSharing ? `<div style="margin-top:4px;display:inline-block;font-family:'Courier New',monospace;font-size:9px;padding:2px 7px;border-radius:4px;background:${state.privateShare?.active ? 'rgba(0,255,136,0.12)' : 'rgba(255,255,255,0.05)'};border:1px solid ${state.privateShare?.active ? 'rgba(0,255,136,0.35)' : '#1e1e2a'};color:${state.privateShare?.active ? '#00ff88' : '#666680'}">${state.privateShare?.active ? '\uD83D\uDD12 PRIVATE' : '\uD83C\uDF10 PUBLIC'}</div>` : ''}
           ${state.user?.dailyLimitMb ? `<p style="font-size:10px;color:var(--muted);margin-top:2px">${formatBytes((state.user.dailyLimitMb ?? 0) * 1024 * 1024)} daily limit</p>` : ''}
-          ${helper?.slots ? `<p style="font-size:10px;color:var(--muted);margin-top:4px">${helper.slots.active} / ${helper.slots.configured} slots active${helper.slots.warning ? ` - ${helper.slots.warning}` : ''}</p>` : ''}
+          <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+              <div>
+                <div style="font-family:'Courier New',monospace;font-size:9px;color:var(--muted);letter-spacing:0.5px">CONNECTION SLOTS</div>
+                <div style="margin-top:4px;display:flex;align-items:center;gap:5px;flex-wrap:wrap">${slotDots}</div>
+                <p style="font-size:10px;color:var(--muted);margin-top:6px">${activeSlots} / ${configuredSlots} slots active${helper?.slots?.warning ? ` - ${helper.slots.warning}` : ''}</p>
+              </div>
+              <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
+                <button id="decrementSlotsBtn" style="width:28px;height:28px;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:${configuredSlots <= 1 ? 'var(--muted)' : 'var(--text)'};cursor:${configuredSlots <= 1 || state.slotUpdating || !helperReady ? 'not-allowed' : 'pointer'};font-family:'Courier New',monospace;font-size:16px" ${configuredSlots <= 1 || state.slotUpdating || !helperReady ? 'disabled' : ''}>-</button>
+                <div style="min-width:28px;text-align:center;font-family:'Courier New',monospace;font-size:12px;color:var(--text)">${state.slotUpdating ? '...' : configuredSlots}</div>
+                <button id="incrementSlotsBtn" style="width:28px;height:28px;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:${configuredSlots >= slotMax ? 'var(--muted)' : 'var(--text)'};cursor:${configuredSlots >= slotMax || state.slotUpdating || !helperReady ? 'not-allowed' : 'pointer'};font-family:'Courier New',monospace;font-size:16px" ${configuredSlots >= slotMax || state.slotUpdating || !helperReady ? 'disabled' : ''}>+</button>
+              </div>
+            </div>
+          </div>
+          ${standaloneHelper ? `<p style="font-size:10px;color:var(--muted);margin-top:4px">Desktop or CLI is optional, but unlocks multi-slot sharing and tunnel support.</p>` : ''}
         </div>
         ${state.shareToggling
           ? `<div style="width:44px;height:24px;border-radius:12px;background:var(--border);display:flex;align-items:center;justify-content:center;flex-shrink:0">
@@ -459,6 +500,7 @@ function renderDashboard(app) {
         </div>
       </div>
       ${state.privateShare?.expires_at ? `<div style="margin-top:8px;font-size:10px;color:var(--muted)">Expires ${new Date(state.privateShare.expires_at).toLocaleString()}</div>` : ''}
+      ${state.privateShareRestartRequired && !isSharing ? `<div style="margin-top:8px;font-size:10px;color:#ffaa00;background:rgba(255,170,0,0.08);border:1px solid rgba(255,170,0,0.25);border-radius:7px;padding:7px 9px;line-height:1.5">Sharing was stopped. Start sharing again to apply the new privacy setting.</div>` : ''}
     </div>` : ''}
 
     <div class="stats">
@@ -486,7 +528,7 @@ function renderDashboard(app) {
     if (shareSection) {
       const helperNotice = document.createElement('div')
       helperNotice.style.cssText = 'font-size:11px;color:#ff6060;padding:6px 0 2px'
-      helperNotice.innerHTML = 'No helper detected. <a id="installHelperBtn" href="#" style="color:#00ff88;font-family:\'Courier New\',monospace;font-size:11px;text-decoration:underline">INSTALL DESKTOP</a> or run <code style="font-family:\'Courier New\',monospace;font-size:10px;color:#00ff88">npx peermesh-provider</code>'
+      helperNotice.innerHTML = 'Sharing is not ready yet. <a id="installHelperBtn" href="#" style="color:#00ff88;font-family:\'Courier New\',monospace;font-size:11px;text-decoration:underline">INSTALL DESKTOP</a> or run <code style="font-family:\'Courier New\',monospace;font-size:10px;color:#00ff88">npx peermesh-provider</code> for multi-slot tunnel sharing.'
       shareSection.appendChild(helperNotice)
     }
     const toggle = document.getElementById('shareToggle')
@@ -531,6 +573,12 @@ function renderDashboard(app) {
   })
   document.getElementById('refreshPrivateShareBtn')?.addEventListener('click', () => {
     savePrivateShareState({ enabled: true, refresh: true, expiryHours: state.privateExpiryHours })
+  })
+  document.getElementById('decrementSlotsBtn')?.addEventListener('click', () => {
+    updateConnectionSlots(configuredSlots - 1)
+  })
+  document.getElementById('incrementSlotsBtn')?.addEventListener('click', () => {
+    updateConnectionSlots(configuredSlots + 1)
   })
 
   // Disclosure modal
@@ -691,13 +739,9 @@ async function toggleSharing(on) {
   if (on && !state.helper?.available) {
     await refreshRuntimeStatus()
     if (!state.helper?.available) {
-      state.error = 'No helper detected — <a href="#" id="dlHelperLink" style="color:#00ff88">install desktop</a> or run <code style="font-family:\'Courier New\',monospace;font-size:10px">npx peermesh-provider</code>'
+      state.error = 'Sharing is unavailable right now — retry in a few seconds'
       state.shareToggling = false
       render()
-      document.getElementById('dlHelperLink')?.addEventListener('click', e => {
-        e.preventDefault()
-        chrome.tabs.create({ url: `${API}/api/desktop-download` })
-      })
       return
     }
   }
@@ -721,8 +765,8 @@ async function toggleSharing(on) {
     state.helper = response?.helper || state.helper
     state.shareToggling = false
     state.error = response?.error === 'Failed to fetch'
-      ? 'Network error — could not reach desktop helper'
-      : (response?.error || 'Desktop helper is required')
+      ? 'Network error — could not reach the sharing service'
+      : (response?.error || 'Sharing could not be started')
     render()
     return
   }
@@ -730,6 +774,7 @@ async function toggleSharing(on) {
   state.error = null
   state.isSharing = on
   state.shareToggling = false
+  if (on) state.privateShareRestartRequired = false
   state.helper = response.helper || state.helper
   await chrome.storage.local.set({ isSharing: on, helper: state.helper })
 
@@ -748,7 +793,43 @@ async function toggleSharing(on) {
   render()
 }
 
+async function updateConnectionSlots(slots) {
+  if (state.slotUpdating) return
+
+  const helperReady = !!state.helper?.available
+  if (!helperReady) {
+    state.error = 'A local desktop or CLI helper is required to change connection slots'
+    render()
+    return
+  }
+
+  const slotMax = state.helper?.source === 'extension' ? 1 : 32
+  const nextSlots = Math.max(1, Math.min(slotMax, parseInt(String(slots), 10) || 1))
+  const currentSlots = state.helper?.slots?.configured ?? state.helper?.connectionSlots ?? 1
+  if (nextSlots === currentSlots) return
+
+  state.slotUpdating = true
+  state.error = null
+  render()
+
+  try {
+    const response = await chrome.runtime.sendMessage({ type: 'SET_CONNECTION_SLOTS', slots: nextSlots })
+    if (!response?.success) throw new Error(response?.error || 'Could not update connection slots')
+    state.helper = response.helper || state.helper
+    await chrome.storage.local.set({ helper: state.helper })
+    await refreshRuntimeStatus()
+  } catch (err) {
+    state.error = err.message || 'Could not update connection slots'
+  } finally {
+    state.slotUpdating = false
+    render()
+  }
+}
+
 async function signOut() {
+  if (state.isSharing) {
+    await chrome.runtime.sendMessage({ type: 'STOP_SHARING' }).catch(() => {})
+  }
   await disconnectSession()
   state.user = null
   state.session = null
