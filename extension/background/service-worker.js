@@ -485,6 +485,22 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
 
 // ── Proxy settings ────────────────────────────────────────────────────────────
 
+function blockWebRTC() {
+  chrome.privacy.network.webRTCIPHandlingPolicy.set(
+    { value: 'disable_non_proxied_udp' },
+    () => { if (chrome.runtime.lastError) log('warn', '[WEBRTC] block failed: ' + chrome.runtime.lastError.message)
+            else log('info', '[WEBRTC] leak prevention active') }
+  )
+}
+
+function restoreWebRTC() {
+  chrome.privacy.network.webRTCIPHandlingPolicy.clear(
+    { scope: 'regular' },
+    () => { if (chrome.runtime.lastError) log('warn', '[WEBRTC] restore failed: ' + chrome.runtime.lastError.message)
+            else log('info', '[WEBRTC] policy restored') }
+  )
+}
+
 function setProxyDesktop(sessionId) {
   chrome.proxy.settings.set(
     {
@@ -508,6 +524,7 @@ function setProxyDesktop(sessionId) {
   chrome.storage.session.set({ proxySessionId: sessionId, proxyHost: '127.0.0.1', proxyPort: 7655 })
   chrome.action.setBadgeText({ text: 'ON' })
   chrome.action.setBadgeBackgroundColor({ color: '#00ff88' })
+  blockWebRTC()
 }
 
 function setProxyRelay(relayEndpoint, sessionId) {
@@ -529,6 +546,7 @@ function setProxyRelay(relayEndpoint, sessionId) {
   chrome.storage.session.set({ proxySessionId: sessionId, proxyHost: relayHost, proxyPort: 8081 })
   chrome.action.setBadgeText({ text: 'ON' })
   chrome.action.setBadgeBackgroundColor({ color: '#00ff88' })
+  blockWebRTC()
 }
 
 function clearProxy() {
@@ -536,6 +554,7 @@ function clearProxy() {
   chrome.proxy.settings.clear({ scope: 'regular' })
   chrome.storage.session.remove(['proxySessionId', 'proxyHost', 'proxyPort'])
   chrome.action.setBadgeText({ text: '' })
+  restoreWebRTC()
 }
 
 chrome.webRequest.onAuthRequired.addListener(

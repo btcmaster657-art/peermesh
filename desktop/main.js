@@ -419,7 +419,10 @@ function runNativeHostMode() {
 // â”€â”€ Abuse filter â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const BLOCKED = [/\.onion$/i, /^smtp\./i, /^mail\./i, /torrent/i]
-const PRIVATE = [/^localhost$/i, /^127\./, /^10\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./]
+const PRIVATE = [
+  /^localhost$/i, /^127\./, /^10\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./,
+  /^::1$/, /^fc[0-9a-f]{2}:/i, /^fd[0-9a-f]{2}:/i, /^fe[89ab][0-9a-f]:/i,
+]
 
 function isAllowed(hostname) {
   return !BLOCKED.some(p => p.test(hostname)) && !PRIVATE.some(p => p.test(hostname))
@@ -443,27 +446,53 @@ async function handleFetch(slot, request) {
       log.warn('PROXY', 'blocked URL', { hostname: parsed.hostname, requestId: requestId?.slice(0,8), slot: slot.index })
       return { requestId, status: 403, headers: {}, body: '', error: 'URL not allowed' }
     }
-    const res = await fetch(url, {
-      method,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'Cache-Control': 'no-cache',
-        ...headers,
-      },
-      body: body ?? undefined,
-      redirect: 'follow',
-      signal: AbortSignal.timeout(20000),
+    // Route through CONNECT tunnel so TLS fingerprint is the browser's, not Node's
+    const port = parsed.port ? parseInt(parsed.port) : (parsed.protocol === 'https:' ? 443 : 80)
+    const hostname = parsed.hostname
+    return await new Promise((resolve) => {
+      const tunnelWs = openTunnelWs(hostname, port)
+      if (!tunnelWs) { resolve({ requestId, status: 503, headers: {}, body: '', error: 'No proxy session' }); return }
+      let responseData = Buffer.alloc(0)
+      let ready = false
+      const timer = setTimeout(() => { tunnelWs.terminate(); resolve({ requestId, status: 504, headers: {}, body: '', error: 'Timeout' }) }, 20000)
+      tunnelWs.on('message', (data) => {
+        const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data)
+        if (!ready) {
+          responseData = Buffer.concat([responseData, chunk])
+          const headerEnd = responseData.indexOf('\r\n\r\n')
+          if (headerEnd === -1) return
+          const firstLine = responseData.slice(0, responseData.indexOf('\r\n')).toString()
+          if (!firstLine.includes('200')) { clearTimeout(timer); tunnelWs.close(); resolve({ requestId, status: 502, headers: {}, body: '', error: 'Tunnel rejected' }); return }
+          ready = true
+          const path = parsed.pathname + parsed.search
+          const reqHeaders = Object.entries({ 'Host': hostname, 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36', 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8', 'Accept-Language': 'en-US,en;q=0.5', 'Cache-Control': 'no-cache', 'Connection': 'close', ...headers }).map(([k, v]) => `${k}: ${v}`).join('\r\n')
+          const reqBody = body ? Buffer.from(body) : null
+          const contentLength = reqBody ? `\r\nContent-Length: ${reqBody.length}` : ''
+          tunnelWs.send(Buffer.from(`${method} ${path} HTTP/1.1\r\n${reqHeaders}${contentLength}\r\n\r\n`))
+          if (reqBody) tunnelWs.send(reqBody)
+          responseData = responseData.slice(headerEnd + 4)
+          return
+        }
+        responseData = Buffer.concat([responseData, chunk])
+      })
+      tunnelWs.on('close', () => {
+        clearTimeout(timer)
+        const headerEnd = responseData.indexOf('\r\n\r\n')
+        if (headerEnd === -1) { resolve({ requestId, status: 502, headers: {}, body: '', error: 'Bad Gateway' }); return }
+        const headerStr = responseData.slice(0, headerEnd).toString()
+        const lines = headerStr.split('\r\n')
+        const statusMatch = lines[0].match(/HTTP\/\S+ (\d+)/)
+        const status = statusMatch ? parseInt(statusMatch[1]) : 200
+        const responseHeaders = {}
+        for (const line of lines.slice(1)) { const idx = line.indexOf(':'); if (idx > 0) responseHeaders[line.slice(0, idx).trim().toLowerCase()] = line.slice(idx + 1).trim() }
+        delete responseHeaders['transfer-encoding']; delete responseHeaders['content-encoding']
+        const responseBody = responseData.slice(headerEnd + 4).toString()
+        addBytes(slot, responseBody.length)
+        log.info('PROXY', `${slotPrefix(slot)} fetch response via tunnel`, { requestId: requestId?.slice(0,8), status, bytes: responseBody.length })
+        resolve({ requestId, status, headers: responseHeaders, body: responseBody })
+      })
+      tunnelWs.on('error', (err) => { clearTimeout(timer); resolve({ requestId, status: 502, headers: {}, body: '', error: err.message }) })
     })
-    const responseBody = await res.text()
-    const responseHeaders = {}
-    res.headers.forEach((v, k) => {
-      if (!['content-encoding', 'transfer-encoding', 'connection', 'keep-alive'].includes(k)) responseHeaders[k] = v
-    })
-    addBytes(slot, responseBody.length)
-    log.info('PROXY', `${slotPrefix(slot)} fetch response`, { requestId: requestId?.slice(0,8), status: res.status, bytes: responseBody.length, finalUrl: res.url !== url ? res.url : undefined })
-    return { requestId, status: res.status, headers: responseHeaders, body: responseBody, finalUrl: res.url }
   } catch (err) {
     log.error('PROXY', `${slotPrefix(slot)} fetch error`, { requestId: requestId?.slice(0,8), url, err: err.message })
     return { requestId, status: 502, headers: {}, body: '', error: err.message }

@@ -10,13 +10,17 @@ const BLOCKED_PATTERNS = [
   /phishing/i,
 ]
 
-// RFC-1918 + loopback — never allow routing to private ranges
+// RFC-1918 + loopback + IPv6 private ranges — never allow routing to private ranges
 const BLOCKED_HOST_PATTERNS = [
   /^localhost$/i,
   /^127\./,
   /^10\./,
   /^192\.168\./,
   /^172\.(1[6-9]|2\d|3[01])\./,
+  /^::1$/,
+  /^fc[0-9a-f]{2}:/i,
+  /^fd[0-9a-f]{2}:/i,
+  /^fe[89ab][0-9a-f]:/i,
 ]
 
 export function isRequestAllowed(host: string, port: number): boolean {
