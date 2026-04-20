@@ -118,10 +118,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           break
         }
         case 'GET_STATUS': {
-          const helper = await getSharingStatus()
-          const isSharing = helper.available && (helper.running || helper.shareEnabled)
+          const helper = await persistSharingState()
+          const isSharing = helper.available && !helper.ownerMismatch && (helper.running || helper.shareEnabled)
           log('info', 'GET_STATUS helper.available=' + helper.available + ' running=' + helper.running + ' isSharing=' + isSharing)
-          await chrome.storage.local.set({ isSharing, helper, sharingMode })
           sendResponse({ connected: !!currentSession, session: currentSession, isSharing, helper })
           break
         }
@@ -177,6 +176,10 @@ async function loadSharingContext() {
   if (stored.sharingMode !== undefined) sharingMode = stored.sharingMode ?? null
   if (stored.providerPrivateShare !== undefined) providerPrivateShare = stored.providerPrivateShare ?? null
   return stored
+}
+
+function isHelperOwnedByUser(helper, userId) {
+  return !(helper?.available && helper.userId && userId && helper.userId !== userId)
 }
 
 function syncActionBadge() {
@@ -286,17 +289,21 @@ async function getStandaloneProviderStatus() {
 }
 
 async function persistSharingState(helperOverride = null) {
+  const stored = await loadSharingContext()
+  const currentUserId = stored.user?.id ?? sharingUserId ?? null
   const helper = helperOverride ?? await getSharingStatus()
-  const isSharing = !!(helper?.available && (helper.running || helper.shareEnabled))
+  const helperOwned = isHelperOwnedByUser(helper, currentUserId)
+  const normalizedHelper = helper ? { ...helper, ownerMismatch: !helperOwned } : helper
+  const isSharing = !!(normalizedHelper?.available && helperOwned && (normalizedHelper.running || normalizedHelper.shareEnabled))
   await chrome.storage.local.set({
     isSharing,
-    helper,
+    helper: normalizedHelper,
     sharingMode,
     sharingCountry,
     sharingUserId,
   })
   syncActionBadge()
-  return helper
+  return normalizedHelper
 }
 
 function startExtensionHeartbeat() {
@@ -447,6 +454,8 @@ async function getDesktopHelperStatusHttp() {
   const eitherRunning = primary.running || peerRunning
   // If peer is the active sharer, use its stats for live display
   const stats = (peerRunning && peerState?.stats) ? peerState.stats : (primary.stats ?? null)
+  const activeUserId = peerRunning ? (peerState?.userId ?? primary.userId ?? null) : primary.userId
+  const activeCountry = peerRunning ? (peerState?.country ?? primary.country ?? null) : primary.country
   const activeBaseDeviceId = peerRunning ? (peerState?.baseDeviceId ?? primary.baseDeviceId ?? null) : primary.baseDeviceId
   const activeSource = peerRunning ? (peerState?.where ?? peerState?.source ?? primary.source ?? 'desktop') : (primary.source ?? 'desktop')
   const activeSlots = peerRunning ? (peerState?.slots ?? primary.slots ?? null) : primary.slots
@@ -456,6 +465,8 @@ async function getDesktopHelperStatusHttp() {
   return {
     ...primary,
     source: activeSource,
+    userId: activeUserId,
+    country: activeCountry,
     running: eitherRunning,
     shareEnabled: eitherRunning || primary.shareEnabled,
     baseDeviceId: activeBaseDeviceId,
@@ -794,6 +805,14 @@ async function startSharingTransport({ token, userId, country, trust }) {
   if (country) sharingCountry = country
 
   const helper = await getDesktopHelperStatus()
+  if (helper.available && !isHelperOwnedByUser(helper, userId ?? sharingUserId ?? null)) {
+    const mismatchHelper = await persistSharingState({ ...helper, ownerMismatch: true })
+    return {
+      success: false,
+      error: 'This desktop app is signed in as a different user. Sign out of the desktop app first.',
+      helper: mismatchHelper,
+    }
+  }
   if (helper.available) {
     if (providerShareEnabled) await stopStandaloneProvider({ clearMode: false, removeDevice: true })
     const result = await startDesktopSharing({ token, userId, country, trust })
@@ -813,6 +832,14 @@ async function stopSharingTransport() {
   if (providerShareEnabled || sharingMode === 'extension') {
     return stopStandaloneProvider()
   }
+  const helper = await getSharingStatus()
+  if (helper?.ownerMismatch) {
+    return {
+      success: false,
+      error: 'This desktop app is signed in as a different user. Sign out of the desktop app first.',
+      helper,
+    }
+  }
   const result = await stopDesktopSharing()
   sharingMode = null
   result.helper = await persistSharingState(result.helper ?? null)
@@ -825,6 +852,13 @@ async function setHelperConnectionSlots(slots) {
 
   if (!helper?.available) {
     return { success: false, error: 'No local sharing helper is available', helper }
+  }
+  if (helper.ownerMismatch) {
+    return {
+      success: false,
+      error: 'This desktop app is signed in as a different user. Sign out of the desktop app first.',
+      helper,
+    }
   }
 
   if (helper.source === 'extension') {
@@ -857,10 +891,12 @@ async function setHelperConnectionSlots(slots) {
 }
 
 async function getSharingStatus() {
-  await loadSharingContext()
+  const stored = await loadSharingContext()
+  const currentUserId = stored.user?.id ?? sharingUserId ?? null
   const desktopStatus = await getDesktopHelperStatus()
   const standaloneStatus = await getStandaloneProviderStatus()
-  const desktopActive = desktopStatus.available && (desktopStatus.running || desktopStatus.shareEnabled)
+  const desktopOwned = isHelperOwnedByUser(desktopStatus, currentUserId)
+  const desktopActive = desktopStatus.available && desktopOwned && (desktopStatus.running || desktopStatus.shareEnabled)
   const standaloneActive = standaloneStatus.available && (standaloneStatus.running || standaloneStatus.shareEnabled)
 
   if (desktopActive && providerShareEnabled) {
@@ -870,19 +906,19 @@ async function getSharingStatus() {
 
   if (desktopActive) {
     sharingMode = 'desktop'
-    return { ...desktopStatus, source: desktopStatus.source ?? 'desktop' }
+    return { ...desktopStatus, source: desktopStatus.source ?? 'desktop', ownerMismatch: false }
   }
 
   if (standaloneActive) {
     sharingMode = 'extension'
-    return standaloneStatus
+    return { ...standaloneStatus, ownerMismatch: false }
   }
 
   if (desktopStatus.available) {
-    return { ...desktopStatus, source: desktopStatus.source ?? 'desktop' }
+    return { ...desktopStatus, source: desktopStatus.source ?? 'desktop', ownerMismatch: !desktopOwned }
   }
 
-  return standaloneStatus
+  return { ...standaloneStatus, ownerMismatch: false }
 }
 
 async function connectToRelay(opts, attempt = 0) {

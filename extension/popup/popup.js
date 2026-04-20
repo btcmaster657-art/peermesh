@@ -17,6 +17,10 @@ const COUNTRIES = [
   { code: 'GH', flag: '🇬🇭', name: 'Ghana' },
 ]
 
+const HELPER_USER_MISMATCH_ERROR = 'This desktop app is signed in as a different user. Sign out of the desktop app first.'
+const FREE_TIER_MESSAGE = 'FREE TIER — Enable sharing above to connect, or upgrade to premium to browse without sharing.'
+const DAILY_LIMIT_MIN_MB = 1024
+
 let state = {
   user: null,
   session: null,
@@ -39,11 +43,21 @@ let state = {
   privateShareSaving: false,
   privateShareRestartRequired: false,
   slotUpdating: false,
+  dailyLimitInput: '',
+  dailyLimitSaving: false,
   connectionType: 'public', // 'public' | 'private'
 }
 
 window.addEventListener('online', () => { state.isOnline = true; render() })
 window.addEventListener('offline', () => { state.isOnline = false; render() })
+
+function helperOwnerMismatch(helper = state.helper, user = state.user) {
+  return !!(helper?.available && user?.id && helper.userId && helper.userId !== user.id)
+}
+
+function ownedHelper(helper = state.helper, user = state.user) {
+  return helperOwnerMismatch(helper, user) ? null : helper
+}
 
 // ── Session expiry ────────────────────────────────────────────────────────────
 
@@ -55,6 +69,8 @@ async function handleExpiredSession() {
   state.isSharing = false
   state.helper = null
   state.supabaseToken = null
+  state.dailyLimitInput = ''
+  state.dailyLimitSaving = false
   await chrome.storage.local.clear()
   // Preserve extId so auth polling can resume
   const extId = state.extId
@@ -73,6 +89,9 @@ async function init() {
     await chrome.storage.local.set({ extId: stored.extId })
   }
   state = { ...state, ...stored }
+  if (state.user?.dailyLimitMb != null && !state.dailyLimitInput) {
+    state.dailyLimitInput = String(state.user.dailyLimitMb)
+  }
 
   try {
     const res = await fetch(`${API}/api/peers/available`)
@@ -103,10 +122,18 @@ async function init() {
       if (res.ok) {
         const data = await res.json()
         state.hasAcceptedProviderTerms = data.has_accepted_provider_terms ?? false
+        state.user = {
+          ...state.user,
+          isPremium: data.is_premium ?? state.user.isPremium ?? false,
+          dailyLimitMb: data.daily_share_limit_mb ?? state.user.dailyLimitMb ?? null,
+        }
+        if (!state.dailyLimitSaving) {
+          state.dailyLimitInput = state.user.dailyLimitMb != null ? String(state.user.dailyLimitMb) : ''
+        }
       }
     } catch {}
     await refreshRuntimeStatus()
-    await loadPrivateShareState(state.helper?.baseDeviceId ?? null)
+    await loadPrivateShareState(ownedHelper()?.baseDeviceId ?? null)
     startPeerPolling()
   }
 
@@ -130,7 +157,7 @@ async function refreshRuntimeStatus() {
     if (!status) return
     state.session = status.session || null
     state.helper = status.helper || null
-    state.isSharing = !!(state.helper?.available && (state.helper?.running || state.helper?.shareEnabled))
+    state.isSharing = !!(state.helper?.available && !helperOwnerMismatch(state.helper, state.user) && (state.helper?.running || state.helper?.shareEnabled))
     if (state.isSharing) state.privateShareRestartRequired = false
     await chrome.storage.local.set({
       session: state.session,
@@ -150,7 +177,7 @@ function getPrivateShareExpiryPreset(expiresAt) {
 }
 
 async function loadPrivateShareState(baseDeviceId) {
-  if (!state.user || !baseDeviceId) {
+  if (!state.user || !baseDeviceId || helperOwnerMismatch()) {
     state.privateShare = null
     return
   }
@@ -166,6 +193,11 @@ async function loadPrivateShareState(baseDeviceId) {
 }
 
 async function savePrivateShareState(input) {
+  if (helperOwnerMismatch()) {
+    state.error = HELPER_USER_MISMATCH_ERROR
+    render()
+    return
+  }
   const baseDeviceId = state.helper?.baseDeviceId
   if (!state.user || !baseDeviceId) {
     state.error = 'A local sharing device is required to manage private sharing'
@@ -237,8 +269,8 @@ function startPeerPolling() {
   if (!statusPollInterval) {
     statusPollInterval = setInterval(async () => {
       await refreshRuntimeStatus()
-      await loadPrivateShareState(state.helper?.baseDeviceId ?? null)
-      const desktopSharing = !!(state.helper?.available && (state.helper?.running || state.helper?.shareEnabled))
+      await loadPrivateShareState(ownedHelper()?.baseDeviceId ?? null)
+      const desktopSharing = !!(state.helper?.available && !helperOwnerMismatch() && (state.helper?.running || state.helper?.shareEnabled))
       if (state.isSharing !== desktopSharing) {
         state.isSharing = desktopSharing
         await chrome.storage.local.set({ isSharing: desktopSharing })
@@ -262,8 +294,10 @@ function startPeerPolling() {
         totalShared: data.total_bytes_shared ?? state.user.totalShared,
         totalUsed: data.total_bytes_used ?? state.user.totalUsed,
         trustScore: data.trust_score ?? state.user.trustScore,
+        isPremium: data.is_premium ?? state.user.isPremium ?? false,
         dailyLimitMb: data.daily_share_limit_mb ?? state.user.dailyLimitMb ?? null,
       }
+      if (!state.dailyLimitSaving) state.dailyLimitInput = state.user.dailyLimitMb != null ? String(state.user.dailyLimitMb) : ''
       if (data.has_accepted_provider_terms === true) state.hasAcceptedProviderTerms = true
       await chrome.storage.local.set({ user: state.user })
       document.querySelectorAll('.stat').forEach(el => {
@@ -291,10 +325,11 @@ function startAuthPolling() {
         state.user = data.user
         state.supabaseToken = data.user.supabaseToken ?? null
         state.hasAcceptedProviderTerms = data.user.hasAcceptedProviderTerms ?? false
+        state.dailyLimitInput = data.user.dailyLimitMb != null ? String(data.user.dailyLimitMb) : ''
         state.loading = false
         await chrome.storage.local.set({ user: data.user, supabaseToken: state.supabaseToken, desktopToken: data.user.token })
         await refreshRuntimeStatus()
-        await loadPrivateShareState(state.helper?.baseDeviceId ?? null)
+        await loadPrivateShareState(ownedHelper()?.baseDeviceId ?? null)
         render()
         startPeerPolling()
       }
@@ -347,18 +382,23 @@ function renderAuth(app) {
 
 function renderDashboard(app) {
   const { session, isSharing, selectedCountry, user, helper } = state
-  const helperReady = !!helper?.available
-  const helperBaseDeviceId = helper?.baseDeviceId ?? null
-  const standaloneHelper = helper?.source === 'extension'
-  const configuredSlots = helper?.slots?.configured ?? helper?.connectionSlots ?? 1
-  const activeSlots = helper?.slots?.active ?? 0
+  const helperMismatch = helperOwnerMismatch(helper, user)
+  const activeHelper = helperMismatch ? null : helper
+  const helperReady = !!activeHelper?.available
+  const helperBaseDeviceId = activeHelper?.baseDeviceId ?? null
+  const standaloneHelper = activeHelper?.source === 'extension'
+  const configuredSlots = activeHelper?.slots?.configured ?? activeHelper?.connectionSlots ?? 1
+  const activeSlots = activeHelper?.slots?.active ?? 0
   const slotMax = standaloneHelper ? 1 : 32
   const slotDots = Array.from({ length: configuredSlots }, (_, index) => {
-    const running = !!helper?.slots?.statuses?.[index]?.running || index < activeSlots
+    const running = !!activeHelper?.slots?.statuses?.[index]?.running || index < activeSlots
     return `<span style="width:8px;height:8px;border-radius:999px;background:${running ? 'var(--accent)' : 'var(--border)'};box-shadow:${running ? '0 0 8px rgba(0,255,136,0.35)' : 'none'}"></span>`
   }).join('')
-  const helperSource = standaloneHelper ? 'Extension' : helper?.source === 'cli' ? 'CLI' : helperReady ? 'Desktop' : 'PeerMesh'
-  const helperLabel = standaloneHelper
+  const helperSource = standaloneHelper ? 'Extension' : activeHelper?.source === 'cli' ? 'CLI' : helperReady ? 'Desktop' : 'PeerMesh'
+  const freeTierBlocked = !user?.isPremium && !isSharing
+  const helperLabel = helperMismatch
+    ? 'Local desktop helper belongs to another user. Sign out there first.'
+    : standaloneHelper
     ? (isSharing
       ? 'Extension standalone sharing active — single-slot web mode.'
       : 'Extension standalone ready — one slot. Desktop or CLI adds full-browser tunnels and up to 32 slots.')
@@ -420,14 +460,14 @@ function renderDashboard(app) {
       <div class="section-label">Private code</div>
       <div style="display:grid;grid-template-columns:1fr auto;gap:8px">
         <input id="privateCodeInput" value="${state.privateCodeInput || ''}" placeholder="9-digit code" inputmode="numeric" maxlength="9" style="padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-family:'Courier New',monospace;font-size:11px;letter-spacing:1px" />
-        <button class="connect-btn" id="connectPrivateBtn" style="padding:0 12px" ${!state.privateCodeInput || !state.isOnline || state.connecting ? 'disabled' : ''}>
+        <button class="connect-btn" id="connectPrivateBtn" style="padding:0 12px" ${!state.privateCodeInput || !state.isOnline || state.connecting || freeTierBlocked ? 'disabled' : ''}>
           ${state.connecting && state.privateCodeInput ? '...' : 'CODE'}
         </button>
       </div>
       <div style="margin-top:6px;font-size:10px;color:var(--muted);line-height:1.5">Locks the session to one known device and its active slots only.</div>
     </div>
     <div class="section">
-      <button class="connect-btn" id="connectBtn" ${!selectedCountry || !state.isOnline || state.connecting ? 'disabled' : ''}>
+      <button class="connect-btn" id="connectBtn" ${!selectedCountry || !state.isOnline || state.connecting || freeTierBlocked ? 'disabled' : ''}>
         ${state.connecting
           ? `<span style="display:inline-flex;align-items:center;gap:8px"><span style="width:10px;height:10px;border:2px solid rgba(0,0,0,0.2);border-top-color:#000;border-radius:50%;animation:spin 0.7s linear infinite;display:inline-block"></span>CONNECTING...</span>`
           : !state.isOnline ? 'NO INTERNET'
@@ -442,19 +482,25 @@ function renderDashboard(app) {
     </div>
     `}
 
+    ${freeTierBlocked && !session && (selectedCountry || state.privateCodeInput)
+      ? `<div class="section" style="background:rgba(255,68,102,0.08);border-top:1px solid rgba(255,68,102,0.2);border-bottom:1px solid rgba(255,68,102,0.2);font-size:11px;color:#ff9090;line-height:1.5">
+           <span style="font-family:'Courier New',monospace;font-size:10px;letter-spacing:0.5px">FREE TIER — </span>${FREE_TIER_MESSAGE.replace('FREE TIER — ', '')}
+         </div>`
+      : ''}
+
     <div class="section">
       <div class="share-row">
         <div class="share-info">
           <h4>Share my connection</h4>
           <p>${isSharing ? 'Sharing active — earning credits' : helperLabel}</p>
           ${isSharing ? `<div style="margin-top:4px;display:inline-block;font-family:'Courier New',monospace;font-size:9px;padding:2px 7px;border-radius:4px;background:${state.privateShare?.active ? 'rgba(0,255,136,0.12)' : 'rgba(255,255,255,0.05)'};border:1px solid ${state.privateShare?.active ? 'rgba(0,255,136,0.35)' : '#1e1e2a'};color:${state.privateShare?.active ? '#00ff88' : '#666680'}">${state.privateShare?.active ? '\uD83D\uDD12 PRIVATE' : '\uD83C\uDF10 PUBLIC'}</div>` : ''}
-          ${state.user?.dailyLimitMb ? `<p style="font-size:10px;color:var(--muted);margin-top:2px">${formatBytes((state.user.dailyLimitMb ?? 0) * 1024 * 1024)} daily limit</p>` : ''}
+          ${state.user?.dailyLimitMb != null ? `<p style="font-size:10px;color:var(--muted);margin-top:2px">${formatBytes((state.user.dailyLimitMb ?? 0) * 1024 * 1024)} daily limit</p>` : ''}
           <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">
             <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
               <div>
                 <div style="font-family:'Courier New',monospace;font-size:9px;color:var(--muted);letter-spacing:0.5px">CONNECTION SLOTS</div>
                 <div style="margin-top:4px;display:flex;align-items:center;gap:5px;flex-wrap:wrap">${slotDots}</div>
-                <p style="font-size:10px;color:var(--muted);margin-top:6px">${activeSlots} / ${configuredSlots} slots active${helper?.slots?.warning ? ` - ${helper.slots.warning}` : ''}</p>
+                <p style="font-size:10px;color:var(--muted);margin-top:6px">${activeSlots} / ${configuredSlots} slots active${activeHelper?.slots?.warning ? ` - ${activeHelper.slots.warning}` : ''}</p>
               </div>
               <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
                 <button id="decrementSlotsBtn" style="width:28px;height:28px;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:${configuredSlots <= 1 ? 'var(--muted)' : 'var(--text)'};cursor:${configuredSlots <= 1 || state.slotUpdating || !helperReady ? 'not-allowed' : 'pointer'};font-family:'Courier New',monospace;font-size:16px" ${configuredSlots <= 1 || state.slotUpdating || !helperReady ? 'disabled' : ''}>-</button>
@@ -463,6 +509,20 @@ function renderDashboard(app) {
               </div>
             </div>
           </div>
+          <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">
+            <div style="font-family:'Courier New',monospace;font-size:9px;color:var(--muted);letter-spacing:0.5px;margin-bottom:6px">DAILY SHARE LIMIT</div>
+            <div style="display:grid;grid-template-columns:1fr auto;gap:6px">
+              <input id="dailyLimitInput" value="${state.dailyLimitInput || ''}" placeholder="1024+ MB" inputmode="numeric" style="padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-family:'Courier New',monospace;font-size:10px" ${state.dailyLimitSaving || helperMismatch ? 'disabled' : ''} />
+              <button id="saveDailyLimitBtn" style="padding:0 10px;background:var(--accent);border:none;border-radius:8px;color:#000;font-family:'Courier New',monospace;font-size:10px;font-weight:700;cursor:${state.dailyLimitSaving || helperMismatch ? 'not-allowed' : 'pointer'}" ${state.dailyLimitSaving || helperMismatch ? 'disabled' : ''}>${state.dailyLimitSaving ? '...' : 'APPLY'}</button>
+            </div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+              <button id="dailyLimit1gbBtn" style="padding:6px 8px;background:${user?.dailyLimitMb === 1024 ? 'var(--accent-dim)' : 'var(--bg)'};border:1px solid ${user?.dailyLimitMb === 1024 ? 'rgba(0,255,136,0.35)' : 'var(--border)'};border-radius:7px;color:${user?.dailyLimitMb === 1024 ? 'var(--accent)' : 'var(--text)'};font-family:'Courier New',monospace;font-size:9px;cursor:${state.dailyLimitSaving || helperMismatch ? 'not-allowed' : 'pointer'}" ${state.dailyLimitSaving || helperMismatch ? 'disabled' : ''}>1 GB</button>
+              <button id="dailyLimit2gbBtn" style="padding:6px 8px;background:${user?.dailyLimitMb === 2048 ? 'var(--accent-dim)' : 'var(--bg)'};border:1px solid ${user?.dailyLimitMb === 2048 ? 'rgba(0,255,136,0.35)' : 'var(--border)'};border-radius:7px;color:${user?.dailyLimitMb === 2048 ? 'var(--accent)' : 'var(--text)'};font-family:'Courier New',monospace;font-size:9px;cursor:${state.dailyLimitSaving || helperMismatch ? 'not-allowed' : 'pointer'}" ${state.dailyLimitSaving || helperMismatch ? 'disabled' : ''}>2 GB</button>
+              <button id="dailyLimit5gbBtn" style="padding:6px 8px;background:${user?.dailyLimitMb === 5120 ? 'var(--accent-dim)' : 'var(--bg)'};border:1px solid ${user?.dailyLimitMb === 5120 ? 'rgba(0,255,136,0.35)' : 'var(--border)'};border-radius:7px;color:${user?.dailyLimitMb === 5120 ? 'var(--accent)' : 'var(--text)'};font-family:'Courier New',monospace;font-size:9px;cursor:${state.dailyLimitSaving || helperMismatch ? 'not-allowed' : 'pointer'}" ${state.dailyLimitSaving || helperMismatch ? 'disabled' : ''}>5 GB</button>
+              <button id="dailyLimitNoneBtn" style="padding:6px 8px;background:${user?.dailyLimitMb == null ? 'var(--accent-dim)' : 'var(--bg)'};border:1px solid ${user?.dailyLimitMb == null ? 'rgba(0,255,136,0.35)' : 'var(--border)'};border-radius:7px;color:${user?.dailyLimitMb == null ? 'var(--accent)' : 'var(--text)'};font-family:'Courier New',monospace;font-size:9px;cursor:${state.dailyLimitSaving || helperMismatch ? 'not-allowed' : 'pointer'}" ${state.dailyLimitSaving || helperMismatch ? 'disabled' : ''}>NO LIMIT</button>
+            </div>
+            <p style="font-size:10px;color:var(--muted);margin-top:6px">${user?.dailyLimitMb != null ? `${user.dailyLimitMb} MB/day cap.` : 'No daily cap set.'} Minimum custom limit: 1024 MB.</p>
+          </div>
           ${standaloneHelper ? `<p style="font-size:10px;color:var(--muted);margin-top:4px">Desktop or CLI is optional, but unlocks multi-slot sharing and tunnel support.</p>` : ''}
         </div>
         ${state.shareToggling
@@ -470,7 +530,7 @@ function renderDashboard(app) {
                <span style="width:10px;height:10px;border:2px solid rgba(255,255,255,0.2);border-top-color:#00ff88;border-radius:50%;animation:spin 0.7s linear infinite;display:inline-block"></span>
              </div>`
           : `<label class="toggle">
-               <input type="checkbox" id="shareToggle" ${isSharing ? 'checked' : ''} ${!helperReady || !state.isOnline ? 'disabled style="opacity:0.4;cursor:not-allowed"' : ''}>
+               <input type="checkbox" id="shareToggle" ${isSharing ? 'checked' : ''} ${!helperReady || !state.isOnline || helperMismatch ? 'disabled style="opacity:0.4;cursor:not-allowed"' : ''}>
                <span class="toggle-slider"></span>
              </label>`
         }
@@ -528,7 +588,9 @@ function renderDashboard(app) {
     if (shareSection) {
       const helperNotice = document.createElement('div')
       helperNotice.style.cssText = 'font-size:11px;color:#ff6060;padding:6px 0 2px'
-      helperNotice.innerHTML = 'Sharing is not ready yet. <a id="installHelperBtn" href="#" style="color:#00ff88;font-family:\'Courier New\',monospace;font-size:11px;text-decoration:underline">INSTALL DESKTOP</a> or run <code style="font-family:\'Courier New\',monospace;font-size:10px;color:#00ff88">npx peermesh-provider</code> for multi-slot tunnel sharing.'
+      helperNotice.innerHTML = helperMismatch
+        ? HELPER_USER_MISMATCH_ERROR
+        : 'Sharing is not ready yet. <a id="installHelperBtn" href="#" style="color:#00ff88;font-family:\'Courier New\',monospace;font-size:11px;text-decoration:underline">INSTALL DESKTOP</a> or run <code style="font-family:\'Courier New\',monospace;font-size:10px;color:#00ff88">npx peermesh-provider</code> for multi-slot tunnel sharing.'
       shareSection.appendChild(helperNotice)
     }
     const toggle = document.getElementById('shareToggle')
@@ -579,6 +641,36 @@ function renderDashboard(app) {
   })
   document.getElementById('incrementSlotsBtn')?.addEventListener('click', () => {
     updateConnectionSlots(configuredSlots + 1)
+  })
+  document.getElementById('dailyLimitInput')?.addEventListener('input', (e) => {
+    state.dailyLimitInput = e.target.value.replace(/\D/g, '')
+    state.error = null
+  })
+  document.getElementById('dailyLimitInput')?.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return
+    e.preventDefault()
+    const raw = (e.target.value || '').trim()
+    void saveDailyLimit(raw ? parseInt(raw, 10) : null)
+  })
+  document.getElementById('saveDailyLimitBtn')?.addEventListener('click', () => {
+    const raw = (document.getElementById('dailyLimitInput')?.value || '').trim()
+    void saveDailyLimit(raw ? parseInt(raw, 10) : null)
+  })
+  document.getElementById('dailyLimit1gbBtn')?.addEventListener('click', () => {
+    state.dailyLimitInput = '1024'
+    void saveDailyLimit(1024)
+  })
+  document.getElementById('dailyLimit2gbBtn')?.addEventListener('click', () => {
+    state.dailyLimitInput = '2048'
+    void saveDailyLimit(2048)
+  })
+  document.getElementById('dailyLimit5gbBtn')?.addEventListener('click', () => {
+    state.dailyLimitInput = '5120'
+    void saveDailyLimit(5120)
+  })
+  document.getElementById('dailyLimitNoneBtn')?.addEventListener('click', () => {
+    state.dailyLimitInput = ''
+    void saveDailyLimit(null)
   })
 
   // Disclosure modal
@@ -647,6 +739,12 @@ async function connectSession() {
     return
   }
 
+  if (!state.user?.isPremium && !state.isSharing) {
+    state.error = FREE_TIER_MESSAGE
+    render()
+    return
+  }
+
   state.connecting = true
   state.error = null
   render()
@@ -662,7 +760,7 @@ async function connectSession() {
     })
 
     const data = await res.json()
-    if (res.status === 401 || res.status === 403) { state.connecting = false; await handleExpiredSession(); return }
+    if (res.status === 401) { state.connecting = false; await handleExpiredSession(); return }
     if (!res.ok || data.error) throw new Error(data.error ?? `Server error (${res.status})`)
 
     const response = await chrome.runtime.sendMessage({
@@ -718,6 +816,11 @@ async function disconnectSession() {
 
 async function toggleSharing(on) {
   if (state.shareToggling) return
+  if (helperOwnerMismatch()) {
+    state.error = HELPER_USER_MISMATCH_ERROR
+    render()
+    return
+  }
 
   // First-time share — show disclosure modal
   if (on && !state.hasAcceptedProviderTerms) {
@@ -736,9 +839,9 @@ async function toggleSharing(on) {
     return
   }
 
-  if (on && !state.helper?.available) {
+  if (on && !ownedHelper()?.available) {
     await refreshRuntimeStatus()
-    if (!state.helper?.available) {
+    if (!ownedHelper()?.available) {
       state.error = 'Sharing is unavailable right now — retry in a few seconds'
       state.shareToggling = false
       render()
@@ -795,17 +898,22 @@ async function toggleSharing(on) {
 
 async function updateConnectionSlots(slots) {
   if (state.slotUpdating) return
+  if (helperOwnerMismatch()) {
+    state.error = HELPER_USER_MISMATCH_ERROR
+    render()
+    return
+  }
 
-  const helperReady = !!state.helper?.available
+  const helperReady = !!ownedHelper()?.available
   if (!helperReady) {
     state.error = 'A local desktop or CLI helper is required to change connection slots'
     render()
     return
   }
 
-  const slotMax = state.helper?.source === 'extension' ? 1 : 32
+  const slotMax = ownedHelper()?.source === 'extension' ? 1 : 32
   const nextSlots = Math.max(1, Math.min(slotMax, parseInt(String(slots), 10) || 1))
-  const currentSlots = state.helper?.slots?.configured ?? state.helper?.connectionSlots ?? 1
+  const currentSlots = ownedHelper()?.slots?.configured ?? ownedHelper()?.connectionSlots ?? 1
   if (nextSlots === currentSlots) return
 
   state.slotUpdating = true
@@ -826,6 +934,50 @@ async function updateConnectionSlots(slots) {
   }
 }
 
+async function saveDailyLimit(limitMb) {
+  if (state.dailyLimitSaving) return
+  if (helperOwnerMismatch()) {
+    state.error = HELPER_USER_MISMATCH_ERROR
+    render()
+    return
+  }
+  if (limitMb !== null && (!Number.isInteger(limitMb) || limitMb < DAILY_LIMIT_MIN_MB)) {
+    state.error = `Minimum daily limit is ${DAILY_LIMIT_MIN_MB} MB (1 GB)`
+    render()
+    return
+  }
+
+  state.dailyLimitSaving = true
+  state.error = null
+  render()
+
+  try {
+    const res = await fetch(`${API}/api/user/sharing`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${state.supabaseToken || state.user?.token}`,
+      },
+      body: JSON.stringify({ dailyLimitMb: limitMb }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (res.status === 401 || res.status === 403) { await handleExpiredSession(); return }
+    if (!res.ok || data.error) throw new Error(data.error || 'Could not update daily limit')
+
+    state.user = {
+      ...state.user,
+      dailyLimitMb: data.daily_share_limit_mb ?? null,
+    }
+    state.dailyLimitInput = state.user.dailyLimitMb != null ? String(state.user.dailyLimitMb) : ''
+    await chrome.storage.local.set({ user: state.user })
+  } catch (err) {
+    state.error = err.message || 'Could not update daily limit'
+  } finally {
+    state.dailyLimitSaving = false
+    render()
+  }
+}
+
 async function signOut() {
   if (state.isSharing) {
     await chrome.runtime.sendMessage({ type: 'STOP_SHARING' }).catch(() => {})
@@ -835,6 +987,8 @@ async function signOut() {
   state.session = null
   state.isSharing = false
   state.helper = null
+  state.dailyLimitInput = ''
+  state.dailyLimitSaving = false
   await chrome.storage.local.clear()
   // Preserve extId so auth polling can resume
   await chrome.storage.local.set({ extId: state.extId })

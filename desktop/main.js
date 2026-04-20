@@ -490,6 +490,44 @@ async function refreshSharingConfig() {
   return applySharingProfileData(data, { source: 'refreshSharingConfig' })
 }
 
+async function setDailyShareLimit(limitMb) {
+  if (!config.token) throw new Error('Sign in required')
+
+  const normalizedLimit = limitMb == null ? null : parseInt(String(limitMb), 10)
+  if (normalizedLimit != null && (!Number.isInteger(normalizedLimit) || normalizedLimit < 1024)) {
+    throw new Error('Daily limit must be at least 1024 MB (1 GB), or unset it')
+  }
+
+  logRequest('POST', `${API_BASE}/api/user/sharing`, { dailyLimitMb: normalizedLimit })
+  const res = await fetch(`${API_BASE}/api/user/sharing`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
+    body: JSON.stringify({ dailyLimitMb: normalizedLimit }),
+    signal: AbortSignal.timeout(5000),
+  })
+  logResponse('POST', `${API_BASE}/api/user/sharing`, res.status)
+
+  const data = await res.json().catch(() => ({}))
+  if (res.status === 401 || res.status === 403) {
+    await clearDesktopAuth(`daily_limit_${res.status}`)
+    throw new Error('Session expired - please sign in again')
+  }
+  if (!res.ok || data.error) {
+    throw new Error(data.error || 'Could not update daily limit')
+  }
+
+  config.dailyShareLimitMb = data.daily_share_limit_mb ?? null
+  saveConfig()
+  limitHit = false
+  enforceLocalLimit()
+  updateTray()
+
+  return {
+    dailyShareLimitMb: config.dailyShareLimitMb,
+    state: getPublicState(),
+  }
+}
+
 function stopSharingConfigSync() {
   if (!_sharingConfigSyncTimer) return
   clearInterval(_sharingConfigSyncTimer)
@@ -1769,6 +1807,15 @@ ipcMain.handle('set-auto-share-on-launch', async (_, enabled) => {
 
 ipcMain.handle('set-connection-slots', async (_, slots) => {
   return applyConnectionSlots(slots, { syncPeer: true })
+})
+
+ipcMain.handle('set-daily-share-limit', async (_, limitMb) => {
+  try {
+    const result = await setDailyShareLimit(limitMb)
+    return { success: true, ...result }
+  } catch (e) {
+    return { success: false, error: e.message, state: getPublicState() }
+  }
 })
 
 ipcMain.handle('get-private-share', async () => {

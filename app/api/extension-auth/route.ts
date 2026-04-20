@@ -211,7 +211,7 @@ export async function GET(req: Request) {
 
   const { data: profile } = await adminClient
     .from('profiles')
-    .select('username, country_code, trust_score, is_verified, total_bytes_shared, total_bytes_used, is_sharing, has_accepted_provider_terms')
+    .select('username, country_code, trust_score, is_verified, is_premium, total_bytes_shared, total_bytes_used, is_sharing, has_accepted_provider_terms, daily_share_limit_mb')
     .eq('id', row.user_id)
     .single()
 
@@ -227,10 +227,12 @@ export async function GET(req: Request) {
       username: profile.username,
       country: profile.country_code,
       trustScore: profile.trust_score,
+      isPremium: profile.is_premium,
       totalShared: profile.total_bytes_shared,
       totalUsed: profile.total_bytes_used,
       isSharing: profile.is_sharing,
       hasAcceptedProviderTerms: profile.has_accepted_provider_terms ?? false,
+      dailyLimitMb: profile.daily_share_limit_mb,
     },
   }, { headers: CORS })
 }

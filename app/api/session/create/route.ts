@@ -57,7 +57,7 @@ export async function POST(req: Request) {
 
   const { data: profile } = await adminClient
     .from('profiles')
-    .select('trust_score, is_verified, is_premium, bandwidth_used_month, bandwidth_limit, preferred_providers')
+    .select('trust_score, is_verified, is_premium, is_sharing, bandwidth_used_month, bandwidth_limit, preferred_providers')
     .eq('id', user.id)
     .single()
 
@@ -69,6 +69,9 @@ export async function POST(req: Request) {
   }
   if (profile.bandwidth_used_month >= profile.bandwidth_limit) {
     return NextResponse.json({ error: 'Monthly bandwidth limit reached. Upgrade to premium.' }, { status: 403 })
+  }
+  if (!profile.is_premium && !profile.is_sharing) {
+    return NextResponse.json({ error: 'FREE TIER — Enable sharing above to connect, or upgrade to premium to browse without sharing.' }, { status: 403 })
   }
 
   const [relay, fallbackList] = await Promise.all([pickRelay(), getRelayFallbackList()])

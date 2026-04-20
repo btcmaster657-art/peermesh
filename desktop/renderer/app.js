@@ -11,6 +11,7 @@ let togglingShare = false
 let privateShare = null
 let privateShareSaving = false
 let privateShareExpiry = '24'
+let dailyLimitSaving = false
 let lastPrivateShareLoadAt = 0
 const PRIVATE_SHARE_REFRESH_TTL = 2500
 
@@ -70,6 +71,12 @@ function formatBytes(bytes) {
   if (bytes < 1024) return `${bytes}B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`
   return `${(bytes / 1024 / 1024).toFixed(1)}MB`
+}
+
+function formatDailyLimit(limitMb) {
+  if (limitMb == null) return 'No limit set.'
+  if (limitMb >= 1024) return `${(limitMb / 1024).toFixed(limitMb % 1024 === 0 ? 0 : 1)} GB/day cap`
+  return `${limitMb} MB/day cap`
 }
 
 function getFlagForCountry(code) {
@@ -211,6 +218,59 @@ function renderSlots(configured, slots) {
   const warningText = getSlotWarning(configured)
   warning.textContent = warningText
   warning.style.display = warningText ? 'block' : 'none'
+}
+
+function renderDailyLimit(state) {
+  const config = state?.config ?? {}
+  const input = document.getElementById('daily-limit-input')
+  const saveBtn = document.getElementById('daily-limit-save')
+  const status = document.getElementById('daily-limit-status')
+  const presetButtons = [
+    { id: 'daily-limit-1gb', value: 1024 },
+    { id: 'daily-limit-2gb', value: 2048 },
+    { id: 'daily-limit-5gb', value: 5120 },
+  ]
+  const noneBtn = document.getElementById('daily-limit-none')
+  const signedIn = !!config.userId
+  const currentLimit = config.dailyShareLimitMb ?? null
+
+  if (input) {
+    if (document.activeElement !== input) {
+      input.value = currentLimit != null ? String(currentLimit) : ''
+    }
+    input.disabled = !signedIn || dailyLimitSaving
+  }
+  if (saveBtn) {
+    saveBtn.disabled = !signedIn || dailyLimitSaving
+    saveBtn.textContent = dailyLimitSaving ? 'SAVING...' : 'APPLY'
+  }
+  if (noneBtn) noneBtn.disabled = !signedIn || dailyLimitSaving
+
+  presetButtons.forEach(({ id, value }) => {
+    const button = document.getElementById(id)
+    if (!button) return
+    button.disabled = !signedIn || dailyLimitSaving
+    button.style.borderColor = currentLimit === value ? 'rgba(0,255,136,0.45)' : 'var(--border)'
+    button.style.color = currentLimit === value ? 'var(--accent)' : 'var(--text)'
+    button.style.background = currentLimit === value ? 'var(--accent-dim)' : 'transparent'
+  })
+
+  if (noneBtn) {
+    noneBtn.style.borderColor = currentLimit == null ? 'rgba(0,255,136,0.45)' : 'var(--border)'
+    noneBtn.style.color = currentLimit == null ? 'var(--accent)' : 'var(--text)'
+    noneBtn.style.background = currentLimit == null ? 'var(--accent-dim)' : 'transparent'
+  }
+
+  if (!status) return
+  if (!signedIn) {
+    status.textContent = 'Sign in to manage your daily share limit.'
+    return
+  }
+  if (dailyLimitSaving) {
+    status.textContent = 'Updating daily limit...'
+    return
+  }
+  status.textContent = `${formatDailyLimit(currentLimit)} Minimum custom limit: 1024 MB.`
 }
 
 function renderStartupPreferences(state) {
@@ -530,6 +590,7 @@ function updateUI(state) {
     privateShare = null
     renderPrivateShare()
     renderStartupPreferences(state)
+    renderDailyLimit(state)
     showScreen('auth-screen')
     return
   }
@@ -561,6 +622,7 @@ function updateUI(state) {
 
   renderPrivateShare()
   renderStartupPreferences(state)
+  renderDailyLimit(state)
   renderSlots(displaySlots.configured ?? configuredSlots, displaySlots)
 
   document.getElementById('stat-requests').textContent = String(displayStats.requestsHandled ?? 0)
@@ -785,6 +847,23 @@ async function updateConnectionSlots(slots) {
   }
 }
 
+async function saveDailyLimit(limitMb) {
+  if (dailyLimitSaving) return
+  dailyLimitSaving = true
+  clearMainError()
+  renderDailyLimit(window.__lastPeerMeshState || null)
+  try {
+    const result = await invoke('setDailyShareLimit', limitMb)
+    if (!result?.success) throw new Error(result?.error || 'Could not update daily limit')
+    await pollState()
+  } catch (error) {
+    showMainError(error?.message || 'Could not update daily limit')
+  } finally {
+    dailyLimitSaving = false
+    renderDailyLimit(window.__lastPeerMeshState || null)
+  }
+}
+
 document.getElementById('slots-decrement').addEventListener('click', async () => {
   const current = parseInt(document.getElementById('slots-value').textContent || '1', 10)
   await updateConnectionSlots(current - 1)
@@ -795,6 +874,49 @@ document.getElementById('slots-increment').addEventListener('click', async () =>
   await updateConnectionSlots(current + 1)
 })
 
+document.getElementById('daily-limit-save').addEventListener('click', async () => {
+  const input = document.getElementById('daily-limit-input')
+  const raw = input?.value?.trim() || ''
+  const nextLimit = raw ? parseInt(raw, 10) : null
+  await saveDailyLimit(nextLimit)
+})
+
+document.getElementById('daily-limit-input').addEventListener('input', (event) => {
+  event.target.value = event.target.value.replace(/\D/g, '')
+})
+
+document.getElementById('daily-limit-input').addEventListener('keydown', async (event) => {
+  if (event.key !== 'Enter') return
+  event.preventDefault()
+  const raw = event.target.value.trim()
+  const nextLimit = raw ? parseInt(raw, 10) : null
+  await saveDailyLimit(nextLimit)
+})
+
+document.getElementById('daily-limit-none').addEventListener('click', async () => {
+  const input = document.getElementById('daily-limit-input')
+  if (input) input.value = ''
+  await saveDailyLimit(null)
+})
+
+document.getElementById('daily-limit-1gb').addEventListener('click', async () => {
+  const input = document.getElementById('daily-limit-input')
+  if (input) input.value = '1024'
+  await saveDailyLimit(1024)
+})
+
+document.getElementById('daily-limit-2gb').addEventListener('click', async () => {
+  const input = document.getElementById('daily-limit-input')
+  if (input) input.value = '2048'
+  await saveDailyLimit(2048)
+})
+
+document.getElementById('daily-limit-5gb').addEventListener('click', async () => {
+  const input = document.getElementById('daily-limit-input')
+  if (input) input.value = '5120'
+  await saveDailyLimit(5120)
+})
+
 setInterval(() => {
   pollState().catch(() => {})
 }, 2000)
@@ -802,6 +924,7 @@ setInterval(() => {
 setOffline(!navigator.onLine)
 renderPrivateShare()
 renderStartupPreferences(null)
+renderDailyLimit(null)
 
 pollState().then((state) => {
   if (!state?.config?.userId) {

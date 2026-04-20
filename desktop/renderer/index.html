@@ -437,6 +437,26 @@
     <div class="private-card">
       <div class="private-head">
         <div>
+          <div class="private-title">Daily share limit</div>
+          <div class="private-subtitle">Optional account-wide cap. Use MB and keep custom limits at 1024 MB or higher.</div>
+        </div>
+      </div>
+      <div class="private-controls" style="grid-template-columns:1fr auto">
+        <input id="daily-limit-input" inputmode="numeric" placeholder="1024+ MB" style="width:100%;padding:8px 10px;border-radius:8px;border:1px solid var(--border);background:#0d0d14;color:var(--text);font-family:'Courier New',monospace;font-size:11px" />
+        <button class="mini-btn" id="daily-limit-save">APPLY</button>
+      </div>
+      <div class="private-controls" style="grid-template-columns:repeat(4, minmax(0, 1fr))">
+        <button class="mini-btn" id="daily-limit-1gb">1 GB</button>
+        <button class="mini-btn" id="daily-limit-2gb">2 GB</button>
+        <button class="mini-btn" id="daily-limit-5gb">5 GB</button>
+        <button class="mini-btn" id="daily-limit-none">NO LIMIT</button>
+      </div>
+      <div class="private-status" id="daily-limit-status">No limit set.</div>
+    </div>
+
+    <div class="private-card">
+      <div class="private-head">
+        <div>
           <div class="private-title">Private sharing</div>
           <div class="private-subtitle">Optional 9-digit access code for trusted connections. Applies to every slot on this desktop.</div>
         </div>

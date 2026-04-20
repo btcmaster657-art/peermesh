@@ -35,6 +35,9 @@ type PrivateShareState = {
   active: boolean
 } | null
 
+const HELPER_USER_MISMATCH_ERROR = 'This desktop app is signed in as a different user. Sign out of the desktop app first.'
+const DAILY_LIMIT_MIN_MB = 1024
+
 function getExpiryPreset(expiresAt: string | null): string {
   if (!expiresAt) return 'none'
   const hours = Math.max(0, Math.round((new Date(expiresAt).getTime() - Date.now()) / 3_600_000))
@@ -44,10 +47,19 @@ function getExpiryPreset(expiresAt: string | null): string {
   return 'none'
 }
 
+function isDesktopOwnedByUser(state: DesktopState | null, userId: string | null | undefined): boolean {
+  return !(state?.available && state.userId && userId && state.userId !== userId)
+}
+
+function isDesktopSharing(state: DesktopState | null): boolean {
+  return !!(state?.running || state?.shareEnabled)
+}
+
 export default function Dashboard() {
   const router = useRouter()
   const supabase = createClient()
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const pendingShareTargetRef = useRef<boolean | null>(null)
 
   const [profile, setProfile] = useState<Profile | null>(null)
   const [peerCounts, setPeerCounts] = useState<Record<string, number>>({})
@@ -59,6 +71,7 @@ export default function Dashboard() {
   const [connecting, setConnecting] = useState(false)
   const [disconnecting, setDisconnecting] = useState(false)
   const [shareToggling, setShareToggling] = useState(false)
+  const [shareTarget, setShareTarget] = useState<boolean | null>(null)
   const [showDisclosure, setShowDisclosure] = useState(false)
   const [privateCodeInput, setPrivateCodeInput] = useState('')
   const [privateShare, setPrivateShare] = useState<PrivateShareState>(null)
@@ -66,6 +79,9 @@ export default function Dashboard() {
   const [privateShareSaving, setPrivateShareSaving] = useState(false)
   const [privateShareStoppedSharing, setPrivateShareStoppedSharing] = useState(false)
   const [slotUpdating, setSlotUpdating] = useState(false)
+  const [dailyLimitInput, setDailyLimitInput] = useState('')
+  const [dailyLimitSaving, setDailyLimitSaving] = useState(false)
+  const [dailyLimitError, setDailyLimitError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [shareError, setShareError] = useState<string | null>(null)
@@ -111,16 +127,15 @@ export default function Dashboard() {
         }).catch(() => {})
 
         const dt = await checkDesktop()
-        setDesktop(dt)
+        const desktopState = applyDesktopSnapshot(dt, user.id)
         setDesktopChecked(true)
         startPolling()
 
         if (dt.available) {
           // Only sync auth / show sharing UI if the desktop belongs to this user
           // (dt.userId is null when not yet configured — allow sync in that case)
-          const desktopOwnedByOther = dt.userId && dt.userId !== user.id
-          if (desktopOwnedByOther) {
-            setShareError('This desktop app is signed in as a different user. Sign out of the desktop app first.')
+          if (desktopState.desktopOwnedByOther) {
+            setShareError(HELPER_USER_MISMATCH_ERROR)
           } else {
             const { data: { session } } = await supabase.auth.getSession()
             if (session) {
@@ -134,8 +149,7 @@ export default function Dashboard() {
                 setShareError(authResult.error)
               }
             }
-            setIsSharing(!!(dt.running || dt.shareEnabled))
-            if (dt.stats) setSharingStats({ bytesServed: dt.stats.bytesServed, requestsHandled: dt.stats.requestsHandled })
+            setShareError(prev => prev === HELPER_USER_MISMATCH_ERROR ? null : prev)
           }
         } else if (data.is_sharing) {
           await fetch('/api/user/sharing', {
@@ -175,30 +189,75 @@ export default function Dashboard() {
   }, [])
 
   useEffect(() => {
-    const baseDeviceId = desktop?.baseDeviceId ?? desktop?.peer?.baseDeviceId ?? null
+    setDailyLimitInput(profile?.daily_share_limit_mb != null ? String(profile.daily_share_limit_mb) : '')
+  }, [profile?.daily_share_limit_mb])
+
+  useEffect(() => {
+    const baseDeviceId = isDesktopOwnedByUser(desktop, profile?.id)
+      ? (desktop?.baseDeviceId ?? desktop?.peer?.baseDeviceId ?? null)
+      : null
     if (!profile || !baseDeviceId) {
       setPrivateShare(null)
       return
     }
     loadPrivateShare(baseDeviceId).catch(() => {})
-  }, [profile?.id, desktop?.baseDeviceId, desktop?.peer?.baseDeviceId])
+  }, [profile?.id, desktop?.baseDeviceId, desktop?.peer?.baseDeviceId, desktop?.userId])
 
   // ── Poll desktop state + refresh profile from DB ──────────────────────────
+  const applyDesktopSnapshot = useCallback((dt: DesktopState, userId: string | null | undefined) => {
+    setDesktop(dt)
+
+    const desktopOwnedByOther = !isDesktopOwnedByUser(dt, userId)
+    if (desktopOwnedByOther) {
+      pendingShareTargetRef.current = null
+      setShareTarget(null)
+      setShareToggling(false)
+      setIsSharing(false)
+      return { desktopOwnedByOther, helperSharing: false }
+    }
+
+    if (dt.stats) {
+      setSharingStats({
+        bytesServed: dt.stats.bytesServed,
+        requestsHandled: dt.stats.requestsHandled,
+      })
+    }
+
+    const helperSharing = isDesktopSharing(dt)
+    if (pendingShareTargetRef.current !== null && helperSharing !== pendingShareTargetRef.current) {
+      return { desktopOwnedByOther: false, helperSharing }
+    }
+
+    if (pendingShareTargetRef.current !== null) {
+      pendingShareTargetRef.current = null
+      setShareTarget(null)
+      setShareToggling(false)
+    }
+
+    setIsSharing(helperSharing)
+    return { desktopOwnedByOther: false, helperSharing }
+  }, [])
+
   function startPolling() {
     if (pollRef.current) return
     let tick = 0
     pollRef.current = setInterval(async () => {
       tick++
       const dt = await checkDesktop()
-      setDesktop(dt)
       const currentBaseDeviceId = dt.baseDeviceId ?? dt.peer?.baseDeviceId ?? null
       const { data: { user } } = await supabase.auth.getUser()
       const desktopOwnedByOther = dt.available && dt.userId && user && dt.userId !== user.id
       if (dt.available && !desktopOwnedByOther) {
-        setIsSharing(!!(dt.running || dt.shareEnabled))
-        if (dt.stats) setSharingStats({ bytesServed: dt.stats.bytesServed, requestsHandled: dt.stats.requestsHandled })
+        applyDesktopSnapshot(dt, user?.id ?? null)
+        setShareError(prev => prev === HELPER_USER_MISMATCH_ERROR ? null : prev)
       } else {
+        setDesktop(dt)
+        pendingShareTargetRef.current = null
+        setShareTarget(null)
+        setShareToggling(false)
         setIsSharing(false)
+        if (desktopOwnedByOther) setShareError(HELPER_USER_MISMATCH_ERROR)
+        else setShareError(prev => prev === HELPER_USER_MISMATCH_ERROR ? null : prev)
       }
       // Refresh profile from DB every 10s to pick up bytes/bandwidth changes
       if (tick % 3 === 0) {
@@ -242,6 +301,10 @@ export default function Dashboard() {
   }
 
   async function savePrivateShare(input: { enabled?: boolean; refresh?: boolean; expiryHours?: string }) {
+    if (profile && !isDesktopOwnedByUser(desktop, profile.id)) {
+      setShareError(HELPER_USER_MISMATCH_ERROR)
+      return
+    }
     const baseDeviceId = desktop?.baseDeviceId ?? desktop?.peer?.baseDeviceId ?? null
     if (!baseDeviceId) {
       setShareError('A local desktop app or CLI device is required to manage private sharing')
@@ -278,6 +341,10 @@ export default function Dashboard() {
 
   async function updateConnectionSlots(nextSlots: number) {
     if (slotUpdating) return
+    if (profile && !isDesktopOwnedByUser(desktop, profile.id)) {
+      setShareError(HELPER_USER_MISMATCH_ERROR)
+      return
+    }
     if (!desktopAvailable && !cliRunning && !desktopRunning) {
       setShareError('Desktop or CLI not running. Start a local helper before changing connection slots.')
       return
@@ -288,14 +355,7 @@ export default function Dashboard() {
     try {
       const result = await setDesktopConnectionSlots(nextSlots)
       if (!result.ok || !result.state) throw new Error(result.error ?? 'Could not update connection slots')
-      setDesktop(result.state)
-      setIsSharing(result.state.running)
-      if (result.state.stats) {
-        setSharingStats({
-          bytesServed: result.state.stats.bytesServed,
-          requestsHandled: result.state.stats.requestsHandled,
-        })
-      }
+      applyDesktopSnapshot(result.state, profile?.id ?? null)
     } catch (err: unknown) {
       setShareError(err instanceof Error ? err.message : 'Could not update connection slots')
     } finally {
@@ -303,22 +363,67 @@ export default function Dashboard() {
     }
   }
 
+  async function saveDailyLimit(nextLimitMb: number | null) {
+    if (dailyLimitSaving) return
+    if (profile && !isDesktopOwnedByUser(desktop, profile.id)) {
+      setDailyLimitError(HELPER_USER_MISMATCH_ERROR)
+      return
+    }
+
+    if (nextLimitMb !== null && nextLimitMb < DAILY_LIMIT_MIN_MB) {
+      setDailyLimitError(`Minimum daily limit is ${DAILY_LIMIT_MIN_MB} MB (1 GB)`)
+      return
+    }
+
+    setDailyLimitSaving(true)
+    setDailyLimitError(null)
+    try {
+      const res = await fetch('/api/user/sharing', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dailyLimitMb: nextLimitMb }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok || data.error) throw new Error(data.error ?? 'Could not update daily limit')
+
+      const savedLimit = data.daily_share_limit_mb ?? null
+      setProfile(p => p ? { ...p, daily_share_limit_mb: savedLimit } : p)
+      setDailyLimitInput(savedLimit != null ? String(savedLimit) : '')
+    } catch (err: unknown) {
+      setDailyLimitError(err instanceof Error ? err.message : 'Could not update daily limit')
+    } finally {
+      setDailyLimitSaving(false)
+    }
+  }
+
   // ── Share toggle ────────────────────────────────────────────────────────────
-  const handleShareToggle = useCallback(async () => {
+  async function handleShareToggle() {
     if (!profile || shareToggling) return
+    if (!isDesktopOwnedByUser(desktop, profile.id)) {
+      setShareError(HELPER_USER_MISMATCH_ERROR)
+      return
+    }
     setShareError(null)
 
     // If turning OFF — no disclosure needed
     if (isSharing) {
+      pendingShareTargetRef.current = false
+      setShareTarget(false)
       setShareToggling(true)
-      setIsSharing(false)
-      await stopDesktopSharing()
+      const result = await stopDesktopSharing()
+      if (result.state) applyDesktopSnapshot(result.state, profile.id)
       await fetch('/api/user/sharing', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ isSharing: false }),
       }).catch(() => {})
-      setShareToggling(false)
+      if (!result.ok) {
+        pendingShareTargetRef.current = null
+        setShareTarget(null)
+        setShareToggling(false)
+        setIsSharing(true)
+        setShareError('Could not stop sharing')
+      }
       return
     }
 
@@ -329,7 +434,7 @@ export default function Dashboard() {
     }
 
     await startSharing()
-  }, [profile, isSharing, shareToggling])
+  }
 
   async function startSharing() {
     setShareToggling(true)
@@ -349,6 +454,11 @@ export default function Dashboard() {
       setShareToggling(false)
       return
     }
+    if (!isDesktopOwnedByUser(dt, profile!.id)) {
+      setShareError(HELPER_USER_MISMATCH_ERROR)
+      setShareToggling(false)
+      return
+    }
 
     const { data: { session } } = await supabase.auth.getSession()
     if (!session) {
@@ -357,21 +467,31 @@ export default function Dashboard() {
       return
     }
 
-    const ok = await startDesktopSharing({
+    pendingShareTargetRef.current = true
+    setShareTarget(true)
+    const result = await startDesktopSharing({
       token: session.access_token,
       userId: profile!.id,
       country: profile!.country_code,
       trust: profile!.trust_score,
     })
 
-    if (!ok.ok) {
-      setShareError(ok.error ?? 'desktop_required')
+    if (!result.ok) {
+      pendingShareTargetRef.current = null
+      setShareTarget(null)
+      setShareError(result.error ?? 'desktop_required')
       setShareToggling(false)
       return
     }
 
-    setIsSharing(true)
-    setShareToggling(false)
+    if (result.state) {
+      applyDesktopSnapshot(result.state, profile!.id)
+    } else {
+      pendingShareTargetRef.current = null
+      setShareTarget(null)
+      setIsSharing(true)
+      setShareToggling(false)
+    }
     setPrivateShareStoppedSharing(false)
     await fetch('/api/user/sharing', {
       method: 'POST',
@@ -452,6 +572,8 @@ export default function Dashboard() {
     ? Math.min(100, Math.max(profile.bandwidth_used_month > 0 ? 1 : 0, Math.round((profile.bandwidth_used_month / profile.bandwidth_limit) * 100)))
     : profile.bandwidth_used_month > 0 ? 100 : 0
   const desktopAvailable = desktop?.available ?? false
+  const helperOwnedByCurrentUser = isDesktopOwnedByUser(desktop, profile.id)
+  const desktopAvailableForUser = desktopAvailable && helperOwnedByCurrentUser
   const primaryWhere = desktop?.where ?? desktop?.source ?? null  // 'desktop' | 'cli' | null
   const isCLI = primaryWhere === 'cli'
   const isDesktopApp = primaryWhere === 'desktop'
@@ -465,15 +587,18 @@ export default function Dashboard() {
   const cliProcessVersion     = isCLI        ? desktop?.version : (peerWhere === 'cli'     ? desktop?.peer?.version : null)
   const desktopRunning = isDesktopApp || peerWhere === 'desktop'
   const cliRunning     = isCLI        || peerWhere === 'cli'
+  const desktopRunningForUser = desktopRunning && helperOwnedByCurrentUser
+  const cliRunningForUser = cliRunning && helperOwnedByCurrentUser
 
   const desktopUpdateAvailable = !!(desktopRunning && latestDesktopVersion && desktopProcessVersion && latestDesktopVersion !== desktopProcessVersion)
   const cliUpdateAvailable     = !!(cliRunning     && latestCliVersion     && cliProcessVersion     && latestCliVersion     !== cliProcessVersion)
   const extUpdateAvailable     = !!(extInstalled   && latestExtVersion     && extVersion            && latestExtVersion     !== extVersion)
   const showExtBanner          = !extInstalled || extUpdateAvailable
-  const helperBaseDeviceId = desktop?.baseDeviceId ?? desktop?.peer?.baseDeviceId ?? null
-  const helperSlots = desktop?.slots ?? desktop?.peer?.slots ?? null
-  const slotDisplayCount = helperSlots?.configured ?? desktop?.connectionSlots ?? desktop?.peer?.connectionSlots ?? 1
+  const helperBaseDeviceId = helperOwnedByCurrentUser ? (desktop?.baseDeviceId ?? desktop?.peer?.baseDeviceId ?? null) : null
+  const helperSlots = helperOwnedByCurrentUser ? (desktop?.slots ?? desktop?.peer?.slots ?? null) : null
+  const slotDisplayCount = helperSlots?.configured ?? (helperOwnedByCurrentUser ? (desktop?.connectionSlots ?? desktop?.peer?.connectionSlots ?? 1) : 1)
   const slotDisplayActive = helperSlots?.active ?? 0
+  const displayIsSharing = shareTarget ?? isSharing
   const privateConnectReady = !selectedCountry && !!privateCodeInput.trim()
 
   // Detect OS for CLI docs default tab
@@ -713,28 +838,30 @@ export default function Dashboard() {
       )}
 
       {/* Share toggle */}
-      <div style={{ background: 'var(--surface)', border: `1px solid ${isSharing ? 'rgba(0,255,136,0.3)' : shareError ? 'rgba(255,80,80,0.3)' : 'var(--border)'}`, borderRadius: '12px', padding: '16px', marginBottom: '16px' }}>
+      <div style={{ background: 'var(--surface)', border: `1px solid ${displayIsSharing ? 'rgba(0,255,136,0.3)' : shareError ? 'rgba(255,80,80,0.3)' : 'var(--border)'}`, borderRadius: '12px', padding: '16px', marginBottom: '16px' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <div>
             <div style={{ fontSize: '14px', fontWeight: 500, marginBottom: '3px' }}>Share my connection</div>
-            <div style={{ fontSize: '12px', color: isSharing ? 'var(--accent)' : 'var(--muted)' }}>
-              {isSharing
-                ? `${sharingStats.requestsHandled} requests · ${formatBytes(sharingStats.bytesServed)} served · ${privateShare?.active ? '\uD83D\uDD12 PRIVATE' : '\uD83C\uDF10 PUBLIC'}`
-                : shareToggling
+            <div style={{ fontSize: '12px', color: displayIsSharing ? 'var(--accent)' : 'var(--muted)' }}>
+              {shareToggling && shareTarget === true
                   ? 'Connecting...'
-                  : desktopAvailable
-                    ? `${cliRunning && desktopRunning ? 'CLI + Desktop' : cliRunning ? 'CLI' : 'Desktop'} ready — toggle to start sharing`
-                    : 'Install the desktop app or run the CLI to share your connection'}
+                : displayIsSharing
+                  ? `${sharingStats.requestsHandled} requests · ${formatBytes(sharingStats.bytesServed)} served · ${privateShare?.active ? '\uD83D\uDD12 PRIVATE' : '\uD83C\uDF10 PUBLIC'}`
+                  : !helperOwnedByCurrentUser
+                    ? 'Local helper belongs to another user.'
+                    : desktopAvailableForUser
+                      ? `${cliRunningForUser && desktopRunningForUser ? 'CLI + Desktop' : cliRunningForUser ? 'CLI' : 'Desktop'} ready — toggle to start sharing`
+                      : 'Install the desktop app or run the CLI to share your connection'}
             </div>
           </div>
           <button
             onClick={handleShareToggle}
             disabled={shareToggling}
-            style={{ width: '44px', height: '24px', borderRadius: '12px', border: 'none', background: isSharing ? 'var(--accent)' : 'var(--border)', cursor: shareToggling ? 'not-allowed' : 'pointer', position: 'relative', transition: 'background 0.2s', flexShrink: 0, opacity: shareToggling ? 0.6 : 1 }}
+            style={{ width: '44px', height: '24px', borderRadius: '12px', border: 'none', background: displayIsSharing ? 'var(--accent)' : 'var(--border)', cursor: shareToggling ? 'not-allowed' : 'pointer', position: 'relative', transition: 'background 0.2s', flexShrink: 0, opacity: shareToggling ? 0.6 : 1 }}
           >
             {shareToggling
               ? <span style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><span style={{ width: '10px', height: '10px', border: '2px solid rgba(255,255,255,0.3)', borderTopColor: 'white', borderRadius: '50%', animation: 'spin 0.7s linear infinite', display: 'inline-block' }} /></span>
-              : <div style={{ position: 'absolute', width: '18px', height: '18px', borderRadius: '50%', background: 'white', top: '3px', left: isSharing ? '23px' : '3px', transition: 'left 0.2s' }} />
+              : <div style={{ position: 'absolute', width: '18px', height: '18px', borderRadius: '50%', background: 'white', top: '3px', left: displayIsSharing ? '23px' : '3px', transition: 'left 0.2s' }} />
             }
           </button>
         </div>
@@ -767,8 +894,8 @@ export default function Dashboard() {
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
               <button
                 onClick={() => updateConnectionSlots(slotDisplayCount - 1)}
-                disabled={slotUpdating || slotDisplayCount <= 1 || (!desktopAvailable && !cliRunning && !desktopRunning)}
-                style={{ width: '30px', height: '30px', borderRadius: '8px', border: '1px solid var(--border)', background: 'var(--bg)', color: slotDisplayCount <= 1 ? 'var(--muted)' : 'var(--text)', cursor: slotUpdating || slotDisplayCount <= 1 || (!desktopAvailable && !cliRunning && !desktopRunning) ? 'not-allowed' : 'pointer', fontFamily: 'var(--font-geist-mono)', fontSize: '16px' }}
+                disabled={slotUpdating || slotDisplayCount <= 1 || !desktopAvailableForUser}
+                style={{ width: '30px', height: '30px', borderRadius: '8px', border: '1px solid var(--border)', background: 'var(--bg)', color: slotDisplayCount <= 1 ? 'var(--muted)' : 'var(--text)', cursor: slotUpdating || slotDisplayCount <= 1 || !desktopAvailableForUser ? 'not-allowed' : 'pointer', fontFamily: 'var(--font-geist-mono)', fontSize: '16px' }}
               >
                 -
               </button>
@@ -777,8 +904,8 @@ export default function Dashboard() {
               </div>
               <button
                 onClick={() => updateConnectionSlots(slotDisplayCount + 1)}
-                disabled={slotUpdating || slotDisplayCount >= 32 || (!desktopAvailable && !cliRunning && !desktopRunning)}
-                style={{ width: '30px', height: '30px', borderRadius: '8px', border: '1px solid var(--border)', background: 'var(--bg)', color: slotDisplayCount >= 32 ? 'var(--muted)' : 'var(--text)', cursor: slotUpdating || slotDisplayCount >= 32 || (!desktopAvailable && !cliRunning && !desktopRunning) ? 'not-allowed' : 'pointer', fontFamily: 'var(--font-geist-mono)', fontSize: '16px' }}
+                disabled={slotUpdating || slotDisplayCount >= 32 || !desktopAvailableForUser}
+                style={{ width: '30px', height: '30px', borderRadius: '8px', border: '1px solid var(--border)', background: 'var(--bg)', color: slotDisplayCount >= 32 ? 'var(--muted)' : 'var(--text)', cursor: slotUpdating || slotDisplayCount >= 32 || !desktopAvailableForUser ? 'not-allowed' : 'pointer', fontFamily: 'var(--font-geist-mono)', fontSize: '16px' }}
               >
                 +
               </button>
@@ -791,31 +918,54 @@ export default function Dashboard() {
           <div>
             <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--muted)', letterSpacing: '0.5px', marginBottom: '2px' }}>DAILY SHARE LIMIT</div>
             <div style={{ fontSize: '11px', color: 'var(--muted)' }}>
-              {profile.daily_share_limit_mb ? `${profile.daily_share_limit_mb}MB/day — auto-stops when reached` : 'No limit set'}
+              {profile.daily_share_limit_mb != null ? `${profile.daily_share_limit_mb} MB/day — auto-stops when reached` : 'No limit set'}
             </div>
           </div>
-          <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexShrink: 0 }}>
-            <select
-              defaultValue={profile.daily_share_limit_mb ?? ''}
-              onChange={async (e) => {
-                const val = e.target.value === '' ? null : parseInt(e.target.value)
-                await fetch('/api/user/sharing', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ dailyLimitMb: val }),
-                })
-                setProfile(p => p ? { ...p, daily_share_limit_mb: val } : p)
-              }}
-              style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: '6px', padding: '4px 8px', fontFamily: 'var(--font-geist-mono)', fontSize: '10px', cursor: 'pointer' }}
-            >
-              <option value=''>No limit</option>
-              <option value='100'>100 MB</option>
-              <option value='250'>250 MB</option>
-              <option value='500'>500 MB</option>
-              <option value='1024'>1 GB</option>
-              <option value='2048'>2 GB</option>
-              <option value='5120'>5 GB</option>
-            </select>
+          <div style={{ display: 'grid', gap: '8px', minWidth: '220px', flex: '1 1 220px' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '8px' }}>
+              <input
+                value={dailyLimitInput}
+                onChange={(e) => {
+                  setDailyLimitInput(e.target.value.replace(/\D/g, ''))
+                  setDailyLimitError(null)
+                }}
+                inputMode="numeric"
+                placeholder="1024+ MB"
+                disabled={!helperOwnedByCurrentUser}
+                style={{ width: '100%', background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: '6px', padding: '7px 9px', fontFamily: 'var(--font-geist-mono)', fontSize: '10px' }}
+              />
+              <button
+                onClick={() => saveDailyLimit(dailyLimitInput ? Number.parseInt(dailyLimitInput, 10) : null)}
+                disabled={dailyLimitSaving || !helperOwnedByCurrentUser}
+                style={{ padding: '7px 12px', background: 'var(--accent)', color: '#000', border: 'none', borderRadius: '6px', fontFamily: 'var(--font-geist-mono)', fontSize: '10px', fontWeight: 700, cursor: dailyLimitSaving || !helperOwnedByCurrentUser ? 'not-allowed' : 'pointer', opacity: dailyLimitSaving || !helperOwnedByCurrentUser ? 0.6 : 1 }}
+              >
+                {dailyLimitSaving ? '...' : 'APPLY'}
+              </button>
+            </div>
+            <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+              {[1024, 2048, 5120].map(limit => (
+                <button
+                  key={`limit-preset-${limit}`}
+                  onClick={() => { setDailyLimitInput(String(limit)); void saveDailyLimit(limit) }}
+                  disabled={dailyLimitSaving || !helperOwnedByCurrentUser}
+                  style={{ padding: '6px 8px', background: profile.daily_share_limit_mb === limit ? 'var(--accent-dim)' : 'var(--bg)', color: profile.daily_share_limit_mb === limit ? 'var(--accent)' : 'var(--text)', border: `1px solid ${profile.daily_share_limit_mb === limit ? 'rgba(0,255,136,0.4)' : 'var(--border)'}`, borderRadius: '6px', fontFamily: 'var(--font-geist-mono)', fontSize: '9px', cursor: dailyLimitSaving || !helperOwnedByCurrentUser ? 'not-allowed' : 'pointer', opacity: dailyLimitSaving || !helperOwnedByCurrentUser ? 0.6 : 1 }}
+                >
+                  {limit >= 1024 ? `${limit / 1024} GB` : `${limit} MB`}
+                </button>
+              ))}
+              <button
+                onClick={() => { setDailyLimitInput(''); void saveDailyLimit(null) }}
+                disabled={dailyLimitSaving || !helperOwnedByCurrentUser}
+                style={{ padding: '6px 8px', background: profile.daily_share_limit_mb == null ? 'var(--accent-dim)' : 'var(--bg)', color: profile.daily_share_limit_mb == null ? 'var(--accent)' : 'var(--text)', border: `1px solid ${profile.daily_share_limit_mb == null ? 'rgba(0,255,136,0.4)' : 'var(--border)'}`, borderRadius: '6px', fontFamily: 'var(--font-geist-mono)', fontSize: '9px', cursor: dailyLimitSaving || !helperOwnedByCurrentUser ? 'not-allowed' : 'pointer', opacity: dailyLimitSaving || !helperOwnedByCurrentUser ? 0.6 : 1 }}
+              >
+                NO LIMIT
+              </button>
+            </div>
+            {dailyLimitError && (
+              <div style={{ fontSize: '10px', color: '#ff9090', fontFamily: 'var(--font-geist-mono)', lineHeight: 1.5 }}>
+                {dailyLimitError}
+              </div>
+            )}
           </div>
         </div>
 
@@ -878,8 +1028,13 @@ export default function Dashboard() {
                   await savePrivateShare({ enabled: nextEnabled, expiryHours: privateExpiryHours })
                   // If sharing is active, stop it so user must manually restart with new privacy state
                   if (isSharing) {
-                    await stopDesktopSharing()
-                    setIsSharing(false)
+                    pendingShareTargetRef.current = false
+                    const result = await stopDesktopSharing()
+                    if (result.state) applyDesktopSnapshot(result.state, profile.id)
+                    else {
+                      pendingShareTargetRef.current = null
+                      setIsSharing(false)
+                    }
                     setPrivateShareStoppedSharing(true)
                     await fetch('/api/user/sharing', {
                       method: 'POST',

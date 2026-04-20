@@ -38,6 +38,19 @@ function getProviderShareStatus(profile: {
   }
 }
 
+function parseDailyShareLimitMb(value: unknown): number | null | undefined {
+  if (value === null) return null
+  if (value === undefined) return undefined
+
+  const raw = typeof value === 'string' ? value.trim() : String(value)
+  if (!raw) return undefined
+
+  const parsed = Number.parseInt(raw, 10)
+  if (!Number.isInteger(parsed)) return undefined
+  if (parsed < 1024) return undefined
+  return parsed
+}
+
 type PrivateShareRow = {
   base_device_id: string
   share_code: string
@@ -132,7 +145,7 @@ export async function GET(req: Request) {
 
   const { data, error } = await adminClient
     .from('profiles')
-    .select('total_bytes_shared, total_bytes_used, bandwidth_used_month, bandwidth_limit, trust_score, is_sharing, daily_share_limit_mb, has_accepted_provider_terms, share_bytes_today, share_bytes_today_date')
+    .select('total_bytes_shared, total_bytes_used, bandwidth_used_month, bandwidth_limit, trust_score, is_sharing, is_premium, daily_share_limit_mb, has_accepted_provider_terms, share_bytes_today, share_bytes_today_date')
     .eq('id', userId)
     .single()
 
@@ -145,6 +158,7 @@ export async function GET(req: Request) {
     bandwidth_limit: data.bandwidth_limit,
     trust_score: data.trust_score,
     is_sharing: data.is_sharing,
+    is_premium: data.is_premium,
     daily_share_limit_mb: data.daily_share_limit_mb,
     has_accepted_provider_terms: data.has_accepted_provider_terms,
     private_share: serializePrivateShare(privateShare),
@@ -233,9 +247,9 @@ export async function POST(req: Request) {
 
   // Setting daily share limit
   if ('dailyLimitMb' in body) {
-    const limitMb = body.dailyLimitMb === null ? null : parseInt(body.dailyLimitMb)
-    if (body.dailyLimitMb !== null && (isNaN(limitMb!) || limitMb! < 0)) {
-      return NextResponse.json({ error: 'dailyLimitMb must be a positive number or null' }, { status: 400 })
+    const limitMb = parseDailyShareLimitMb(body.dailyLimitMb)
+    if (limitMb === undefined) {
+      return NextResponse.json({ error: 'dailyLimitMb must be null or at least 1024 MB (1 GB)' }, { status: 400 })
     }
     await adminClient.from('profiles').update({ daily_share_limit_mb: limitMb ?? null }).eq('id', user.id)
     return NextResponse.json({ ok: true, daily_share_limit_mb: limitMb ?? null })

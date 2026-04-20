@@ -53,6 +53,8 @@ export type DesktopState = {
     running: boolean
     shareEnabled?: boolean
     where: 'desktop' | 'cli'
+    userId?: string | null
+    country?: string | null
     version: string | null
     baseDeviceId?: string | null
     privateShareActive?: boolean
@@ -98,6 +100,8 @@ export async function checkDesktop(): Promise<DesktopState> {
       shareEnabled: !!d.shareEnabled,
       where: d.where ?? 'cli',
       version: d.version ?? null,
+      userId: d.userId ?? null,
+      country: d.country ?? null,
       baseDeviceId: d.baseDeviceId ?? null,
       privateShareActive: !!d.privateShareActive,
       privateShare: d.privateShare ?? null,
@@ -112,6 +116,9 @@ export async function checkDesktop(): Promise<DesktopState> {
         ...a,
         where: d.where ?? a.where,
         source: d.source ?? d.where ?? a.source,
+        userId: d.userId ?? a.userId,
+        country: d.country ?? a.country,
+        version: d.version ?? a.version,
         stats: d.stats ?? a.stats,
         slots: d.slots ?? a.slots,
         connectionSlots: d.connectionSlots ?? a.connectionSlots,
@@ -173,7 +180,7 @@ export async function syncDesktopAuth(payload: { token: string; userId: string; 
   }
 }
 
-export async function startDesktopSharing(payload: { token: string; userId: string; country: string; trust: number }): Promise<{ ok: boolean; error?: string }> {
+export async function startDesktopSharing(payload: { token: string; userId: string; country: string; trust: number }): Promise<{ ok: boolean; error?: string; state?: DesktopState }> {
   try {
     const res = await fetch(`${AGENT_URL}/native/share/start`, {
       method: 'POST',
@@ -185,26 +192,33 @@ export async function startDesktopSharing(payload: { token: string; userId: stri
       const data = await res.json().catch(() => ({}))
       return { ok: false, error: data.error ?? 'This desktop is signed in as a different user' }
     }
-    return { ok: res.ok }
+    const data = await res.json().catch(() => null)
+    return { ok: res.ok, state: res.ok && data ? { available: true, peer: null, ...data } : undefined }
   } catch {
     return { ok: false }
   }
 }
 
-export async function stopDesktopSharing(): Promise<boolean> {
+export async function stopDesktopSharing(): Promise<{ ok: boolean; state?: DesktopState }> {
   // Stop both the primary process (7654) and the peer process (7656)
   const stopPrimary = fetch(`${AGENT_URL}/native/share/stop`, {
     method: 'POST',
     signal: AbortSignal.timeout(4000),
-  }).then(r => r.ok).catch(() => false)
+  }).then(async (r) => {
+    const data = await r.json().catch(() => null)
+    return { ok: r.ok, state: r.ok && data ? { available: true, peer: null, ...data } : undefined }
+  }).catch(() => ({ ok: false as const, state: undefined }))
 
   const stopPeer = fetch(`${PEER_URL}/native/share/stop`, {
     method: 'POST',
     signal: AbortSignal.timeout(4000),
-  }).then(r => r.ok).catch(() => false)
+  }).then(async (r) => {
+    const data = await r.json().catch(() => null)
+    return { ok: r.ok, state: r.ok && data ? { available: true, peer: null, ...data } : undefined }
+  }).catch(() => ({ ok: false as const, state: undefined }))
 
-  const [primary] = await Promise.all([stopPrimary, stopPeer])
-  return primary
+  const [primary, peer] = await Promise.all([stopPrimary, stopPeer])
+  return primary.ok ? primary : peer
 }
 
 export async function startAgent(config: {
