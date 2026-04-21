@@ -1,11 +1,11 @@
 // injector.js - runs in ISOLATED world, injects identity.js into MAIN world
 // Only active when a PeerMesh session is connected.
 
-const COUNTRY_DATA = globalThis.__PEERMESH_COUNTRY_DATA__ || {
+const COUNTRY_DATA_MAP = globalThis.__PEERMESH_COUNTRY_DATA__ || {
   XX: { tz: 'UTC', lang: 'en-US', lat: 51.5074, lon: -0.1278, persona: 'desktop' },
 }
 
-const PERSONA_POOLS = globalThis.__PEERMESH_PERSONA_POOLS__ || {
+const PERSONA_POOL_MAP = globalThis.__PEERMESH_PERSONA_POOLS__ || {
   desktop: [
     {
       mobile: false,
@@ -24,7 +24,7 @@ const PERSONA_POOLS = globalThis.__PEERMESH_PERSONA_POOLS__ || {
   ],
 }
 
-const DEFAULT_COUNTRY = COUNTRY_DATA.XX || {
+const DEFAULT_COUNTRY = COUNTRY_DATA_MAP.XX || {
   tz: 'UTC',
   lang: 'en-US',
   lat: 51.5074,
@@ -50,13 +50,13 @@ function defaultFontForPlatform(platformLabel) {
 
 function normalizeCountry(country) {
   const requested = String(country || '').trim().toUpperCase()
-  if (requested && COUNTRY_DATA[requested]) {
-    return { code: requested, meta: COUNTRY_DATA[requested] }
+  if (requested && COUNTRY_DATA_MAP[requested]) {
+    return { code: requested, meta: COUNTRY_DATA_MAP[requested] }
   }
 
   const shortCode = requested.slice(0, 2)
-  if (shortCode && COUNTRY_DATA[shortCode]) {
-    return { code: shortCode, meta: COUNTRY_DATA[shortCode] }
+  if (shortCode && COUNTRY_DATA_MAP[shortCode]) {
+    return { code: shortCode, meta: COUNTRY_DATA_MAP[shortCode] }
   }
 
   return { code: requested || 'XX', meta: DEFAULT_COUNTRY }
@@ -145,7 +145,7 @@ function normalizePersona(personaName, variant, variantIndex) {
 
 function selectPersonaVariant(country, personaName, pool, session) {
   if (!Array.isArray(pool) || pool.length === 0) {
-    return { variant: PERSONA_POOLS.desktop[0], variantIndex: 0 }
+    return { variant: PERSONA_POOL_MAP.desktop[0], variantIndex: 0 }
   }
 
   const seed = [
@@ -161,8 +161,8 @@ function selectPersonaVariant(country, personaName, pool, session) {
 
 function buildProfile(session) {
   const { code: country, meta } = normalizeCountry(session?.country)
-  const personaName = PERSONA_POOLS[meta.persona] ? meta.persona : DEFAULT_COUNTRY.persona || 'desktop'
-  const pool = PERSONA_POOLS[personaName] || PERSONA_POOLS.desktop
+  const personaName = PERSONA_POOL_MAP[meta.persona] ? meta.persona : DEFAULT_COUNTRY.persona || 'desktop'
+  const pool = PERSONA_POOL_MAP[personaName] || PERSONA_POOL_MAP.desktop
   const { variant, variantIndex } = selectPersonaVariant(country, personaName, pool, session)
   const persona = normalizePersona(personaName, variant, variantIndex)
 
@@ -176,9 +176,24 @@ function buildProfile(session) {
   }
 }
 
-if (document.documentElement) {
-  document.documentElement.setAttribute('data-peermesh-extension', '1')
-  document.documentElement.setAttribute('data-ext-version', chrome.runtime.getManifest().version)
+function markExtensionPresence() {
+  const root = document.documentElement
+  if (!root) return false
+
+  root.setAttribute('data-peermesh-extension', '1')
+  root.setAttribute('data-ext-version', chrome.runtime.getManifest().version)
+  return true
+}
+
+if (!markExtensionPresence()) {
+  const ensureMarked = () => {
+    if (!markExtensionPresence()) return
+    document.removeEventListener('readystatechange', ensureMarked)
+    document.removeEventListener('DOMContentLoaded', ensureMarked)
+  }
+
+  document.addEventListener('readystatechange', ensureMarked)
+  document.addEventListener('DOMContentLoaded', ensureMarked)
 }
 
 chrome.storage.local.get(['session'], ({ session }) => {

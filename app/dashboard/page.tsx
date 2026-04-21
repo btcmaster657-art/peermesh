@@ -1626,10 +1626,36 @@ export default function Dashboard() {
 
   // ── Extension detection ─────────────────────────────────────────────────────
   useEffect(() => {
-    const el = document.documentElement
-    if (el.dataset.peermeshExtension) {
-      setExtInstalled(true)
-      setExtVersion(el.dataset.extVersion ?? null)
+    const syncExtensionMarker = () => {
+      const el = document.documentElement
+      const installed = !!el?.dataset.peermeshExtension
+      setExtInstalled(installed)
+      setExtVersion(installed ? (el.dataset.extVersion ?? null) : null)
+    }
+
+    syncExtensionMarker()
+
+    const root = document.documentElement
+    const observer = root
+      ? new MutationObserver(() => syncExtensionMarker())
+      : null
+
+    if (root) {
+      observer?.observe(root, {
+        attributes: true,
+        attributeFilter: ['data-peermesh-extension', 'data-ext-version'],
+      })
+    }
+
+    window.addEventListener('focus', syncExtensionMarker)
+    window.addEventListener('pageshow', syncExtensionMarker)
+    document.addEventListener('visibilitychange', syncExtensionMarker)
+
+    return () => {
+      observer?.disconnect()
+      window.removeEventListener('focus', syncExtensionMarker)
+      window.removeEventListener('pageshow', syncExtensionMarker)
+      document.removeEventListener('visibilitychange', syncExtensionMarker)
     }
   }, [])
 
