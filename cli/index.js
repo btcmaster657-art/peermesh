@@ -37,7 +37,7 @@ async function getLiveRelays() {
 const CONFIG_DIR = join(homedir(), '.peermesh')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
 const SHARED_IDENTITY_FILE = join(CONFIG_DIR, 'machine-identity.json')
-const VERSION     = '1.0.44'
+const VERSION     = '1.0.45'
 const DEBUG_LOG = join(homedir(), 'Desktop', 'peermesh-debug.log')
 
 const CONTROL_PORT = 7654
@@ -858,11 +858,22 @@ function attachSlotSocketHandlers(slot, limitBytes, ws, relay) {
 }
 
 function getProviderRelay(relays) {
-  // All slots must connect to the same relay — relay state is process-local so a
-  // requester can only see providers registered on the same relay instance.
-  // Anchor to slot 0's lastRelay; fall back to relays[0] if it left the live list.
+  // All slots must connect to the same relay — relay state is process-local.
+  // Use lastRelay if it's still live (sticky after first registration).
+  // Rendezvous/HRW consistent hashing: adding/removing a relay only moves ~1/n
+  // providers instead of reshuffling all of them (vs simple modulo).
   const anchor = slotStates[0]?.lastRelay
-  return anchor && relays.includes(anchor) ? anchor : relays[0]
+  if (anchor && relays.includes(anchor)) return anchor
+  const id = getBaseDeviceId() || ''
+  let best = null, bestScore = -1
+  for (const relay of relays) {
+    let h = 0
+    const s = id + relay
+    for (let i = 0; i < s.length; i++) { h = (Math.imul(31, h) + s.charCodeAt(i)) | 0 }
+    const score = h >>> 0
+    if (score > bestScore) { bestScore = score; best = relay }
+  }
+  return best ?? relays[0]
 }
 
 function connectSlot(slot, limitBytes) {

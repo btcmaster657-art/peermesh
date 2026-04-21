@@ -667,7 +667,27 @@ async function connectStandaloneProvider() {
   if (!baseDeviceId || !deviceId) throw new Error('Extension identity is missing')
 
   const relays = await getLiveRelays()
-  const relay = relays[0]
+  // Hash baseDeviceId to pick a relay deterministically — same logic as desktop/CLI
+  // so the extension provider lands on the same relay consistently across restarts.
+  // Persist lastRelay to storage so it survives service worker termination.
+  const stored = await chrome.storage.local.get(['providerLastRelay'])
+  const lastRelay = stored.providerLastRelay ?? null
+  let relay
+  if (lastRelay && relays.includes(lastRelay)) {
+    relay = lastRelay
+  } else {
+    // Rendezvous/HRW consistent hashing — same algorithm as desktop/CLI.
+    // Adding/removing a relay only moves ~1/n providers, not all of them.
+    let best = null, bestScore = -1
+    for (const r of relays) {
+      let h = 0
+      const s = baseDeviceId + r
+      for (let i = 0; i < s.length; i++) { h = (Math.imul(31, h) + s.charCodeAt(i)) | 0 }
+      const score = h >>> 0
+      if (score > bestScore) { bestScore = score; best = r }
+    }
+    relay = best ?? relays[0]
+  }
   clearProviderReconnect()
   providerWs = new WebSocket(relay)
   providerRegistered = false
@@ -707,6 +727,7 @@ async function connectStandaloneProvider() {
         providerReconnectDelay = 2000
         providerStats.connectedAt = new Date().toISOString()
         providerStats.peerId = providerPeerId
+        await chrome.storage.local.set({ providerLastRelay: relay })
         startExtensionHeartbeat()
         await persistSharingState()
         settle(resolve, undefined)

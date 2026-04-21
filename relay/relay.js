@@ -163,6 +163,7 @@ function createSession(requesterWs, provider, country, dbSessionId) {
     providerMetadataSynced: false,
     reconnectAttempts: 0,
     privateBaseDeviceId: requesterWs.privateBaseDeviceId ?? null,
+    lastActivity: Date.now(),
   })
 
   send(provider, { type: 'session_request', sessionId })
@@ -534,6 +535,7 @@ async function handleMessage(ws, msg) {
       if (!proxySession) return
       const provider = peers.get(proxySession.providerId)
       if (!provider || !provider.agentMode) return
+      proxySession.lastActivity = Date.now()
       const reqBytes = JSON.stringify(msg.request ?? {}).length
       proxySession.bytesRequester = (proxySession.bytesRequester ?? 0) + reqBytes
       if (msg.request?.url && !proxySession.targetHost) {
@@ -573,6 +575,7 @@ async function handleMessage(ws, msg) {
       const chunk = Buffer.from(msg.data, 'base64')
       const tunnelSession = ws.sessionId ? sessions.get(ws.sessionId) : null
       if (tunnelSession) {
+        tunnelSession.lastActivity = Date.now()
         tunnelSession.bytesProvider = (tunnelSession.bytesProvider ?? 0) + chunk.length
         tunnelSession.bytesRequester = (tunnelSession.bytesRequester ?? 0) + chunk.length
       }
@@ -677,7 +680,28 @@ const heartbeat = setInterval(() => {
   })
 }, 30_000)
 
-wss.on('close', () => clearInterval(heartbeat))
+// ── Session idle watchdog ─────────────────────────────────────────────────────
+// If a session has had no activity for 90s, check the provider is still alive.
+// If the provider WS is gone or unresponsive, trigger auto-reconnect immediately
+// rather than waiting up to 60s for the heartbeat to catch it.
+const SESSION_IDLE_MS = 90_000
+const sessionWatchdog = setInterval(() => {
+  const now = Date.now()
+  for (const [sessionId, session] of sessions) {
+    if (now - session.lastActivity < SESSION_IDLE_MS) continue
+    const provider = peers.get(session.providerId)
+    const requester = peers.get(session.requesterId)
+    if (!requester || requester.readyState !== WebSocket.OPEN) continue
+    if (!provider || provider.readyState !== WebSocket.OPEN) {
+      log(requester.peerId.slice(0,8), `SESSION_WATCHDOG provider gone sessionId=${sessionId.slice(0,8)}`)
+      requester.sessionId = null
+      sessions.delete(sessionId)
+      attemptReconnect(requester, { ...session, reconnectAttempts: 0 })
+    }
+  }
+}, 30_000)
+
+wss.on('close', () => { clearInterval(heartbeat); clearInterval(sessionWatchdog) })
 
 server.listen(PORT, () => {
   log('RELAY', `PeerMesh relay on port ${PORT}`)

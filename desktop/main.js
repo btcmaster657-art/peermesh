@@ -1056,11 +1056,24 @@ function sendHeartbeat(slot) {
 }
 
 function getProviderRelay(relays) {
-  // All slots must connect to the same relay so a requester on that relay can
-  // see all slots from this provider. Use slot 0's lastRelay as the anchor —
-  // if it's still in the live list every slot uses it, otherwise pick relays[0].
+  // All slots must connect to the same relay — relay state is process-local.
+  // Use lastRelay if it's still live (sticky after first registration).
+  // On first connect, use consistent hashing so adding/removing a relay only
+  // moves ~1/n providers instead of reshuffling everyone.
   const anchor = slotStates[0]?.lastRelay
-  return anchor && relays.includes(anchor) ? anchor : relays[0]
+  if (anchor && relays.includes(anchor)) return anchor
+  const id = config.baseDeviceId || ''
+  // For each relay compute hash(baseDeviceId + relayUrl), pick the highest score.
+  // This is rendezvous/HRW hashing — stable under list growth/shrinkage.
+  let best = null, bestScore = -1
+  for (const relay of relays) {
+    let h = 0
+    const s = id + relay
+    for (let i = 0; i < s.length; i++) { h = (Math.imul(31, h) + s.charCodeAt(i)) | 0 }
+    const score = h >>> 0
+    if (score > bestScore) { bestScore = score; best = relay }
+  }
+  return best ?? relays[0]
 }
 
 function connectSlot(slot) {

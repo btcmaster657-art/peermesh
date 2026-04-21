@@ -74,7 +74,12 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'FREE TIER — Enable sharing above to connect, or upgrade to premium to browse without sharing.' }, { status: 403 })
   }
 
-  const [relay, fallbackList] = await Promise.all([pickRelay(), getRelayFallbackList()])
+  // Don't pick a single relay — send the full fallback list ordered by load.
+  // The client tries each in order; the first relay that has a matching provider
+  // will create the session. This ensures requesters always land on the same relay
+  // as their provider regardless of how providers are distributed.
+  const fallbackList = await getRelayFallbackList()
+  const relay = fallbackList[0]
   try { await adminClient.rpc('cleanup_stale_sessions') } catch {}
 
   let preferredProviderUserId = (profile.preferred_providers as Record<string, string>)?.[country] ?? null

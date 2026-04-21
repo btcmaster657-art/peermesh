@@ -131,7 +131,14 @@ export class PeerRequester {
 
           if (msg.type === 'error') {
             if (!settled) {
-              rejectOnce(new Error(msg.message))
+              // No provider on this relay — try the next one in the fallback list
+              if (attemptIndex < fallbackList.length - 1) {
+                attemptIndex++
+                this.ws?.close()
+                setTimeout(tryConnect, 500)
+              } else {
+                rejectOnce(new Error(msg.message))
+              }
             } else {
               notifyDisconnect(msg.message)
             }
