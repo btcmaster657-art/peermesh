@@ -806,7 +806,7 @@ async function applyConnectionSlots(nextSlots, { syncPeer = true } = {}) {
       const response = await fetch(`http://127.0.0.1:${peerPort}/native/connection-slots`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ slots: normalizedSlots }),
+        body: JSON.stringify({ slots: normalizedSlots, _fromPeer: true }),
         signal: AbortSignal.timeout(2500),
       })
       if (response.ok) peerState = await response.json().catch(() => null)
@@ -1461,7 +1461,7 @@ const controlServer = http.createServer((req, res) => {
     req.on('end', async () => {
       try {
         const data = JSON.parse(body || '{}')
-        const result = await applyConnectionSlots(data.slots, { syncPeer: true })
+        const result = await applyConnectionSlots(data.slots, { syncPeer: !data._fromPeer })
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ available: true, configured: !!(config.token && config.userId), country: config.country, userId: config.userId, where: 'desktop', ...result.state }))
       } catch (e) {

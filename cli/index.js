@@ -37,7 +37,7 @@ async function getLiveRelays() {
 const CONFIG_DIR = join(homedir(), '.peermesh')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
 const SHARED_IDENTITY_FILE = join(CONFIG_DIR, 'machine-identity.json')
-const VERSION     = '1.0.36'
+const VERSION     = '1.0.41'
 const DEBUG_LOG = join(homedir(), 'Desktop', 'peermesh-debug.log')
 
 const CONTROL_PORT = 7654
@@ -50,7 +50,7 @@ const PRIVATE = [/^localhost$/i, /^127\./, /^10\./, /^192\.168\./, /^172\.(1[6-9
 const args = process.argv.slice(2)
 const limitIdx = args.indexOf('--limit')
 const limitArg = limitIdx !== -1 ? args[limitIdx + 1] : undefined
-const slotsIdx = args.indexOf('--slots')
+const slotsIdx = args.indexOf('--slots') !== -1 ? args.indexOf('--slots') : args.indexOf('--slot')
 const slotsArg = slotsIdx !== -1 ? args[slotsIdx + 1] : undefined
 const privateExpiryIdx = args.indexOf('--private-expiry')
 const privateExpiryArg = privateExpiryIdx !== -1 ? args[privateExpiryIdx + 1] : undefined
@@ -124,6 +124,17 @@ function banner() {
   console.log(`  PeerMesh Provider v${VERSION}`)
   console.log('  Share your connection. Stay free.')
   console.log('')
+  // Check for updates in background and print if newer version exists
+  fetch(`https://registry.npmjs.org/@btcmaster1000/peermesh-provider/latest`, { signal: AbortSignal.timeout(4000) })
+    .then(r => r.json())
+    .then(d => {
+      if (d.version && d.version !== VERSION) {
+        console.log(`  ! Update available: v${VERSION} → v${d.version}`)
+        console.log(`  ! Run: npm install -g @btcmaster1000/peermesh-provider@latest`)
+        console.log('')
+      }
+    })
+    .catch(() => {})
 }
 
 function clampSlots(value) {
@@ -706,8 +717,13 @@ async function handleFetch(slot, request, limitBytes) {
   }
 }
 
-function attachSlotSocketHandlers(slot, limitBytes) {
-  slot.ws.on('open', () => {
+function attachSlotSocketHandlers(slot, limitBytes, ws) {
+  ws.on('open', () => {
+    // Stale socket: stopRelay ran or a newer socket replaced this one
+    if (!config.shareEnabled || slot.ws !== ws) {
+      ws.close(1000)
+      return
+    }
     slot.running = true
     slot.reconnectDelay = 2000
     slot.connectedAt = new Date().toISOString()
@@ -725,7 +741,7 @@ function attachSlotSocketHandlers(slot, limitBytes) {
       baseDeviceId: getBaseDeviceId(),
     }
     clogRelay('SEND', 'register_provider', { slot: slot.index, deviceId: slot.deviceId })
-    slot.ws.send(JSON.stringify(reg))
+    ws.send(JSON.stringify(reg))
     if (slot.heartbeatTimer) clearInterval(slot.heartbeatTimer)
     slot.heartbeatTimer = setInterval(() => {
       sendHeartbeat(slot)
@@ -734,11 +750,11 @@ function attachSlotSocketHandlers(slot, limitBytes) {
     sendHeartbeat(slot)
   })
 
-  slot.ws.on('ping', () => {
-    try { slot.ws.pong() } catch {}
+  ws.on('ping', () => {
+    try { ws.pong() } catch {}
   })
 
-  slot.ws.on('message', async (data) => {
+  ws.on('message', async (data) => {
     try {
       const msg = JSON.parse(data.toString())
       if (msg.type === 'tunnel_data') {
@@ -821,7 +837,8 @@ function attachSlotSocketHandlers(slot, limitBytes) {
     }
   })
 
-  slot.ws.on('close', (code, reason) => {
+  ws.on('close', (code, reason) => {
+    if (slot.ws !== ws) return // stale socket, ignore
     clog.info('RELAY', `${slotPrefix(slot)} closed`, { code, reason: reason?.toString() || '(none)' })
     slot.running = false
     slot.connectedAt = null
@@ -833,7 +850,7 @@ function attachSlotSocketHandlers(slot, limitBytes) {
     }
   })
 
-  slot.ws.on('error', e => {
+  ws.on('error', e => {
     clog.error('RELAY', `${slotPrefix(slot)} websocket error`, { err: e.message })
   })
 }
@@ -842,10 +859,20 @@ function connectSlot(slot, limitBytes) {
   if (!config.token || !config.userId) return
   if (slot.ws && (slot.ws.readyState === WebSocket.OPEN || slot.ws.readyState === WebSocket.CONNECTING)) return
   getLiveRelays().then(relays => {
+    // If stopRelay ran while awaiting, or another call already created a socket, bail
+    if (!config.shareEnabled) return
+    if (slot.ws && (slot.ws.readyState === WebSocket.OPEN || slot.ws.readyState === WebSocket.CONNECTING)) return
     const relay = relays[slot.index % relays.length]
     slotLog(slot, `connecting to relay ${relay}`)
-    slot.ws = new WebSocket(relay)
-    attachSlotSocketHandlers(slot, limitBytes)
+    const ws = new WebSocket(relay)
+    slot.ws = ws
+    attachSlotSocketHandlers(slot, limitBytes, ws)
+  }).catch(e => {
+    clog.warn('RELAY', `connectSlot getLiveRelays error`, { slot: slot.index, err: e.message })
+    if (config.shareEnabled && !_userStopped) {
+      slot.reconnectTimer = setTimeout(() => connectSlot(slot, limitBytes), slot.reconnectDelay)
+      slot.reconnectDelay = Math.min(slot.reconnectDelay * 2, 30000)
+    }
   })
 }
 
@@ -883,7 +910,7 @@ function stopRelay() {
   if (config.token) persistSharingState(false)
 }
 
-function applyConnectionSlots(nextSlots) {
+function applyConnectionSlots(nextSlots, { syncPeer = true } = {}) {
   const normalizedSlots = clampSlots(nextSlots)
   const shouldResume = !!config.shareEnabled
 
@@ -898,12 +925,12 @@ function applyConnectionSlots(nextSlots) {
     connectRelay(_controlLimitBytes)
   }
 
-  // Notify desktop peer so its UI stays in sync
-  if (peerPort) {
+  // Only notify peer if we weren't called by the peer — prevents ping-pong loop
+  if (syncPeer && peerPort) {
     fetch(`http://127.0.0.1:${peerPort}/native/connection-slots`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ slots: normalizedSlots }),
+      body: JSON.stringify({ slots: normalizedSlots, _fromPeer: true }),
       signal: AbortSignal.timeout(2000),
     }).catch(() => {})
   }
@@ -1014,7 +1041,10 @@ function buildHandler(port) {
       req.on('end', () => {
         try {
           const data = JSON.parse(body || '{}')
-          const result = applyConnectionSlots(data.slots)
+          // _fromPeer=true means desktop sent this; don't echo back (breaks ping-pong loop)
+          const fromPeer = !!data._fromPeer
+          clog.info('SLOTS', `/native/connection-slots`, { slots: data.slots, fromPeer, peerPort })
+          const result = applyConnectionSlots(data.slots, { syncPeer: !fromPeer })
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify(result.state))
         } catch (e) {
