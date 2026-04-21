@@ -361,11 +361,17 @@ function stopDevicePoll() {
   deviceFlowActive = false
 }
 
-async function startDeviceFlow() {
-  if (deviceFlowActive || typeof api.requestDeviceCode !== 'function') return
-  deviceFlowActive = true
+let _deviceFlowStartedAt = 0
 
+async function startDeviceFlow() {
+  if (typeof api.requestDeviceCode !== 'function') return
+  // If a flow is active but the code was never shown and it's been >15s, restart it
   const codeEl = document.getElementById('device-code-display')
+  const codeVisible = codeEl && codeEl.style.display !== 'none' && codeEl.textContent
+  if (deviceFlowActive && (codeVisible || Date.now() - _deviceFlowStartedAt < 15000)) return
+  if (deviceFlowActive) stopDevicePoll()
+  deviceFlowActive = true
+  _deviceFlowStartedAt = Date.now()
   const codeHint = document.getElementById('code-hint')
   const codeWaiting = document.getElementById('code-waiting')
   const errEl = document.getElementById('auth-error')
@@ -397,7 +403,10 @@ async function startDeviceFlow() {
     return
   }
 
-  const result = await invoke('requestDeviceCode')
+  const result = await Promise.race([
+    invoke('requestDeviceCode'),
+    new Promise(resolve => setTimeout(() => resolve({ error: 'Request timed out - check your connection' }), 12000)),
+  ])
   if (!result || result.error) {
     if (errorText) errorText.textContent = result?.error || 'Could not reach server'
     if (errEl) errEl.style.display = 'block'
@@ -594,6 +603,7 @@ function updateUI(state) {
     renderStartupPreferences(state)
     renderDailyLimit(state)
     showScreen('auth-screen')
+    if (typeof api.requestDeviceCode === 'function') startDeviceFlow()
     return
   }
 
@@ -940,5 +950,18 @@ pollState().then((state) => {
   if (!state?.config?.userId) {
     resetAuthUI()
     if (typeof api.requestDeviceCode === 'function') startDeviceFlow()
+  }
+})
+
+// Re-trigger device flow when window regains focus if stuck on auth with no code showing
+window.addEventListener('focus', () => {
+  const authScreen = document.getElementById('auth-screen')
+  if (!authScreen?.classList.contains('active')) return
+  const codeEl = document.getElementById('device-code-display')
+  const codeVisible = codeEl && codeEl.style.display !== 'none' && codeEl.textContent
+  if (!codeVisible && typeof api.requestDeviceCode === 'function') {
+    stopDevicePoll()
+    resetAuthUI()
+    startDeviceFlow()
   }
 })

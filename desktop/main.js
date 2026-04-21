@@ -13,11 +13,13 @@ const LOG_FILE = path.join(os.homedir(), 'Desktop', 'peermesh-debug.log')
 
 // Structured logger â€” always writes to file, always to console
 // Format: [ISO_TIMESTAMP] [DESKTOP] [LEVEL] [CATEGORY] message | ctx={}
+const _IS_NATIVE_HOST = process.argv.some(arg => arg.startsWith('chrome-extension://')) || process.argv.some(arg => arg.startsWith('--parent-window='))
+
 function _write(level, category, message, ctx) {
   const ts = new Date().toISOString()
   const ctxStr = ctx && Object.keys(ctx).length ? ' | ' + Object.entries(ctx).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(' ') : ''
   const line = `[${ts}] [DESKTOP] [${level.padEnd(5)}] [${category.padEnd(12)}] ${message}${ctxStr}`
-  console.log(line)
+  if (!_IS_NATIVE_HOST) console.log(line)
   try { fs.appendFileSync(LOG_FILE, line + '\n') } catch {}
 }
 
@@ -1726,12 +1728,12 @@ ipcMain.handle('request-device-code', async () => {
   logIpc('request-device-code')
   try {
     logRequest('POST', `${API_BASE}/api/extension-auth`, { device: true })
-    const res = await fetch(`${API_BASE}/api/extension-auth`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ device: true }) })
+    const res = await fetch(`${API_BASE}/api/extension-auth`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ device: true }), signal: AbortSignal.timeout(10000) })
     const data = await res.json()
     logResponse('POST', `${API_BASE}/api/extension-auth`, res.status, { user_code: data.user_code, interval: data.interval })
     if (!res.ok) return { error: 'Could not reach server' }
     return data
-  } catch (e) { log.error('IPC', 'request-device-code error', { err: e.message }); return { error: 'Could not reach server' } }
+  } catch (e) { log.error('IPC', 'request-device-code error', { err: e.message }); return { error: e.name === 'TimeoutError' ? 'Request timed out - check your connection' : 'Could not reach server' } }
 })
 
 ipcMain.handle('poll-device-code', async (_, { device_code }) => {
@@ -1745,29 +1747,14 @@ ipcMain.handle('poll-device-code', async (_, { device_code }) => {
   } catch (e) { log.error('IPC', 'poll-device-code error', { err: e.message }); return { status: 'pending' } }
 })
 
-ipcMain.handle('open-auth', async (_, url) => {
+ipcMain.handle('open-auth', (_, url) => {
   const safeUrl = url && !url.startsWith('http://localhost') ? url : `${API_BASE}/extension?activate=1`
   logIpc('open-auth', { url: safeUrl })
-  const { response } = await require('electron').dialog.showMessageBox(settingsWindow || BrowserWindow.getFocusedWindow(), {
-    type: 'question', title: 'Sign in to PeerMesh', message: 'Open sign-in page',
-    detail: `Open this URL in your browser to sign in:\n\n${safeUrl}`,
-    buttons: ['Open Browser', 'Copy Link', 'Cancel'], defaultId: 0, cancelId: 2,
-  })
-  if (response === 0) { shell.openExternal(safeUrl); log.info('IPC', 'open-auth â€” opened browser') }
-  else if (response === 1) {
-    require('electron').clipboard.writeText(safeUrl)
-    log.info('IPC', 'open-auth â€” copied link to clipboard')
-    if (settingsWindow) {
-      settingsWindow.webContents.executeJavaScript(`
-        const el = document.createElement('div')
-        el.textContent = '\u2713 Link copied â€” paste in your browser'
-        el.style.cssText = 'position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#1e1e2a;border:1px solid #00ff88;color:#e8e8f0;padding:10px 18px;border-radius:8px;font-family:\'Courier New\',monospace;font-size:11px;z-index:9999;pointer-events:none'
-        document.body.appendChild(el)
-        setTimeout(() => el.remove(), 2500)
-      `).catch(() => {})
-    }
-  }
+  shell.openExternal(safeUrl)
+  log.info('IPC', 'open-auth opened browser', { url: safeUrl })
 })
+
+
 
 ipcMain.handle('get-state', () => {
   const publicState = getPublicState()
