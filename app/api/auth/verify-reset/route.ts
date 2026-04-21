@@ -5,10 +5,16 @@ export async function POST(req: Request) {
   const { email, token, password } = await req.json().catch(() => ({}))
 
   if (!email || !token || !password) {
-    return NextResponse.json({ error: 'email, token and password are required' }, { status: 400 })
+    return new NextResponse(JSON.stringify({ error: 'email, token and password are required' }), { 
+      status: 400,
+      headers: { 'Content-Type': 'application/json; charset=utf-8' }
+    })
   }
   if (typeof password !== 'string' || password.length < 8) {
-    return NextResponse.json({ error: 'Password must be at least 8 characters' }, { status: 400 })
+    return new NextResponse(JSON.stringify({ error: 'Password must be at least 8 characters' }), { 
+      status: 400,
+      headers: { 'Content-Type': 'application/json; charset=utf-8' }
+    })
   }
 
   const normalizedEmail = email.trim().toLowerCase()
@@ -23,10 +29,16 @@ export async function POST(req: Request) {
     .maybeSingle()
 
   if (!row) {
-    return NextResponse.json({ error: 'Invalid or expired code' }, { status: 400 })
+    return new NextResponse(JSON.stringify({ error: 'Invalid or expired code' }), { 
+      status: 400,
+      headers: { 'Content-Type': 'application/json; charset=utf-8' }
+    })
   }
   if (new Date(row.expires_at) < new Date()) {
-    return NextResponse.json({ error: 'Code has expired — request a new one' }, { status: 400 })
+    return new NextResponse(JSON.stringify({ error: 'Code has expired — request a new one' }), { 
+      status: 400,
+      headers: { 'Content-Type': 'application/json; charset=utf-8' }
+    })
   }
 
   // Mark token used
@@ -35,8 +47,14 @@ export async function POST(req: Request) {
   // Update password via admin API
   const { error } = await adminClient.auth.admin.updateUserById(row.user_id, { password })
   if (error) {
-    return NextResponse.json({ error: 'Could not update password' }, { status: 500 })
+    return new NextResponse(JSON.stringify({ error: 'Could not update password' }), { 
+      status: 500,
+      headers: { 'Content-Type': 'application/json; charset=utf-8' }
+    })
   }
 
-  return NextResponse.json({ success: true })
+  return new NextResponse(JSON.stringify({ success: true }), { 
+    status: 200,
+    headers: { 'Content-Type': 'application/json; charset=utf-8' }
+  })
 }

@@ -124,6 +124,12 @@ export default function AuthForm() {
         const { data, error } = await supabase.auth.signInWithPassword({ email, password })
         if (error) throw error
 
+        // Check if email is confirmed
+        const { data: { user } } = await supabase.auth.getUser()
+        if (!user?.email_confirmed_at) {
+          return router.push('/auth/confirm-email')
+        }
+
         const { data: profile } = await supabase
           .from('profiles').select('is_verified, phone_number').eq('id', data.user.id).single()
 

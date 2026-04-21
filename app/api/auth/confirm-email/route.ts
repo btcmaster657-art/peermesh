@@ -15,7 +15,10 @@ export async function POST(req: Request) {
   const { data: { user } } = await supabase.auth.getUser()
 
   if (!user?.email) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    return new NextResponse(JSON.stringify({ error: 'Unauthorized' }), { 
+      status: 401,
+      headers: { 'Content-Type': 'application/json; charset=utf-8' }
+    })
   }
 
   const token = generate6DigitToken()
@@ -47,17 +50,26 @@ export async function POST(req: Request) {
     }),
   }).catch(() => {})
 
-  return NextResponse.json({ success: true })
+  return new NextResponse(JSON.stringify({ success: true }), { 
+    status: 200,
+    headers: { 'Content-Type': 'application/json; charset=utf-8' }
+  })
 }
 
 // PUT — verify the token
 export async function PUT(req: Request) {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
-  if (!user?.email) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (!user?.email) return new NextResponse(JSON.stringify({ error: 'Unauthorized' }), { 
+    status: 401,
+    headers: { 'Content-Type': 'application/json; charset=utf-8' }
+  })
 
   const { token } = await req.json().catch(() => ({}))
-  if (!token) return NextResponse.json({ error: 'token is required' }, { status: 400 })
+  if (!token) return new NextResponse(JSON.stringify({ error: 'token is required' }), { 
+    status: 400,
+    headers: { 'Content-Type': 'application/json; charset=utf-8' }
+  })
 
   const { data: row } = await adminClient
     .from('auth_tokens')
@@ -68,16 +80,25 @@ export async function PUT(req: Request) {
     .eq('used', false)
     .maybeSingle()
 
-  if (!row) return NextResponse.json({ error: 'Invalid or expired code' }, { status: 400 })
+  if (!row) return new NextResponse(JSON.stringify({ error: 'Invalid or expired code' }), { 
+    status: 400,
+    headers: { 'Content-Type': 'application/json; charset=utf-8' }
+  })
   if (new Date(row.expires_at) < new Date()) {
-    return NextResponse.json({ error: 'Code has expired — request a new one' }, { status: 400 })
+    return new NextResponse(JSON.stringify({ error: 'Code has expired — request a new one' }), { 
+      status: 400,
+      headers: { 'Content-Type': 'application/json; charset=utf-8' }
+    })
   }
 
   await adminClient.from('auth_tokens').update({ used: true }).eq('id', row.id)
   // Mark email confirmed in Supabase auth
   await adminClient.auth.admin.updateUserById(user.id, { email_confirm: true })
 
-  return NextResponse.json({ success: true })
+  return new NextResponse(JSON.stringify({ success: true }), { 
+    status: 200,
+    headers: { 'Content-Type': 'application/json; charset=utf-8' }
+  })
 }
 
 async function buildConfirmEmail(token: string): Promise<string> {

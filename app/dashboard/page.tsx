@@ -158,11 +158,11 @@ export default function Dashboard() {
     async function load() {
       try {
         const { data: { user }, error: authError } = await supabase.auth.getUser()
-        if (authError) throw new Error('Could not verify session â€” please refresh')
+        if (authError) throw new Error('Could not verify session – please refresh')
         if (!user) { router.push('/auth?mode=login'); return }
 
         const { data, error: profileError } = await supabase.from('profiles').select('*').eq('id', user.id).single<Profile>()
-        if (profileError) throw new Error('Could not load your profile â€” please refresh')
+        if (profileError) throw new Error('Could not load your profile – please refresh')
         if (!data?.is_verified) { router.push('/verify/payment'); return }
 
         setProfile(data)
@@ -181,7 +181,7 @@ export default function Dashboard() {
 
         if (dt.available) {
           // Only sync auth / show sharing UI if the desktop belongs to this user
-          // (dt.userId is null when not yet configured â€” allow sync in that case)
+          // (dt.userId is null when not yet configured – allow sync in that case)
           if (desktopState.desktopOwnedByOther) {
             setShareError(getHelperMismatchError(desktop?.where))
           } else {
@@ -207,7 +207,7 @@ export default function Dashboard() {
           }).catch(() => {})
         }
       } catch (err: unknown) {
-        setLoadError(err instanceof Error ? err.message : 'Something went wrong â€” please refresh')
+        setLoadError(err instanceof Error ? err.message : 'Something went wrong – please refresh')
         setLoading(false)
       }
     }
@@ -453,7 +453,7 @@ export default function Dashboard() {
     }
     setShareError(null)
 
-    // If turning OFF â€” no disclosure needed
+    // If turning OFF – no disclosure needed
     if (isSharing) {
       pendingShareTargetRef.current = false
       setShareTarget(false)
@@ -475,7 +475,7 @@ export default function Dashboard() {
       return
     }
 
-    // First-time share â€” show disclosure modal first
+    // First-time share – show disclosure modal first
     if (!profile.has_accepted_provider_terms) {
       setShowDisclosure(true)
       return
@@ -489,7 +489,7 @@ export default function Dashboard() {
     setShareError(null)
 
     if (!navigator.onLine) {
-      setShareError('No internet connection â€” check your network and try again')
+      setShareError('No internet connection – check your network and try again')
       setShareToggling(false)
       return
     }
@@ -510,7 +510,7 @@ export default function Dashboard() {
 
     const { data: { session } } = await supabase.auth.getSession()
     if (!session) {
-      setShareError('Session expired â€” please sign out and sign back in')
+      setShareError('Session expired – please sign out and sign back in')
       setShareToggling(false)
       return
     }
@@ -556,7 +556,7 @@ export default function Dashboard() {
     if ((!selectedCountry && !trimmedPrivateCode) || !profile) return
     setConnectError(null)
     if (!navigator.onLine) {
-      setConnectError('No internet connection â€” check your network and try again')
+      setConnectError('No internet connection – check your network and try again')
       return
     }
     setConnecting(true)
@@ -573,7 +573,7 @@ export default function Dashboard() {
       router.push(`/browse?relay=${encodeURIComponent(data.relayEndpoint)}&relayFallback=${encodeURIComponent(fallback)}&country=${encodeURIComponent(targetCountry)}&userId=${profile.id}&dbSessionId=${data.sessionId}&preferredProviderUserId=${encodeURIComponent(data.preferredProviderUserId ?? '')}&privateProviderUserId=${encodeURIComponent(data.privateProviderUserId ?? '')}&privateBaseDeviceId=${encodeURIComponent(data.privateBaseDeviceId ?? '')}&connectionType=${isPrivateConnect ? 'private' : 'public'}`)
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Could not connect'
-      setConnectError(msg === 'Failed to fetch' ? 'Network error â€” could not reach server' : msg)
+      setConnectError(msg === 'Failed to fetch' ? 'Network error – could not reach server' : msg)
     } finally {
       setConnecting(false)
     }
@@ -664,8 +664,8 @@ export default function Dashboard() {
       {/* Offline banner */}
       {!isOnline && (
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px', background: 'rgba(255,170,0,0.08)', border: '1px solid rgba(255,170,0,0.4)', borderRadius: '10px', padding: '10px 14px', marginBottom: '16px' }}>
-          <span style={{ fontSize: '16px' }}>âš ï¸</span>
-          <span style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '11px', color: '#ffaa00', letterSpacing: '0.5px' }}>NO INTERNET CONNECTION â€” features unavailable until reconnected</span>
+          <span style={{ fontSize: '16px' }}>⌨️</span>
+          <span style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '11px', color: '#ffaa00', letterSpacing: '0.5px' }}>NO INTERNET CONNECTION – features unavailable until reconnected</span>
         </div>
       )}
 
@@ -699,7 +699,7 @@ export default function Dashboard() {
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
             <span style={{ fontSize: '18px' }}>â¬†ï¸</span>
             <div>
-              <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--accent)', letterSpacing: '0.5px', marginBottom: '2px' }}>DESKTOP UPDATE AVAILABLE â€” v{latestDesktopVersion}</div>
+              <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--accent)', letterSpacing: '0.5px', marginBottom: '2px' }}>DESKTOP UPDATE AVAILABLE – v{latestDesktopVersion}</div>
               <div style={{ fontSize: '12px', color: 'var(--muted)' }}>You have v{desktopProcessVersion}. Download the latest for best performance.</div>
             </div>
           </div>
@@ -707,7 +707,7 @@ export default function Dashboard() {
         </a>
       )}
 
-      {/* Desktop install banner â€” neither running */}
+      {/* Desktop install banner – neither running */}
       {desktopChecked && !desktopRunning && !cliRunning && (
         <a href="/api/desktop-download" download style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', background: 'rgba(255,80,80,0.07)', border: '1px solid rgba(255,80,80,0.3)', borderRadius: '12px', padding: '12px 16px', marginBottom: '16px', textDecoration: 'none' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
@@ -732,10 +732,10 @@ export default function Dashboard() {
             <span style={{ fontSize: '18px' }}>ðŸ§©</span>
             <div>
               <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: extUpdateAvailable ? '#ffc800' : 'var(--accent)', letterSpacing: '0.5px', marginBottom: '2px' }}>
-                {extUpdateAvailable ? `UPDATE AVAILABLE â€” v${latestExtVersion}` : 'CHROME EXTENSION â€” RECOMMENDED'}
+                {extUpdateAvailable ? `UPDATE AVAILABLE – v${latestExtVersion}` : 'CHROME EXTENSION – RECOMMENDED'}
               </div>
               <div style={{ fontSize: '12px', color: 'var(--muted)' }}>
-                {extUpdateAvailable ? `You have v${extVersion}. Update for latest features.` : 'Routes your entire browser â€” YouTube, Google, Netflix all work'}
+                {extUpdateAvailable ? `You have v${extVersion}. Update for latest features.` : 'Routes your entire browser – YouTube, Google, Netflix all work'}
               </div>
             </div>
           </div>
@@ -807,7 +807,7 @@ export default function Dashboard() {
         </div>
         {selectedCountry && privateCodeInput && (
           <div style={{ marginTop: '8px', fontSize: '11px', color: 'var(--muted)', fontFamily: 'var(--font-geist-mono)' }}>
-            Country selected â€” connecting publicly. Clear country to use private code.
+            Country selected – connecting publicly. Clear country to use private code.
           </div>
         )}
       </div>
@@ -932,7 +932,7 @@ export default function Dashboard() {
                   : !helperOwnedByCurrentUser
                     ? 'Local helper belongs to another user.'
                     : desktopAvailableForUser
-                      ? `${cliRunningForUser && desktopRunningForUser ? 'CLI + Desktop' : cliRunningForUser ? 'CLI' : 'Desktop'} ready â€” toggle to start sharing`
+                      ? `${cliRunningForUser && desktopRunningForUser ? 'CLI + Desktop' : cliRunningForUser ? 'CLI' : 'Desktop'} ready – toggle to start sharing`
                       : 'Install the desktop app or run the CLI to share your connection'}
             </div>
           </div>
@@ -970,7 +970,7 @@ export default function Dashboard() {
                 })}
               </div>
               <div style={{ fontSize: '11px', color: 'var(--muted)' }}>
-                {slotDisplayActive} / {slotDisplayCount} active{helperSlots?.warning ? ` â€” ${helperSlots.warning}` : ''}
+                {slotDisplayActive} / {slotDisplayCount} active{helperSlots?.warning ? ` – ${helperSlots.warning}` : ''}
               </div>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
@@ -995,12 +995,12 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* Daily limit setter â€” always visible so user can set before sharing */}
+        {/* Daily limit setter – always visible so user can set before sharing */}
         <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px' }}>
           <div>
             <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--muted)', letterSpacing: '0.5px', marginBottom: '2px' }}>DAILY SHARE LIMIT</div>
             <div style={{ fontSize: '11px', color: 'var(--muted)' }}>
-              {profile.daily_share_limit_mb != null ? `${profile.daily_share_limit_mb} MB/day â€” auto-stops when reached` : 'No limit set'}
+              {profile.daily_share_limit_mb != null ? `${profile.daily_share_limit_mb} MB/day – auto-stops when reached` : 'No limit set'}
             </div>
           </div>
           <div style={{ display: 'grid', gap: '8px', minWidth: '220px', flex: '1 1 220px' }}>
@@ -1147,12 +1147,12 @@ export default function Dashboard() {
           )}
           {isSharing && privateShare?.active && (
             <div style={{ marginTop: '8px', fontSize: '11px', color: 'var(--muted)', fontFamily: 'var(--font-geist-mono)', background: 'rgba(0,255,136,0.05)', border: '1px solid rgba(0,255,136,0.15)', borderRadius: '6px', padding: '6px 10px' }}>
-              Sharing is PRIVATE â€” only requesters with your code can connect.
+              Sharing is PRIVATE – only requesters with your code can connect.
             </div>
           )}
           {isSharing && !privateShare?.active && (
             <div style={{ marginTop: '8px', fontSize: '11px', color: 'var(--muted)', fontFamily: 'var(--font-geist-mono)', background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)', borderRadius: '6px', padding: '6px 10px' }}>
-              Sharing is PUBLIC â€” any verified user can connect.
+              Sharing is PUBLIC – any verified user can connect.
             </div>
           )}
           {privateShare?.expires_at && (
@@ -1166,7 +1166,7 @@ export default function Dashboard() {
       {/* Free tier must-share enforcement */}
       {!profile.is_premium && !isSharing && (selectedCountry || privateConnectReady) && (
         <div style={{ background: 'rgba(255,80,80,0.07)', border: '1px solid rgba(255,80,80,0.3)', borderRadius: '10px', padding: '12px 16px', marginBottom: '16px', fontSize: '12px', color: '#ff9090' }}>
-          <span style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', letterSpacing: '0.5px' }}>FREE TIER â€” </span>
+          <span style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', letterSpacing: '0.5px' }}>FREE TIER – </span>
           Enable sharing above to connect, or{' '}
           <a href="/verify/payment" style={{ color: 'var(--accent)', textDecoration: 'underline' }}>upgrade to premium</a> to browse without sharing.
         </div>
@@ -1185,14 +1185,14 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* Premium â€” reserve a peer */}
+      {/* Premium – reserve a peer */}
       {profile.is_premium && selectedCountry && (
         <div style={{ padding: '14px 16px', background: 'var(--surface)', border: '1px solid rgba(0,255,136,0.2)', borderRadius: '10px', marginBottom: '12px' }}>
-          <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--accent)', letterSpacing: '0.5px', marginBottom: '6px' }}>PREMIUM â€” PEER RESERVATION</div>
+          <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--accent)', letterSpacing: '0.5px', marginBottom: '6px' }}>PREMIUM – PEER RESERVATION</div>
           {(profile.preferred_providers as Record<string, string>)?.[selectedCountry] ? (
             <>
               <div style={{ fontSize: '12px', color: 'var(--muted)', marginBottom: '10px' }}>
-                Reserved peer for <strong style={{ color: 'var(--text)' }}>{selectedCountry}</strong> â€” they will be matched first on every connection.
+                Reserved peer for <strong style={{ color: 'var(--text)' }}>{selectedCountry}</strong> – they will be matched first on every connection.
               </div>
               <button
                 onClick={async () => {
@@ -1225,13 +1225,13 @@ export default function Dashboard() {
           <div>
             <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: cliRunning ? (cliUpdateAvailable ? '#ffc800' : 'var(--accent)') : 'var(--muted)', letterSpacing: '0.5px', marginBottom: '2px' }}>
               {cliRunning
-                ? cliUpdateAvailable ? `CLI UPDATE AVAILABLE â€” v${latestCliVersion}` : 'â— CLI DETECTED â€” SHARING ACTIVE'
+                ? cliUpdateAvailable ? `CLI UPDATE AVAILABLE – v${latestCliVersion}` : 'â— CLI DETECTED – SHARING ACTIVE'
                 : 'SHARE FROM ANY MACHINE'}
             </div>
             <div style={{ fontSize: '11px', color: 'var(--muted)' }}>
               {cliRunning
-                ? cliUpdateAvailable ? `You have v${cliProcessVersion}. Run: npm install -g @btcmaster1000/peermesh-provider@latest` : `v${cliProcessVersion} â€” in sync with this dashboard`
-                : latestCliVersion ? `Latest: v${latestCliVersion} â€” no desktop app needed` : 'No desktop app needed â€” just Node.js'}
+                ? cliUpdateAvailable ? `You have v${cliProcessVersion}. Run: npm install -g @btcmaster1000/peermesh-provider@latest` : `v${cliProcessVersion} – in sync with this dashboard`
+                : latestCliVersion ? `Latest: v${latestCliVersion} – no desktop app needed` : 'No desktop app needed – just Node.js'}
             </div>
           </div>
         </div>
@@ -1316,7 +1316,7 @@ sudo dnf install -y nodejs`} />
               <CliSection label="Run with 4 concurrent slots" cmd="peermesh-provider --slots 4" />
               <CliSection label="Run with 16 slots (high throughput server)" cmd="peermesh-provider --slots 16" />
               <div style={{ fontSize: '11px', color: 'var(--muted)', lineHeight: 1.6, padding: '8px 10px', background: 'var(--bg)', borderRadius: '7px', border: '1px solid var(--border)' }}>
-                Each slot is an independent relay WebSocket. Slots 1â€“8 are safe for home connections. 9â€“16 for stable broadband. 17â€“32 for servers only. The dashboard and desktop app stay in sync â€” changing slots in one surface updates the other.
+                Each slot is an independent relay WebSocket. Slots 1â€“8 are safe for home connections. 9â€“16 for stable broadband. 17â€“32 for servers only. The dashboard and desktop app stay in sync – changing slots in one surface updates the other.
               </div>
             </div>
 
@@ -1327,7 +1327,7 @@ sudo dnf install -y nodejs`} />
               <CliSection label="Cap at 2 GB/day" cmd="peermesh-provider --limit 2048" />
               <CliSection label="Remove the daily cap" cmd="peermesh-provider --no-limit" />
               <div style={{ fontSize: '11px', color: 'var(--muted)', lineHeight: 1.6, padding: '8px 10px', background: 'var(--bg)', borderRadius: '7px', border: '1px solid var(--border)' }}>
-                When the limit is reached, sharing pauses automatically and resumes at midnight â€” the process stays running. The limit is also synced from the dashboard and desktop app.
+                When the limit is reached, sharing pauses automatically and resumes at midnight – the process stays running. The limit is also synced from the dashboard and desktop app.
               </div>
             </div>
 
@@ -1342,7 +1342,7 @@ sudo dnf install -y nodejs`} />
               <CliSection label="Set code expiry to 7 days" cmd="peermesh-provider --private-on --private-expiry 168" />
               <CliSection label="Set code with no expiry" cmd="peermesh-provider --private-on --private-expiry none" />
               <div style={{ fontSize: '11px', color: 'var(--muted)', lineHeight: 1.6, padding: '8px 10px', background: 'var(--bg)', borderRadius: '7px', border: '1px solid var(--border)' }}>
-                Private sharing restricts connections to requesters who know your 9-digit code. Changing the mode (on/off) stops sharing â€” restart manually to apply. The code and state sync with the dashboard and desktop app.
+                Private sharing restricts connections to requesters who know your 9-digit code. Changing the mode (on/off) stops sharing – restart manually to apply. The code and state sync with the dashboard and desktop app.
               </div>
             </div>
 
@@ -1465,7 +1465,7 @@ sudo rm /etc/systemd/system/peermesh.service`} />
                 }}
                 style={{ padding: '12px', background: 'var(--accent)', border: 'none', borderRadius: '8px', color: '#000', cursor: 'pointer', fontFamily: 'var(--font-geist-mono)', fontSize: '11px', fontWeight: 700 }}
               >
-                I UNDERSTAND â€” SHARE
+                I UNDERSTAND – SHARE
               </button>
             </div>
           </div>
