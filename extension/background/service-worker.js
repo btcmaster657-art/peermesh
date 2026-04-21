@@ -1000,9 +1000,9 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
           } catch (e) {
             log('error', `[CONNECT] proxy-session failed: ${e.message}`)
           }
-          setProxyDesktop(agentSessionId)
+          setProxyDesktop(agentSessionId, country)
         } else {
-          setProxyRelay(relayEndpoint, agentSessionId)
+          setProxyRelay(relayEndpoint, agentSessionId, country)
         }
         settle(resolve, undefined)
       }
@@ -1019,6 +1019,9 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ sessionId: msg.sessionId, relayEndpoint, country: msg.country }),
         }).catch(() => {})
+
+        // Reapply header rules if provider country changed
+        if (msg.country && msg.country !== country) applyHeaderRules(msg.country)
 
         // Update proxy auth credentials with new sessionId
         chrome.storage.session.set({ proxySessionId: msg.sessionId })
@@ -1081,6 +1084,104 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
   })
 }
 
+// ── Header spoofing (declarativeNetRequest dynamic rules) ───────────────────
+// Rule IDs — must be stable integers
+const HDR_RULE_ACCEPT_LANG = 1
+const HDR_RULE_SEC_CH_UA_PLATFORM = 2
+const HDR_RULE_SEC_CH_UA_MOBILE = 3
+const HDR_RULE_SEC_CH_UA = 4
+
+const SEC_CH_UA_BY_PERSONA = {
+  desktop: '"Google Chrome";v="124", "Chromium";v="124", "Not-A.Brand";v="99"',
+  mobile:  '"Google Chrome";v="124", "Chromium";v="124", "Not-A.Brand";v="99"',
+  mixed:   '"Google Chrome";v="124", "Chromium";v="124", "Not-A.Brand";v="99"',
+}
+
+const COUNTRY_PERSONAS_SW = {
+  NG: 'mobile', KE: 'mobile', GH: 'mobile', RW: 'mobile',
+  GB: 'desktop', DE: 'desktop', US: 'desktop', CA: 'desktop', AU: 'desktop', JP: 'desktop',
+  BR: 'mixed', ZA: 'mixed',
+}
+
+const COUNTRY_LANG_SW = {
+  NG: 'en-NG,en;q=0.9', RW: 'rw-RW,rw;q=0.9,en;q=0.8', KE: 'sw-KE,sw;q=0.9,en;q=0.8',
+  ZA: 'en-ZA,en;q=0.9', GH: 'en-GH,en;q=0.9', GB: 'en-GB,en;q=0.9',
+  DE: 'de-DE,de;q=0.9,en;q=0.8', US: 'en-US,en;q=0.9', CA: 'en-CA,en;q=0.9',
+  AU: 'en-AU,en;q=0.9', BR: 'pt-BR,pt;q=0.9,en;q=0.8', JP: 'ja-JP,ja;q=0.9,en;q=0.8',
+}
+
+async function applyHeaderRules(country) {
+  if (!chrome.declarativeNetRequest?.updateDynamicRules) return
+  const persona = COUNTRY_PERSONAS_SW[country] ?? 'desktop'
+  const isMobile = persona === 'mobile'
+  const acceptLang = COUNTRY_LANG_SW[country] ?? 'en-US,en;q=0.9'
+  const platform = isMobile ? 'Android' : 'Windows'
+  const mobile = isMobile ? '?1' : '?0'
+  const secChUa = SEC_CH_UA_BY_PERSONA[persona]
+
+  const rules = [
+    {
+      id: HDR_RULE_ACCEPT_LANG,
+      priority: 1,
+      action: {
+        type: 'modifyHeaders',
+        requestHeaders: [{ header: 'Accept-Language', operation: 'set', value: acceptLang }],
+      },
+      condition: { urlFilter: '*', resourceTypes: ['main_frame','sub_frame','xmlhttprequest','script','stylesheet','image','font','media','websocket','other'] },
+    },
+    {
+      id: HDR_RULE_SEC_CH_UA_PLATFORM,
+      priority: 1,
+      action: {
+        type: 'modifyHeaders',
+        requestHeaders: [{ header: 'Sec-CH-UA-Platform', operation: 'set', value: `"${platform}"` }],
+      },
+      condition: { urlFilter: '*', resourceTypes: ['main_frame','sub_frame','xmlhttprequest','script','stylesheet','image','font','media','websocket','other'] },
+    },
+    {
+      id: HDR_RULE_SEC_CH_UA_MOBILE,
+      priority: 1,
+      action: {
+        type: 'modifyHeaders',
+        requestHeaders: [{ header: 'Sec-CH-UA-Mobile', operation: 'set', value: mobile }],
+      },
+      condition: { urlFilter: '*', resourceTypes: ['main_frame','sub_frame','xmlhttprequest','script','stylesheet','image','font','media','websocket','other'] },
+    },
+    {
+      id: HDR_RULE_SEC_CH_UA,
+      priority: 1,
+      action: {
+        type: 'modifyHeaders',
+        requestHeaders: [{ header: 'Sec-CH-UA', operation: 'set', value: secChUa }],
+      },
+      condition: { urlFilter: '*', resourceTypes: ['main_frame','sub_frame','xmlhttprequest','script','stylesheet','image','font','media','websocket','other'] },
+    },
+  ]
+
+  try {
+    await chrome.declarativeNetRequest.updateDynamicRules({
+      removeRuleIds: [HDR_RULE_ACCEPT_LANG, HDR_RULE_SEC_CH_UA_PLATFORM, HDR_RULE_SEC_CH_UA_MOBILE, HDR_RULE_SEC_CH_UA],
+      addRules: rules,
+    })
+    log('info', `[HEADERS] rules applied country=${country} persona=${persona} lang=${acceptLang}`)
+  } catch (e) {
+    log('warn', `[HEADERS] updateDynamicRules failed: ${e.message}`)
+  }
+}
+
+async function clearHeaderRules() {
+  if (!chrome.declarativeNetRequest?.updateDynamicRules) return
+  try {
+    await chrome.declarativeNetRequest.updateDynamicRules({
+      removeRuleIds: [HDR_RULE_ACCEPT_LANG, HDR_RULE_SEC_CH_UA_PLATFORM, HDR_RULE_SEC_CH_UA_MOBILE, HDR_RULE_SEC_CH_UA],
+      addRules: [],
+    })
+    log('info', '[HEADERS] rules cleared')
+  } catch (e) {
+    log('warn', `[HEADERS] clearDynamicRules failed: ${e.message}`)
+  }
+}
+
 // ── Proxy settings ────────────────────────────────────────────────────────────
 
 function blockWebRTC() {
@@ -1099,7 +1200,7 @@ function restoreWebRTC() {
   )
 }
 
-function setProxyDesktop(sessionId) {
+function setProxyDesktop(sessionId, country) {
   chrome.proxy.settings.set(
     {
       value: {
@@ -1122,9 +1223,10 @@ function setProxyDesktop(sessionId) {
   chrome.storage.session.set({ proxySessionId: sessionId, proxyHost: '127.0.0.1', proxyPort: 7655 })
   syncActionBadge()
   blockWebRTC()
+  if (country) applyHeaderRules(country)
 }
 
-function setProxyRelay(relayEndpoint, sessionId) {
+function setProxyRelay(relayEndpoint, sessionId, country) {
   const relayUrl = relayEndpoint.replace('wss://', 'https://').replace('ws://', 'http://')
   const relayHost = new URL(relayUrl).hostname
   const pacScript = `
@@ -1143,6 +1245,7 @@ function setProxyRelay(relayEndpoint, sessionId) {
   chrome.storage.session.set({ proxySessionId: sessionId, proxyHost: relayHost, proxyPort: 8081 })
   syncActionBadge()
   blockWebRTC()
+  if (country) applyHeaderRules(country)
 }
 
 function clearProxy() {
@@ -1151,6 +1254,7 @@ function clearProxy() {
   chrome.storage.session.remove(['proxySessionId', 'proxyHost', 'proxyPort'])
   syncActionBadge()
   restoreWebRTC()
+  clearHeaderRules()
 }
 
 chrome.webRequest.onAuthRequired.addListener(

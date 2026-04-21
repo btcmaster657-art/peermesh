@@ -94,9 +94,11 @@
   defineGetter(Navigator.prototype, 'plugins', () => pluginData.plugins)
   defineGetter(Navigator.prototype, 'mimeTypes', () => pluginData.mimeTypes)
 
+  const chromeVersion = String(profile.uaVersion || '124')
+  const chromeFullVersion = profile.uaFullVersion || `${chromeVersion}.0.0.0`
   const brands = [
-    { brand: 'Google Chrome', version: '124' },
-    { brand: 'Chromium', version: '124' },
+    { brand: 'Google Chrome', version: chromeVersion },
+    { brand: 'Chromium', version: chromeVersion },
     { brand: 'Not-A.Brand', version: '99' },
   ]
   defineGetter(Navigator.prototype, 'userAgentData', () => ({
@@ -104,15 +106,15 @@
     mobile: profile.mobile,
     platform: profile.platformLabel,
     getHighEntropyValues: async () => ({
-      architecture: profile.mobile ? 'arm' : 'x86',
-      bitness: profile.mobile ? '64' : '64',
+      architecture: profile.architecture || (profile.mobile ? 'arm' : 'x86'),
+      bitness: profile.bitness || '64',
       brands,
-      fullVersionList: [{ brand: 'Google Chrome', version: '124.0.0.0' }],
+      fullVersionList: [{ brand: 'Google Chrome', version: chromeFullVersion }],
       mobile: profile.mobile,
-      model: profile.mobile ? 'Pixel 7' : '',
+      model: profile.deviceModel || '',
       platform: profile.platformLabel,
-      platformVersion: profile.mobile ? '14.0.0' : '10.0.0',
-      uaFullVersion: '124.0.0.0',
+      platformVersion: profile.platformVersion || (profile.mobile ? '14.0.0' : '10.0.0'),
+      uaFullVersion: chromeFullVersion,
     }),
   }))
 
@@ -198,6 +200,58 @@
         return Reflect.get(target, property)
       },
     })
+  }
+
+  // Geolocation — return coords near provider's country capital
+  if (navigator.geolocation) {
+    const nativeGetCurrentPosition = navigator.geolocation.getCurrentPosition.bind(navigator.geolocation)
+    const nativeWatchPosition = navigator.geolocation.watchPosition.bind(navigator.geolocation)
+    function fakePosition(success) {
+      const accuracy = 20 + ((seed % 80))
+      const latJitter = (((seed * 7) % 100) - 50) / 10000
+      const lonJitter = (((seed * 13) % 100) - 50) / 10000
+      success({
+        coords: {
+          latitude: profile.lat + latJitter,
+          longitude: profile.lon + lonJitter,
+          accuracy,
+          altitude: null,
+          altitudeAccuracy: null,
+          heading: null,
+          speed: null,
+        },
+        timestamp: Date.now(),
+      })
+    }
+    Object.defineProperty(navigator, 'geolocation', {
+      get: () => ({
+        getCurrentPosition: (success, error, opts) => fakePosition(success),
+        watchPosition: (success, error, opts) => { fakePosition(success); return 0 },
+        clearWatch: () => {},
+      }),
+      configurable: true,
+    })
+  }
+
+  // Screen orientation — mobile personas report portrait
+  if (window.screen?.orientation) {
+    const orientationType = profile.mobile ? 'portrait-primary' : 'landscape-primary'
+    const orientationAngle = profile.mobile ? 0 : 0
+    try {
+      Object.defineProperty(window.screen, 'orientation', {
+        get: () => ({
+          type: orientationType,
+          angle: orientationAngle,
+          onchange: null,
+          addEventListener() {},
+          removeEventListener() {},
+          dispatchEvent() { return false },
+          lock: () => Promise.reject(new DOMException('Not supported')),
+          unlock: () => {},
+        }),
+        configurable: true,
+      })
+    } catch {}
   }
 
   // Audio fingerprinting
