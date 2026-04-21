@@ -37,7 +37,7 @@ async function getLiveRelays() {
 const CONFIG_DIR = join(homedir(), '.peermesh')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
 const SHARED_IDENTITY_FILE = join(CONFIG_DIR, 'machine-identity.json')
-const VERSION     = '1.0.41'
+const VERSION     = '1.0.42'
 const DEBUG_LOG = join(homedir(), 'Desktop', 'peermesh-debug.log')
 
 const CONTROL_PORT = 7654
@@ -1083,11 +1083,11 @@ function buildHandler(port) {
 }
 
 function registerWithPeer(targetPort) {
-  clogRequest('POST', `http://127.0.0.1:${targetPort}/native/peer/register`, { port: myPort, where: 'cli' })
+  clogRequest('POST', `http://127.0.0.1:${targetPort}/native/peer/register`, { port: myPort, where: 'cli', slots: getConnectionSlots() })
   fetch(`http://127.0.0.1:${targetPort}/native/peer/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ port: myPort, where: 'cli' }),
+    body: JSON.stringify({ port: myPort, where: 'cli', slots: getConnectionSlots() }),
     signal: AbortSignal.timeout(1500),
   })
     .then(async res => {
@@ -1114,11 +1114,11 @@ async function syncSlotsWithPeer(targetPort) {
       ensureSlotStates()
       saveConfig(config)
     } else {
-      // We are the one sharing or peer is idle — push our count to them
+      // Neither is sharing — we are the registrant so we win; push with _fromPeer=true so peer doesn't echo back
       fetch(`http://127.0.0.1:${targetPort}/native/connection-slots`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ slots: getConnectionSlots() }),
+        body: JSON.stringify({ slots: getConnectionSlots(), _fromPeer: true }),
         signal: AbortSignal.timeout(1500),
       }).catch(() => {})
     }

@@ -1481,6 +1481,19 @@ const controlServer = http.createServer((req, res) => {
         const prevPeerPort = peerPort
         peerPort = parsed.port
         log.info('CONTROL', '/native/peer/register', { peerPort, prevPeerPort, where: parsed.where })
+
+        // If registrant sent their slot count and neither side is sharing, adopt it
+        if (parsed.slots && !running && !peerSharing) {
+          const incomingSlots = clampSlots(parsed.slots)
+          if (incomingSlots !== clampSlots(config.connectionSlots ?? 1)) {
+            log.info('SLOTS', 'adopting slot count from registering peer', { incomingSlots, ourSlots: clampSlots(config.connectionSlots ?? 1) })
+            config.connectionSlots = incomingSlots
+            ensureSlotStates()
+            saveConfig()
+            updateTray()
+          }
+        }
+
         logState('peer-registered')
       } catch (e) { log.warn('CONTROL', '/native/peer/register parse error', { err: e.message }) }
       res.writeHead(200, { 'Content-Type': 'application/json' })
