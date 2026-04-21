@@ -148,14 +148,15 @@ function selectPersonaVariant(country, personaName, pool, session) {
     return { variant: PERSONA_POOL_MAP.desktop[0], variantIndex: 0 }
   }
 
-  const seed = [
-    country,
-    personaName,
-    session?.id,
-    session?.sessionId,
-    session?.relayEndpoint,
-  ].filter(Boolean).join('|') || `${country}|${personaName}`
-  const variantIndex = hashString(seed) % pool.length
+  // Seed from stable identity: userId + country only.
+  // Session ID, relay endpoint, and timestamp are intentionally excluded —
+  // they change every connection. userId + country is permanent, so the same
+  // user always gets the same device fingerprint for a given country across
+  // disconnects, reconnects, and provider changes.
+  // An IP change between sessions looks like the user moved, not a device swap.
+  const stableSeed = [session?.userId, country].filter(Boolean).join('|')
+    || `${country}|${personaName}`
+  const variantIndex = hashString(stableSeed) % pool.length
   return { variant: pool[variantIndex], variantIndex }
 }
 
@@ -168,6 +169,9 @@ function buildProfile(session) {
 
   return {
     country,
+    // userId passed through so identity.js can anchor canvas/audio/geo noise
+    // to the user rather than the persona variant. Same user = same noise forever.
+    userId: session?.userId || '',
     tz: meta.tz,
     lang: meta.lang,
     lat: meta.lat,

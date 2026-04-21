@@ -12,7 +12,12 @@
     return
   }
 
-  const seedSource = `${profile.country}:${profile.tz}:${profile.platform}:${profile.userAgent}`
+  // Seed anchored to userId + country + platform + userAgent.
+  // userId ensures each user gets unique noise values.
+  // country + platform + userAgent ensure the noise is consistent with
+  // the spoofed device — same user, same country = identical fingerprint
+  // across every session, reconnect, and provider change.
+  const seedSource = `${profile.userId || ''}:${profile.country}:${profile.tz}:${profile.platform}:${profile.userAgent}`
   const seed = Array.from(seedSource).reduce((sum, char, index) => sum + (char.charCodeAt(0) * (index + 1)), 0)
 
   function defineGetter(target, property, getter) {
@@ -143,7 +148,7 @@
   defineGetter(window, 'outerWidth', () => profile.screen.width)
   defineGetter(window, 'outerHeight', () => profile.screen.height)
 
-  // WebRTC - relay only
+  // WebRTC - relay only, no IP leak
   const NativeRTCPeerConnection = window.RTCPeerConnection
   if (NativeRTCPeerConnection) {
     window.RTCPeerConnection = function RTCPeerConnection(config = {}) {
@@ -202,10 +207,8 @@
     })
   }
 
-  // Geolocation — return coords near provider's country capital
+  // Geolocation — stable coords near provider country capital, jitter seeded from userId
   if (navigator.geolocation) {
-    const nativeGetCurrentPosition = navigator.geolocation.getCurrentPosition.bind(navigator.geolocation)
-    const nativeWatchPosition = navigator.geolocation.watchPosition.bind(navigator.geolocation)
     function fakePosition(success) {
       const accuracy = 20 + ((seed % 80))
       const latJitter = (((seed * 7) % 100) - 50) / 10000
@@ -254,7 +257,7 @@
     } catch {}
   }
 
-  // Audio fingerprinting
+  // Audio fingerprinting — sampleRate + channel data noise seeded from userId
   const NativeAudioContext = window.AudioContext || window.webkitAudioContext
   const NativeOfflineAudioContext = window.OfflineAudioContext || window.webkitOfflineAudioContext
   const NativeGetChannelData = AudioBuffer.prototype.getChannelData
