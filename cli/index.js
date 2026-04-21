@@ -37,7 +37,7 @@ async function getLiveRelays() {
 const CONFIG_DIR = join(homedir(), '.peermesh')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
 const SHARED_IDENTITY_FILE = join(CONFIG_DIR, 'machine-identity.json')
-const VERSION     = '1.0.35'
+const VERSION     = '1.0.36'
 const DEBUG_LOG = join(homedir(), 'Desktop', 'peermesh-debug.log')
 
 const CONTROL_PORT = 7654
@@ -1060,11 +1060,39 @@ function registerWithPeer(targetPort) {
     body: JSON.stringify({ port: myPort, where: 'cli' }),
     signal: AbortSignal.timeout(1500),
   })
-    .then(res => {
+    .then(async res => {
       clogResponse('POST', `http://127.0.0.1:${targetPort}/native/peer/register`, res.status)
       peerPort = targetPort
+      // Sync slots with peer on registration
+      await syncSlotsWithPeer(targetPort)
     })
     .catch(() => {})
+}
+
+// Push our slot count to peer, or adopt peer's if they are actively sharing
+async function syncSlotsWithPeer(targetPort) {
+  try {
+    const r = await fetch(`http://127.0.0.1:${targetPort}/native/state`, { signal: AbortSignal.timeout(1500) })
+    if (!r.ok) return
+    const state = await r.json()
+    const peerSlots = state.connectionSlots ?? state.slots?.configured ?? null
+    const peerRunning = !!state.running
+    if (peerRunning && peerSlots && peerSlots !== getConnectionSlots()) {
+      // Peer is actively sharing — adopt their slot count
+      clog.info('SLOTS', 'adopting slot count from running peer', { peerSlots, ourSlots: getConnectionSlots() })
+      config.connectionSlots = peerSlots
+      ensureSlotStates()
+      saveConfig(config)
+    } else {
+      // We are the one sharing or peer is idle — push our count to them
+      fetch(`http://127.0.0.1:${targetPort}/native/connection-slots`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ slots: getConnectionSlots() }),
+        signal: AbortSignal.timeout(1500),
+      }).catch(() => {})
+    }
+  } catch {}
 }
 
 function startControlServer() {
@@ -1339,6 +1367,20 @@ async function main() {
   } catch {}
 
   if (desktopAlreadySharing) {
+    // Adopt desktop's slot count since it's the running provider
+    try {
+      const r = await fetch(`http://127.0.0.1:${CONTROL_PORT}/native/state`, { signal: AbortSignal.timeout(1500) })
+      if (r.ok) {
+        const state = await r.json()
+        const desktopSlots = state.connectionSlots ?? state.slots?.configured ?? null
+        if (desktopSlots && desktopSlots !== getConnectionSlots()) {
+          clog.info('SLOTS', 'adopting slot count from running desktop', { desktopSlots, ourSlots: getConnectionSlots() })
+          config.connectionSlots = desktopSlots
+          ensureSlotStates()
+          saveConfig(config)
+        }
+      }
+    } catch {}
     log('Desktop is sharing — CLI standing by (press Ctrl+C to stop both)')
   } else {
     config.shareEnabled = true

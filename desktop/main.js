@@ -1967,7 +1967,29 @@ async function bootstrapDesktopApp() {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ port: PEER_PORT, where: 'desktop' }), signal: AbortSignal.timeout(1500),
     })
-      .then(r => { logResponse('POST', `http://127.0.0.1:${CONTROL_PORT}/native/peer/register`, r.status); peerPort = CONTROL_PORT })
+      .then(r => { logResponse('POST', `http://127.0.0.1:${CONTROL_PORT}/native/peer/register`, r.status)
+        peerPort = CONTROL_PORT
+        // Sync slots with CLI on registration
+        fetch(`http://127.0.0.1:${CONTROL_PORT}/native/state`, { signal: AbortSignal.timeout(1500) })
+          .then(async sr => {
+            if (!sr.ok) return
+            const cliState = await sr.json()
+            const cliSlots = cliState.connectionSlots ?? cliState.slots?.configured ?? null
+            if (cliState.running && cliSlots && cliSlots !== clampSlots(config.connectionSlots ?? 1)) {
+              log.info('PORT', 'secondary desktop adopting slot count from running CLI', { cliSlots, ourSlots: clampSlots(config.connectionSlots ?? 1) })
+              config.connectionSlots = cliSlots
+              ensureSlotStates()
+              saveConfig()
+              updateTray()
+            } else if (!cliState.running && cliSlots !== clampSlots(config.connectionSlots ?? 1)) {
+              fetch(`http://127.0.0.1:${CONTROL_PORT}/native/connection-slots`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ slots: clampSlots(config.connectionSlots ?? 1) }),
+                signal: AbortSignal.timeout(1500),
+              }).catch(() => {})
+            }
+          }).catch(() => {})
+      })
       .catch(e => log.warn('PORT', 'peer register failed', { err: e.message }))
 
     const peerServer = http.createServer((req, res) => {
@@ -2073,6 +2095,21 @@ async function bootstrapDesktopApp() {
               cliAlreadySharing = !!cliState.running
               peerSharing = cliAlreadySharing
               log.info('PORT', 'registered with CLI peer', { peerPort, cliAlreadySharing })
+              // Sync slots: adopt running peer's count, else push ours
+              const cliSlots = cliState.connectionSlots ?? cliState.slots?.configured ?? null
+              if (cliAlreadySharing && cliSlots && cliSlots !== clampSlots(config.connectionSlots ?? 1)) {
+                log.info('PORT', 'adopting slot count from running CLI', { cliSlots, ourSlots: clampSlots(config.connectionSlots ?? 1) })
+                config.connectionSlots = cliSlots
+                ensureSlotStates()
+                saveConfig()
+                updateTray()
+              } else if (!cliAlreadySharing && cliSlots !== clampSlots(config.connectionSlots ?? 1)) {
+                fetch(`http://127.0.0.1:${PEER_PORT}/native/connection-slots`, {
+                  method: 'POST', headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ slots: clampSlots(config.connectionSlots ?? 1) }),
+                  signal: AbortSignal.timeout(1500),
+                }).catch(() => {})
+              }
               if (cliAlreadySharing) log.info('PORT', 'CLI is sharing â€” desktop standing by')
 
               _cliWatchTimer = setInterval(async () => {

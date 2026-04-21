@@ -1,4 +1,0 @@
-nsionAuthToken(previousLaunchExtId).catch(() => {})
-  try { await verifyStoredDesktopAuth() } catch (e) { log.warn('AUTH', 'startup auth verify failed', { err: e.message }) }
-  registerNativeMessagingHost()
-  runNativeH
