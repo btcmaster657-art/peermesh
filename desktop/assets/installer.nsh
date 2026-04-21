@@ -2,15 +2,36 @@
 
 ; Shared macro to kill all PeerMesh processes cleanly
 !macro KillPeerMesh
-  ; Only kill the exact desktop app binaries. Do not touch the shared local
-  ; control port or use wildcard process filters, because the CLI/dev tools can
-  ; coexist on the same machine.
+  ; 1. Ask the running app to quit gracefully via its control server
+  ;    (works whether the window is visible or hidden in the tray)
+  ;    Use PowerShell's Invoke-WebRequest — always available on Win10+
+  nsExec::ExecToLog '$SYSDIR\WindowsPowerShell\v1.0\powershell.exe -NonInteractive -WindowStyle Hidden -Command "try { Invoke-WebRequest -Uri http://127.0.0.1:7654/quit -Method POST -TimeoutSec 3 -UseBasicParsing | Out-Null } catch {}"'
+  Sleep 2500
+
+  ; 2. Force-kill any remaining Electron processes by name
   nsExec::ExecToLog '$SYSDIR\taskkill.exe /F /IM "PeerMesh.exe" /T'
   nsExec::ExecToLog '$SYSDIR\taskkill.exe /F /IM "PeerMesh Helper.exe"'
   nsExec::ExecToLog '$SYSDIR\taskkill.exe /F /IM "PeerMesh Helper (GPU).exe"'
   nsExec::ExecToLog '$SYSDIR\taskkill.exe /F /IM "PeerMesh Helper (Renderer).exe"'
   nsExec::ExecToLog '$SYSDIR\taskkill.exe /F /IM "PeerMesh Helper (Plugin).exe"'
-  Sleep 1500
+
+  ; 3. Wait until the process is actually gone (poll up to 10s)
+  StrCpy $R1 0
+  ${Do}
+    Sleep 500
+    nsExec::ExecToStack '$SYSDIR\tasklist.exe /FI "IMAGENAME eq PeerMesh.exe" /NH'
+    Pop $R2
+    ${If} $R2 == ""
+      ${Break}
+    ${EndIf}
+    ${If} $R2 == "INFO: No tasks are running which match the specified criteria."
+      ${Break}
+    ${EndIf}
+    IntOp $R1 $R1 + 1
+    ${If} $R1 >= 20
+      ${Break}
+    ${EndIf}
+  ${Loop}
 !macroend
 
 ; Shared macro to remove all PeerMesh artifacts

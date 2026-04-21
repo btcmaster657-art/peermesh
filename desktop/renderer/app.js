@@ -7,7 +7,9 @@ const startupBusy = {
 
 let devicePollInterval = null
 let deviceFlowActive = false
-let togglingShare = false
+let togglingShare = false // 'idle' | 'starting' | 'stopping'
+let _shareState = 'idle'
+function setShareState(s) { _shareState = s; togglingShare = s !== 'idle' }
 let privateShare = null
 let privateShareSaving = false
 let privateShareExpiry = '24'
@@ -531,7 +533,7 @@ function showDisclosureModal() {
 
 async function doToggleSharing(isSharing) {
   if (togglingShare) return
-  togglingShare = true
+  setShareState(isSharing ? 'stopping' : 'starting')
   clearMainError()
 
   const toggle = document.getElementById('share-toggle')
@@ -566,7 +568,6 @@ async function doToggleSharing(isSharing) {
     showMainError('Could not toggle sharing - please try again')
   } finally {
     if (dot) dot.style.cssText = ''
-    togglingShare = false
   }
 
   for (let i = 0; i < 6; i += 1) {
@@ -578,6 +579,7 @@ async function doToggleSharing(isSharing) {
       : (!state.running && !state.peerRunning)
     if (shouldBreak) break
   }
+  setShareState('idle')
 }
 
 function updateUI(state) {
@@ -705,9 +707,13 @@ function updateUI(state) {
     ? 'Sharing active - earning credits'
     : peerSharing
       ? 'CLI is sharing'
-      : starting
-        ? 'Starting local sharing...'
-        : 'Help others browse. Stay free.'
+      : _shareState === 'starting'
+        ? 'Starting...'
+        : _shareState === 'stopping'
+          ? 'Stopping...'
+          : starting
+            ? 'Starting local sharing...'
+            : 'Help others browse. Stay free.'
 }
 
 async function pollState() {
@@ -799,6 +805,9 @@ document.getElementById('btn-dashboard').addEventListener('click', async () => {
 })
 
 document.getElementById('btn-signout').addEventListener('click', async () => {
+  if (!confirm('Sign out of PeerMesh?')) return
+  const btn = document.getElementById('btn-signout')
+  if (btn) { btn.disabled = true; btn.textContent = 'Signing out...' }
   stopDevicePoll()
   resetAuthUI()
   await invoke('signOut')
@@ -806,6 +815,7 @@ document.getElementById('btn-signout').addEventListener('click', async () => {
   privateShareExpiry = '24'
   renderPrivateShare()
   await pollState()
+  if (btn) { btn.disabled = false; btn.textContent = 'Sign out' }
   if (typeof api.requestDeviceCode === 'function') startDeviceFlow()
 })
 

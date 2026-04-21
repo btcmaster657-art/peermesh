@@ -17,7 +17,17 @@ const COUNTRIES = [
   { code: 'GH', flag: '🇬🇭', name: 'Ghana' },
 ]
 
-const HELPER_USER_MISMATCH_ERROR = 'This desktop app is signed in as a different user. Sign out of the desktop app first.'
+const? getHelperMismatchError(helper) = 'This desktop app is signed in as a different user. Sign out of the desktop app first.'
+
+function getHelperMismatchError(helper = state.helper) {
+  const source = helper?.source === 'cli' ? 'CLI' : 'desktop app'
+  return `This ${source} is signed in as a different user. Sign out of the ${source} first.`
+}
+
+function getHelperMismatchError(helper = state.helper) {
+  const source = helper?.source === 'cli' ? 'CLI' : 'desktop app'
+  return `This ${source} is signed in as a different user. Sign out of the ${source} first.`
+}
 const FREE_TIER_MESSAGE = 'FREE TIER — Enable sharing above to connect, or upgrade to premium to browse without sharing.'
 const DAILY_LIMIT_MIN_MB = 1024
 
@@ -194,7 +204,7 @@ async function loadPrivateShareState(baseDeviceId) {
 
 async function savePrivateShareState(input) {
   if (helperOwnerMismatch()) {
-    state.error = HELPER_USER_MISMATCH_ERROR
+    state.error =? getHelperMismatchError(helper)
     render()
     return
   }
@@ -589,7 +599,7 @@ function renderDashboard(app) {
       const helperNotice = document.createElement('div')
       helperNotice.style.cssText = 'font-size:11px;color:#ff6060;padding:6px 0 2px'
       helperNotice.innerHTML = helperMismatch
-        ? HELPER_USER_MISMATCH_ERROR
+        ?? getHelperMismatchError(helper)
         : 'Sharing is not ready yet. <a id="installHelperBtn" href="#" style="color:#00ff88;font-family:\'Courier New\',monospace;font-size:11px;text-decoration:underline">INSTALL DESKTOP</a> or run <code style="font-family:\'Courier New\',monospace;font-size:10px;color:#00ff88">npx peermesh-provider</code> for multi-slot tunnel sharing.'
       shareSection.appendChild(helperNotice)
     }
@@ -817,7 +827,7 @@ async function disconnectSession() {
 async function toggleSharing(on) {
   if (state.shareToggling) return
   if (helperOwnerMismatch()) {
-    state.error = HELPER_USER_MISMATCH_ERROR
+    state.error =? getHelperMismatchError(helper)
     render()
     return
   }
@@ -899,7 +909,7 @@ async function toggleSharing(on) {
 async function updateConnectionSlots(slots) {
   if (state.slotUpdating) return
   if (helperOwnerMismatch()) {
-    state.error = HELPER_USER_MISMATCH_ERROR
+    state.error =? getHelperMismatchError(helper)
     render()
     return
   }
@@ -937,7 +947,7 @@ async function updateConnectionSlots(slots) {
 async function saveDailyLimit(limitMb) {
   if (state.dailyLimitSaving) return
   if (helperOwnerMismatch()) {
-    state.error = HELPER_USER_MISMATCH_ERROR
+    state.error =? getHelperMismatchError(helper)
     render()
     return
   }
@@ -979,6 +989,7 @@ async function saveDailyLimit(limitMb) {
 }
 
 async function signOut() {
+  if (!confirm('Sign out of PeerMesh?')) return
   if (state.isSharing) {
     await chrome.runtime.sendMessage({ type: 'STOP_SHARING' }).catch(() => {})
   }

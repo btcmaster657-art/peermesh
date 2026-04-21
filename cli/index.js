@@ -37,7 +37,7 @@ async function getLiveRelays() {
 const CONFIG_DIR = join(homedir(), '.peermesh')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
 const SHARED_IDENTITY_FILE = join(CONFIG_DIR, 'machine-identity.json')
-const VERSION     = '1.0.34'
+const VERSION     = '1.0.35'
 const DEBUG_LOG = join(homedir(), 'Desktop', 'peermesh-debug.log')
 
 const CONTROL_PORT = 7654
@@ -209,6 +209,10 @@ let _controlLimitBytes = null
 let _pendingBytes = 0
 let _flushTimer = null
 let _profileSyncTimer = null
+let _profileSyncInterval = 5000
+let _profileSyncConsecutiveFailures = 0
+const PROFILE_SYNC_MAX = 30000
+const CLI_AUTH_CLEAR_THRESHOLD = 3
 
 function getBaseDeviceId() {
   return config.baseDeviceId
@@ -399,11 +403,18 @@ function enforceLocalLimit(limitBytes) {
   limitHit = true
   clog.warn('LIMIT', 'daily limit reached', { totalToday, limitBytes })
   console.log('')
-  console.log(`  Daily limit of ${formatBytes(limitBytes)} reached.`)
-  console.log('  Sharing stopped. Run again tomorrow or increase the limit in PeerMesh.')
+  console.log(`  Daily limit of ${formatBytes(limitBytes)} reached — sharing paused until midnight.`)
   console.log('')
   stopRelay()
-  process.exit(0)
+  const msUntilMidnight = new Date(new Date().toDateString()).getTime() + 86400000 - Date.now()
+  clog.info('LIMIT', 'scheduling resume at midnight', { msUntilMidnight })
+  setTimeout(() => {
+    limitHit = false
+    config.todaySharedBytes = 0
+    saveConfig(config)
+    clog.info('LIMIT', 'midnight reset — resuming sharing')
+    if (config.shareEnabled) connectRelay(_controlLimitBytes)
+  }, msUntilMidnight)
 }
 
 function applySharingProfileData(data, { source = 'remote' } = {}) {
@@ -454,17 +465,26 @@ function applySharingProfileData(data, { source = 'remote' } = {}) {
 
 function stopProfileSync() {
   if (!_profileSyncTimer) return
-  clearInterval(_profileSyncTimer)
+  clearTimeout(_profileSyncTimer)
   _profileSyncTimer = null
 }
 
 function startProfileSync() {
   stopProfileSync()
   if (!config.token || !config.userId) return
+  _profileSyncInterval = 5000
   void pollTodayBytes()
-  _profileSyncTimer = setInterval(() => {
-    void pollTodayBytes()
-  }, 5_000)
+  function scheduleTick() {
+    _profileSyncTimer = setTimeout(async () => {
+      const prevLimit = _controlLimitBytes
+      const prevCode = config.privateShare?.code
+      await pollTodayBytes().catch(() => {})
+      const changed = _controlLimitBytes !== prevLimit || config.privateShare?.code !== prevCode
+      _profileSyncInterval = changed ? 5000 : Math.min(_profileSyncInterval * 2, PROFILE_SYNC_MAX)
+      scheduleTick()
+    }, _profileSyncInterval)
+  }
+  scheduleTick()
 }
 
 function addBytes(slot, bytes, limitBytes) {
@@ -484,9 +504,15 @@ async function pollTodayBytes() {
     })
     clogResponse('GET', `${API_BASE}/api/user/sharing`, res.status)
     if (res.status === 401 || res.status === 403) {
-      await clearCliCredentials(`poll_today_bytes_${res.status}`)
+      _profileSyncConsecutiveFailures++
+      if (_profileSyncConsecutiveFailures >= CLI_AUTH_CLEAR_THRESHOLD) {
+        await clearCliCredentials(`poll_today_bytes_${res.status}`)
+      } else {
+        clog.warn('API', 'transient auth error in pollTodayBytes - not clearing yet', { status: res.status, count: _profileSyncConsecutiveFailures })
+      }
       return
     }
+    _profileSyncConsecutiveFailures = 0
     if (!res.ok) return
     const data = await res.json()
     return applySharingProfileData(data, { source: 'pollTodayBytes' })
@@ -870,6 +896,16 @@ function applyConnectionSlots(nextSlots) {
     config.shareEnabled = true
     saveConfig(config)
     connectRelay(_controlLimitBytes)
+  }
+
+  // Notify desktop peer so its UI stays in sync
+  if (peerPort) {
+    fetch(`http://127.0.0.1:${peerPort}/native/connection-slots`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ slots: normalizedSlots }),
+      signal: AbortSignal.timeout(2000),
+    }).catch(() => {})
   }
 
   return { success: true, slots: normalizedSlots, state: getStatePayload() }

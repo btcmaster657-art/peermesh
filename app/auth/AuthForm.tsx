@@ -26,16 +26,19 @@ export default function AuthForm() {
 
   // If already signed in, redirect appropriately
   useEffect(() => {
-    if (!extId && !activate) return
     supabase.auth.getSession().then(async ({ data: { session } }) => {
       if (!session) return
       if (activate) { router.push('/extension?activate=1'); return }
-      await fetch('/api/extension-auth', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ext_id: extId }),
-      })
-      router.push(`/extension?ext_id=${extId}`)
+      if (extId) {
+        await fetch('/api/extension-auth', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ext_id: extId }),
+        })
+        router.push(`/extension?ext_id=${extId}`)
+        return
+      }
+      router.push('/dashboard')
     })
   }, [extId, activate])
 

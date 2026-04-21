@@ -1,8 +1,21 @@
+'use client'
+
 import Link from 'next/link'
+import { useEffect } from 'react'
+import { useRouter } from 'next/navigation'
+import { createClient } from '@/lib/supabase/client'
 
 const COUNTRIES = ['🇳🇬', '🇬🇧', '🇺🇸', '🇰🇪', '🇩🇪', '🇧🇷', '🇯🇵', '🇿🇦', '🇨🇦']
 
 export default function LandingPage() {
+  const router = useRouter()
+  const supabase = createClient()
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session) router.replace('/dashboard')
+    })
+  }, [])
   return (
     <main className="flex flex-col flex-1 items-center justify-center px-6 py-20 text-center">
       {/* Logo */}

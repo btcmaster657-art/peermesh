@@ -104,6 +104,10 @@ let _shutdownStarted = false
 let _quitRequested = false
 let _sharingConfigSyncTimer = null
 let _sharingConfigSyncBusy = false
+let _sharingConfigSyncInterval = 5000
+let _sharingConfigConsecutiveFailures = 0
+const SHARING_CONFIG_SYNC_MAX = 30000
+const AUTH_CLEAR_FAILURE_THRESHOLD = 3
 
 function notifyPeer(p, body) {
   if (!peerPort) return
@@ -473,8 +477,11 @@ function applyLaunchOnStartupPreference(enabled = config.launchOnStartup) {
   }
 }
 
+let _savingDailyLimit = false
+
 async function refreshSharingConfig() {
   if (!config.token) return null
+  if (_savingDailyLimit) return null
   logRequest('GET', `${API_BASE}/api/user/sharing`)
   const res = await fetch(`${API_BASE}/api/user/sharing${config.baseDeviceId ? `?baseDeviceId=${encodeURIComponent(config.baseDeviceId)}` : ''}`, {
     headers: { 'Authorization': `Bearer ${config.token}` },
@@ -482,9 +489,15 @@ async function refreshSharingConfig() {
   })
   logResponse('GET', `${API_BASE}/api/user/sharing`, res.status)
   if (res.status === 401 || res.status === 403) {
-    await clearDesktopAuth(`refresh_sharing_config_${res.status}`)
+    _sharingConfigConsecutiveFailures++
+    if (_sharingConfigConsecutiveFailures >= AUTH_CLEAR_FAILURE_THRESHOLD) {
+      await clearDesktopAuth(`refresh_sharing_config_${res.status}`)
+    } else {
+      log.warn('API', 'transient auth error - not clearing yet', { status: res.status, count: _sharingConfigConsecutiveFailures })
+    }
     return null
   }
+  _sharingConfigConsecutiveFailures = 0
   if (!res.ok) throw new Error(`sharing config fetch failed: status=${res.status}`)
   const data = await res.json()
   return applySharingProfileData(data, { source: 'refreshSharingConfig' })
@@ -498,6 +511,7 @@ async function setDailyShareLimit(limitMb) {
     throw new Error('Daily limit must be at least 1024 MB (1 GB), or unset it')
   }
 
+  _savingDailyLimit = true
   logRequest('POST', `${API_BASE}/api/user/sharing`, { dailyLimitMb: normalizedLimit })
   const res = await fetch(`${API_BASE}/api/user/sharing`, {
     method: 'POST',
@@ -508,6 +522,7 @@ async function setDailyShareLimit(limitMb) {
   logResponse('POST', `${API_BASE}/api/user/sharing`, res.status)
 
   const data = await res.json().catch(() => ({}))
+  _savingDailyLimit = false
   if (res.status === 401 || res.status === 403) {
     await clearDesktopAuth(`daily_limit_${res.status}`)
     throw new Error('Session expired - please sign in again')
@@ -530,26 +545,34 @@ async function setDailyShareLimit(limitMb) {
 
 function stopSharingConfigSync() {
   if (!_sharingConfigSyncTimer) return
-  clearInterval(_sharingConfigSyncTimer)
+  clearTimeout(_sharingConfigSyncTimer)
   _sharingConfigSyncTimer = null
 }
 
 function startSharingConfigSync() {
   stopSharingConfigSync()
   if (!config.token || !config.userId) return
+  _sharingConfigSyncInterval = 5000
   if (!_sharingConfigSyncBusy) {
     _sharingConfigSyncBusy = true
     refreshSharingConfig()
       .catch((e) => log.warn('API', 'sharing config initial sync failed', { err: e.message }))
       .finally(() => { _sharingConfigSyncBusy = false })
   }
-  _sharingConfigSyncTimer = setInterval(() => {
-    if (_sharingConfigSyncBusy || !config.token || !config.userId) return
-    _sharingConfigSyncBusy = true
-    refreshSharingConfig()
-      .catch((e) => log.warn('API', 'sharing config sync tick failed', { err: e.message }))
-      .finally(() => { _sharingConfigSyncBusy = false })
-  }, 5_000)
+  function scheduleTick() {
+    _sharingConfigSyncTimer = setTimeout(async () => {
+      if (_sharingConfigSyncBusy || !config.token || !config.userId) { scheduleTick(); return }
+      _sharingConfigSyncBusy = true
+      const prevLimit = config.dailyShareLimitMb
+      const prevCode = config.privateShare?.code
+      try { await refreshSharingConfig() } catch (e) { log.warn('API', 'sharing config sync tick failed', { err: e.message }) }
+      _sharingConfigSyncBusy = false
+      const changed = config.dailyShareLimitMb !== prevLimit || config.privateShare?.code !== prevCode
+      _sharingConfigSyncInterval = changed ? 5000 : Math.min(_sharingConfigSyncInterval * 2, SHARING_CONFIG_SYNC_MAX)
+      scheduleTick()
+    }, _sharingConfigSyncInterval)
+  }
+  scheduleTick()
 }
 
 // â”€â”€ Config â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
