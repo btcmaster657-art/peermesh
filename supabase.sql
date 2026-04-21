@@ -34,6 +34,8 @@ drop table if exists sessions cascade;
 drop table if exists provider_devices cascade;
 drop table if exists private_share_devices cascade;
 drop table if exists device_codes cascade;
+drop table if exists auth_tokens cascade;
+drop table if exists countries cascade;
 drop table if exists profiles cascade;
 
 -- ================================
@@ -95,7 +97,7 @@ create table sessions (
 -- Session accountability (immutable audit log)
 create table session_accountability (
   id uuid primary key default gen_random_uuid(),
-  session_id uuid not null,
+  session_id uuid not null unique,
   requester_id uuid references profiles(id) on delete set null,
   provider_id uuid references profiles(id) on delete set null,
   target_host text,
@@ -106,6 +108,10 @@ create table session_accountability (
   signed_receipt text not null,
   created_at timestamptz default now()
 );
+
+create index on session_accountability (session_id);
+create index on session_accountability (requester_id);
+create index on session_accountability (provider_id);
 
 -- Abuse reports
 create table abuse_reports (
@@ -175,6 +181,36 @@ create table device_codes (
 create index on extension_auth_tokens (ext_id) where used = false;
 create index on device_codes (device_code) where status = 'pending';
 create index on device_codes (user_code) where status = 'pending';
+
+-- Countries (source of truth for country picker)
+create table countries (
+  code       text primary key,
+  name       text not null,
+  flag       text not null,
+  region     text not null default '',
+  active     boolean not null default true,
+  sort_order integer not null default 999,
+  created_at timestamptz default now()
+);
+
+create index on countries (active) where active = true;
+create index on countries (region);
+create index on countries (sort_order, name);
+
+-- Auth tokens (forgot password + email confirmation)
+create table auth_tokens (
+  id         uuid primary key default gen_random_uuid(),
+  user_id    uuid references profiles(id) on delete cascade not null,
+  email      text not null,
+  token      text not null,
+  type       text not null check (type in ('forgot_password','confirm_email')),
+  used       boolean not null default false,
+  expires_at timestamptz not null default (now() + interval '15 minutes'),
+  created_at timestamptz default now()
+);
+
+create index on auth_tokens (email, type) where used = false;
+create index on auth_tokens (expires_at);
 
 -- Peer availability view — based on live heartbeats, not stale boolean
 create view peer_availability as
@@ -342,23 +378,37 @@ create or replace function set_preferred_provider(
   where id = p_user_id;
 $$ language sql security definer;
 
--- Finalize accountability row on session end
+-- Finalize accountability row on session end (upsert — safe to call multiple times)
 create or replace function finalize_session_accountability(
-  p_session_id uuid,
-  p_provider_id uuid,
+  p_session_id     uuid,
+  p_provider_id    uuid,
   p_provider_country text,
-  p_bytes_used bigint,
-  p_target_host text default null
+  p_bytes_used     bigint,
+  p_target_host    text default null
 ) returns void as $$
 begin
-  update session_accountability
-  set
-    provider_id      = coalesce(p_provider_id, provider_id),
-    provider_country = coalesce(p_provider_country, provider_country),
-    target_host      = coalesce(p_target_host, target_host),
-    bytes_used       = greatest(coalesce(bytes_used, 0), coalesce(p_bytes_used, 0)),
-    ended_at         = now()
-  where session_id = p_session_id;
+  insert into session_accountability (
+    session_id, requester_id, provider_id, provider_country,
+    bytes_used, target_host, signed_receipt, started_at, ended_at
+  )
+  select
+    s.id,
+    s.user_id,
+    coalesce(p_provider_id, s.provider_id),
+    coalesce(p_provider_country, s.target_country),
+    greatest(coalesce(p_bytes_used, 0), coalesce(s.bytes_used, 0)),
+    coalesce(p_target_host, s.target_host),
+    coalesce(s.signed_receipt, ''),
+    s.started_at,
+    now()
+  from sessions s
+  where s.id = p_session_id
+  on conflict (session_id) do update set
+    provider_id      = coalesce(excluded.provider_id,      session_accountability.provider_id),
+    provider_country = coalesce(excluded.provider_country, session_accountability.provider_country),
+    target_host      = coalesce(excluded.target_host,      session_accountability.target_host),
+    bytes_used       = greatest(excluded.bytes_used,       session_accountability.bytes_used),
+    ended_at         = now();
 end;
 $$ language plpgsql security definer;
 
@@ -451,6 +501,17 @@ create policy "Service role only provider devices"
 alter table device_codes enable row level security;
 create policy "Service role only device codes"
   on device_codes for all
+  using (false);
+
+-- Countries: public read, no write from client
+alter table countries enable row level security;
+create policy "Anyone can read active countries"
+  on countries for select using (active = true);
+
+-- Auth tokens: service role only
+alter table auth_tokens enable row level security;
+create policy "Service role only auth tokens"
+  on auth_tokens for all
   using (false);
 
 -- ================================

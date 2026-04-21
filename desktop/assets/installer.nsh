@@ -34,6 +34,13 @@
   ${Loop}
 !macroend
 
+; customInit fires at the very start of the installer — before NSIS's built-in
+; CloseApplications check and before any page is shown. This is the only hook
+; that reliably prevents the "PeerMesh cannot be closed" dialog.
+!macro customInit
+  !insertmacro KillPeerMesh
+!macroend
+
 ; Shared macro to remove all PeerMesh artifacts
 !macro CleanPeerMeshArtifacts
   ; Electron userData (config, logs, cache)
@@ -73,9 +80,7 @@
 !macroend
 
 !macro customInstall
-  DetailPrint "Stopping existing PeerMesh instance..."
-  !insertmacro KillPeerMesh
-
+  ; Process already killed in customInit (which runs before NSIS's CloseApplications check)
   ; Uninstall previous version silently if registry entry exists
   ReadRegStr $R0 HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\PeerMesh" "UninstallString"
   ${If} $R0 != ""

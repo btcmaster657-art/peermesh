@@ -152,11 +152,12 @@ export async function POST(req: Request) {
   })
 
   await adminClient.from('session_accountability').insert({
-    session_id: session.id,
-    requester_id: user.id,
+    session_id:       session.id,
+    requester_id:     user.id,
     provider_country: country,
-    bytes_used: 0,
-    signed_receipt: receipt,
+    bytes_used:       0,
+    started_at:       new Date().toISOString(),
+    signed_receipt:   receipt,
   })
 
   await adminClient

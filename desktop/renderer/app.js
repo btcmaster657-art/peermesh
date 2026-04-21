@@ -190,7 +190,7 @@ async function savePrivateShare(payload) {
 function getSlotWarning(slots) {
   if (slots > 16) return 'Very high resource usage - recommended for servers or dedicated machines only.'
   if (slots > 8) return 'High resource usage - ensure a stable connection.'
-  return ''
+  return null
 }
 
 function renderSlots(configured, slots) {
@@ -218,7 +218,7 @@ function renderSlots(configured, slots) {
 
   summary.textContent = `${active} / ${configured} slots active`
   const warningText = getSlotWarning(configured)
-  warning.textContent = warningText
+  warning.textContent = warningText ?? ''
   warning.style.display = warningText ? 'block' : 'none'
 }
 
@@ -427,7 +427,7 @@ async function startDeviceFlow() {
         copyBtn.style.borderColor = 'var(--accent)'
         setTimeout(() => {
           copyBtn.textContent = 'COPY CODE'
-          copyBtn.style.color = ''
+          copyBtn.style.color = 'var(--text)'
           copyBtn.style.borderColor = ''
         }, 2000)
       }).catch(() => {})
@@ -833,7 +833,7 @@ document.getElementById('copy-private-share').addEventListener('click', async ()
 document.getElementById('private-share-expiry').addEventListener('change', async (event) => {
   privateShareExpiry = event.target.value
   renderPrivateShare()
-  if (privateShare?.enabled) {
+  if (privateShare?.enabled && !privateShareSaving) {
     await savePrivateShare({ enabled: true, expiryHours: privateShareExpiry })
   }
 })

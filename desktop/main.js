@@ -30,11 +30,6 @@ const log = {
   plain: (msg, level = 'info') => _write(level.toUpperCase().padEnd(5), 'GENERAL', msg, null),
 }
 
-// Backwards-compat shim so existing `log('msg')` calls still work
-function legacyLog(...args) {
-  const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ')
-  _write('INFO', 'GENERAL', msg, null)
-}
 // Named aliases used throughout the file
 const logState = (label) => {
   const activeSlots = slotStates.filter(slot => slot.running).length
@@ -512,6 +507,7 @@ async function setDailyShareLimit(limitMb) {
   }
 
   _savingDailyLimit = true
+  try {
   logRequest('POST', `${API_BASE}/api/user/sharing`, { dailyLimitMb: normalizedLimit })
   const res = await fetch(`${API_BASE}/api/user/sharing`, {
     method: 'POST',
@@ -522,10 +518,8 @@ async function setDailyShareLimit(limitMb) {
   logResponse('POST', `${API_BASE}/api/user/sharing`, res.status)
 
   const data = await res.json().catch(() => ({}))
-  _savingDailyLimit = false
   if (res.status === 401 || res.status === 403) {
-    await clearDesktopAuth(`daily_limit_${res.status}`)
-    throw new Error('Session expired - please sign in again')
+    throw new Error('Could not save daily limit - please try again')
   }
   if (!res.ok || data.error) {
     throw new Error(data.error || 'Could not update daily limit')
@@ -540,6 +534,9 @@ async function setDailyShareLimit(limitMb) {
   return {
     dailyShareLimitMb: config.dailyShareLimitMb,
     state: getPublicState(),
+  }
+  } finally {
+    _savingDailyLimit = false
   }
 }
 
@@ -957,7 +954,6 @@ function isAllowed(hostname) {
 function addBytes(slot, bytes) {
   slot.sessionBytes += bytes
   syncAggregateState()
-  flushStats(bytes)
   enforceLocalLimit()
 }
 
@@ -1019,8 +1015,6 @@ async function handleFetch(slot, request) {
 }
 
 // â”€â”€ Relay â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-let heartbeatTimer = null
 
 function stopHeartbeat(slot) {
   if (slot?.heartbeatTimer) { clearInterval(slot.heartbeatTimer); slot.heartbeatTimer = null }
@@ -1684,7 +1678,7 @@ function showNotification(title, body) {
   if (Notification.isSupported()) new Notification({ title, body, silent: true }).show()
 }
 
-function requestAppQuit(reason = 'quit', { forceExitMs = 4000 } = {}) {
+function requestAppQuit(reason = 'quit', { forceExitMs = 2000 } = {}) {
   if (_quitRequested) return
   _quitRequested = true
   log.info('PROCESS', 'requestAppQuit', { reason })
@@ -1776,7 +1770,8 @@ ipcMain.handle('open-auth', async (_, url) => {
 })
 
 ipcMain.handle('get-state', () => {
-  const state = { ...getPublicState(), config: { ...getPublicState().config, hasAcceptedProviderTerms: config.hasAcceptedProviderTerms ?? false } }
+  const publicState = getPublicState()
+  const state = { ...publicState, config: { ...publicState.config, hasAcceptedProviderTerms: config.hasAcceptedProviderTerms ?? false } }
   logIpc('get-state', { running: state.running, shareEnabled: state.shareEnabled })
   return state
 })
@@ -1977,7 +1972,6 @@ async function bootstrapDesktopApp() {
   tray.on('click', showWindow)
   updateTray()
 
-  const net = require('net')
   const tester = net.createServer()
   tester.once('error', () => {
     log.warn('PORT', `port ${CONTROL_PORT} in use â€” CLI owns it, desktop binding to PEER_PORT ${PEER_PORT}`)

@@ -2,26 +2,48 @@
 
 const API = 'https://peermesh-beta.vercel.app'
 
-const COUNTRIES = [
-  { code: 'NG', flag: '🇳🇬', name: 'Nigeria' },
-  { code: 'GB', flag: '🇬🇧', name: 'UK' },
-  { code: 'US', flag: '🇺🇸', name: 'USA' },
-  { code: 'KE', flag: '🇰🇪', name: 'Kenya' },
-  { code: 'ZA', flag: '🇿🇦', name: 'S.Africa' },
-  { code: 'DE', flag: '🇩🇪', name: 'Germany' },
-  { code: 'CA', flag: '🇨🇦', name: 'Canada' },
-  { code: 'AU', flag: '🇦🇺', name: 'Australia' },
-  { code: 'BR', flag: '🇧🇷', name: 'Brazil' },
-  { code: 'JP', flag: '🇯🇵', name: 'Japan' },
-  { code: 'RW', flag: '🇷🇼', name: 'Rwanda' },
-  { code: 'GH', flag: '🇬🇭', name: 'Ghana' },
-]
+// Countries — loaded from DB with pagination, error handling and retry
+const COUNTRIES_PAGE_SIZE = 30
+let countriesData = []
+let countriesPage = 1
+let countriesTotalPages = 1
+let countriesLoading = false
+let countriesError = false
+let countriesSearch = ''
+let countriesSearchTimer = null
 
-const? getHelperMismatchError(helper) = 'This desktop app is signed in as a different user. Sign out of the desktop app first.'
+async function loadCountries(page = 1, search = '') {
+  countriesLoading = true
+  countriesError = false
+  render()
+  try {
+    const qs = new URLSearchParams({ page: String(page), limit: String(COUNTRIES_PAGE_SIZE) })
+    if (search) qs.set('q', search)
+    const res = await fetch(`${API}/api/countries?${qs}`)
+    if (!res.ok) throw new Error('failed')
+    const data = await res.json()
+    countriesData = data.countries ?? []
+    countriesTotalPages = data.pages ?? 1
+    countriesPage = page
+    // Auto-select IP-detected country on first load
+    if (page === 1 && !search && data.detectedCountry && !state.selectedCountry) {
+      const found = countriesData.find(c => c.code === data.detectedCountry)
+      if (found) {
+        state.selectedCountry = found.code
+        chrome.storage.local.set({ selectedCountry: found.code })
+      }
+    }
+  } catch {
+    countriesError = true
+  } finally {
+    countriesLoading = false
+    render()
+  }
+}
 
-function getHelperMismatchError(helper = state.helper) {
-  const source = helper?.source === 'cli' ? 'CLI' : 'desktop app'
-  return `This ${source} is signed in as a different user. Sign out of the ${source} first.`
+function getFlagForCountry(code) {
+  const found = countriesData.find(c => c.code === code)
+  return found?.flag ?? '🌍'
 }
 
 function getHelperMismatchError(helper = state.helper) {
@@ -153,6 +175,8 @@ async function init() {
   await initLogPanel()
 
   if (!state.user) startAuthPolling()
+  // Load countries for the country picker
+  loadCountries(1, '')
 }
 
 // ── Auth polling ──────────────────────────────────────────────────────────────
@@ -204,7 +228,7 @@ async function loadPrivateShareState(baseDeviceId) {
 
 async function savePrivateShareState(input) {
   if (helperOwnerMismatch()) {
-    state.error =? getHelperMismatchError(helper)
+    state.error = getHelperMismatchError()
     render()
     return
   }
@@ -453,18 +477,36 @@ function renderDashboard(app) {
     ` : `
     <div class="section">
       <div class="section-label">Browse as...</div>
-      <div class="country-grid" id="countryGrid" style="${state.connecting ? 'pointer-events:none;opacity:0.5' : ''}">
-        ${COUNTRIES.map(c => {
-          const count = state.peerCounts[c.code] ?? 0
-          return `
-          <button class="country-btn ${selectedCountry === c.code ? 'selected' : ''} ${count === 0 ? 'no-peers' : ''}"
-                  data-code="${c.code}">
-            <span class="flag">${c.flag}</span>
-            <span class="name">${c.name}</span>
-            <span class="peers">${count > 0 ? count + ' devices' : 'no devices'}</span>
-          </button>`
-        }).join('')}
-      </div>
+      <input id="countrySearchInput" value="${countriesSearch}" placeholder="Search country..." style="width:100%;padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-family:'Courier New',monospace;font-size:11px;margin-bottom:8px;box-sizing:border-box" />
+      ${countriesLoading
+        ? `<div style="display:flex;align-items:center;gap:8px;padding:12px;color:var(--muted);font-family:'Courier New',monospace;font-size:11px">
+             <span style="display:inline-block;width:10px;height:10px;border:2px solid var(--border);border-top-color:#00ff88;border-radius:50%;animation:spin 0.7s linear infinite"></span>
+             LOADING COUNTRIES...
+           </div>`
+        : countriesError
+          ? `<div style="display:flex;align-items:center;justify-content:space-between;padding:10px;background:rgba(255,68,102,0.08);border:1px solid rgba(255,68,102,0.25);border-radius:8px">
+               <span style="color:#ff6060;font-size:11px">Could not load countries</span>
+               <button id="retryCountriesBtn" style="background:none;border:none;color:#00ff88;font-family:'Courier New',monospace;font-size:10px;cursor:pointer">RETRY</button>
+             </div>`
+          : `<div class="country-grid" id="countryGrid" style="${state.connecting ? 'pointer-events:none;opacity:0.5' : ''}">
+               ${countriesData.map(c => {
+                 const count = state.peerCounts[c.code] ?? 0
+                 return `
+                 <button class="country-btn ${selectedCountry === c.code ? 'selected' : ''} ${count === 0 ? 'no-peers' : ''}"
+                         data-code="${c.code}">
+                   <span class="flag">${c.flag}</span>
+                   <span class="name">${c.name}</span>
+                   <span class="peers">${count > 0 ? count + ' devices' : 'no devices'}</span>
+                 </button>`
+               }).join('')}
+             </div>
+             ${countriesTotalPages > 1 ? `
+             <div style="display:flex;align-items:center;justify-content:space-between;margin-top:8px">
+               <button id="countriesPrevBtn" ${countriesPage <= 1 ? 'disabled' : ''} style="background:none;border:1px solid var(--border);color:${countriesPage <= 1 ? 'var(--muted)' : 'var(--text)'};border-radius:6px;padding:4px 10px;font-family:'Courier New',monospace;font-size:10px;cursor:${countriesPage <= 1 ? 'not-allowed' : 'pointer'}">← PREV</button>
+               <span style="font-family:'Courier New',monospace;font-size:10px;color:var(--muted)">${countriesPage} / ${countriesTotalPages}</span>
+               <button id="countriesNextBtn" ${countriesPage >= countriesTotalPages ? 'disabled' : ''} style="background:none;border:1px solid var(--border);color:${countriesPage >= countriesTotalPages ? 'var(--muted)' : 'var(--text)'};border-radius:6px;padding:4px 10px;font-family:'Courier New',monospace;font-size:10px;cursor:${countriesPage >= countriesTotalPages ? 'not-allowed' : 'pointer'}">NEXT →</button>
+             </div>` : ''}`
+      }
     </div>
     <div class="section">
       <div class="section-label">Private code</div>
@@ -599,7 +641,7 @@ function renderDashboard(app) {
       const helperNotice = document.createElement('div')
       helperNotice.style.cssText = 'font-size:11px;color:#ff6060;padding:6px 0 2px'
       helperNotice.innerHTML = helperMismatch
-        ?? getHelperMismatchError(helper)
+        ? getHelperMismatchError(helper)
         : 'Sharing is not ready yet. <a id="installHelperBtn" href="#" style="color:#00ff88;font-family:\'Courier New\',monospace;font-size:11px;text-decoration:underline">INSTALL DESKTOP</a> or run <code style="font-family:\'Courier New\',monospace;font-size:10px;color:#00ff88">npx peermesh-provider</code> for multi-slot tunnel sharing.'
       shareSection.appendChild(helperNotice)
     }
@@ -609,6 +651,14 @@ function renderDashboard(app) {
 
   document.getElementById('dismissErrorBtn')?.addEventListener('click', () => { state.error = null; render() })
   document.getElementById('retryConnectBtn')?.addEventListener('click', () => { state.error = null; connectSession() })
+  document.getElementById('retryCountriesBtn')?.addEventListener('click', () => loadCountries(countriesPage, countriesSearch))
+  document.getElementById('countriesPrevBtn')?.addEventListener('click', () => loadCountries(countriesPage - 1, countriesSearch))
+  document.getElementById('countriesNextBtn')?.addEventListener('click', () => loadCountries(countriesPage + 1, countriesSearch))
+  document.getElementById('countrySearchInput')?.addEventListener('input', (e) => {
+    countriesSearch = e.target.value
+    clearTimeout(countriesSearchTimer)
+    countriesSearchTimer = setTimeout(() => loadCountries(1, countriesSearch), 300)
+  })
   document.querySelectorAll('.country-btn').forEach(btn => {
     btn.onclick = () => {
       state.selectedCountry = state.selectedCountry === btn.dataset.code ? null : btn.dataset.code
@@ -827,7 +877,7 @@ async function disconnectSession() {
 async function toggleSharing(on) {
   if (state.shareToggling) return
   if (helperOwnerMismatch()) {
-    state.error =? getHelperMismatchError(helper)
+    state.error = getHelperMismatchError()
     render()
     return
   }
@@ -909,7 +959,7 @@ async function toggleSharing(on) {
 async function updateConnectionSlots(slots) {
   if (state.slotUpdating) return
   if (helperOwnerMismatch()) {
-    state.error =? getHelperMismatchError(helper)
+    state.error = getHelperMismatchError()
     render()
     return
   }
@@ -947,7 +997,7 @@ async function updateConnectionSlots(slots) {
 async function saveDailyLimit(limitMb) {
   if (state.dailyLimitSaving) return
   if (helperOwnerMismatch()) {
-    state.error =? getHelperMismatchError(helper)
+    state.error = getHelperMismatchError()
     render()
     return
   }

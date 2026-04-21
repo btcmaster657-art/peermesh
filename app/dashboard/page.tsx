@@ -4,9 +4,12 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 import { checkDesktop, syncDesktopAuth, startDesktopSharing, stopDesktopSharing, setDesktopConnectionSlots } from '@/lib/agent-client'
-import { COUNTRIES, formatBytes, getFlagForCountry } from '@/lib/utils'
+import { formatBytes } from '@/lib/utils'
 import type { Profile, PeerAvailability } from '@/lib/types'
 import type { DesktopState } from '@/lib/agent-client'
+
+type Country = { code: string; name: string; flag: string }
+const COUNTRIES_PAGE_SIZE = 20
 
 
 function CliSection({ label, cmd }: { label: string; cmd: string }) {
@@ -100,6 +103,45 @@ export default function Dashboard() {
   const [extVersion, setExtVersion] = useState<string | null>(null)
   const [showCliDocs, setShowCliDocs] = useState(false)
   const [cliDocTab, setCliDocTab] = useState<'windows' | 'mac' | 'linux'>('windows')
+
+  // ── Countries from DB ────────────────────────────────────────────────────────────────────
+  const [countries, setCountries]             = useState<Country[]>([])
+  const [countriesPage, setCountriesPage]     = useState(1)
+  const [countriesTotalPages, setCountriesTotalPages] = useState(1)
+  const [countriesLoading, setCountriesLoading] = useState(false)
+  const [countriesError, setCountriesError]   = useState(false)
+  const [countriesSearch, setCountriesSearch] = useState('')
+  const countriesSearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const loadCountries = useCallback(async (page: number, search: string) => {
+    setCountriesLoading(true)
+    setCountriesError(false)
+    try {
+      const qs = new URLSearchParams({ page: String(page), limit: String(COUNTRIES_PAGE_SIZE) })
+      if (search) qs.set('q', search)
+      const res = await fetch(`/api/countries?${qs}`)
+      if (!res.ok) throw new Error('failed')
+      const data = await res.json()
+      setCountries(data.countries ?? [])
+      setCountriesTotalPages(data.pages ?? 1)
+      setCountriesPage(page)
+      // Auto-select IP-detected country on first load
+      if (page === 1 && !search && data.detectedCountry && !selectedCountry) {
+        const found = (data.countries as Country[]).find((c: Country) => c.code === data.detectedCountry)
+        if (found) setSelectedCountry(found.code)
+      }
+    } catch {
+      setCountriesError(true)
+    } finally {
+      setCountriesLoading(false)
+    }
+  }, [selectedCountry])
+
+  useEffect(() => { loadCountries(1, '') }, [])
+
+  function getFlagForCountry(code: string): string {
+    return countries.find(c => c.code === code)?.flag ?? '🌍'
+  }
 
   // â”€â”€ Network status â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   useEffect(() => {
@@ -772,24 +814,56 @@ export default function Dashboard() {
 
       {/* Country picker */}
       <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '12px', padding: '16px', marginBottom: '16px', opacity: connecting ? 0.5 : 1, pointerEvents: connecting ? 'none' : 'auto' }}>
-        <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--muted)', letterSpacing: '1px', marginBottom: '14px' }}>BROWSE AS...</div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '8px' }}>
-          {COUNTRIES.map(c => {
-            const count = peerCounts[c.code] ?? 0
-            const selected = selectedCountry === c.code
-            return (
-              <button
-                key={c.code}
-                onClick={() => { const next = selected ? null : c.code; setSelectedCountry(next); setConnectError(null); if (next) setPrivateCodeInput('') }}
-                style={{ background: selected ? 'var(--accent-dim)' : 'var(--bg)', border: `1px solid ${selected ? 'var(--accent)' : 'var(--border)'}`, borderRadius: '8px', padding: '10px 6px', cursor: 'pointer', textAlign: 'center', transition: 'all 0.15s' }}
-              >
-                <div style={{ fontSize: '20px', marginBottom: '3px' }}>{c.flag}</div>
-                <div style={{ fontSize: '10px', color: 'var(--text)', marginBottom: '2px' }}>{c.name}</div>
-                <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '9px', color: count > 0 ? 'var(--accent)' : 'var(--muted)' }}>{count} devices</div>
-              </button>
-            )
-          })}
-        </div>
+        <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--muted)', letterSpacing: '1px', marginBottom: '10px' }}>BROWSE AS...</div>
+        <input
+          value={countriesSearch}
+          onChange={(e) => {
+            const q = e.target.value
+            setCountriesSearch(q)
+            if (countriesSearchTimer.current) clearTimeout(countriesSearchTimer.current)
+            countriesSearchTimer.current = setTimeout(() => loadCountries(1, q), 300)
+          }}
+          placeholder="Search country..."
+          style={{ width: '100%', padding: '8px 10px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text)', fontFamily: 'var(--font-geist-mono)', fontSize: '11px', marginBottom: '10px', boxSizing: 'border-box' }}
+        />
+        {countriesLoading ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '12px', color: 'var(--muted)', fontFamily: 'var(--font-geist-mono)', fontSize: '11px' }}>
+            <span style={{ display: 'inline-block', width: '10px', height: '10px', border: '2px solid var(--border)', borderTopColor: 'var(--accent)', borderRadius: '50%', animation: 'spin 0.7s linear infinite' }} />
+            LOADING COUNTRIES...
+          </div>
+        ) : countriesError ? (
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px', background: 'rgba(255,68,102,0.08)', border: '1px solid rgba(255,68,102,0.25)', borderRadius: '8px' }}>
+            <span style={{ color: '#ff6060', fontSize: '12px' }}>Could not load countries</span>
+            <button onClick={() => loadCountries(countriesPage, countriesSearch)} style={{ background: 'none', border: 'none', color: 'var(--accent)', fontFamily: 'var(--font-geist-mono)', fontSize: '10px', cursor: 'pointer' }}>RETRY</button>
+          </div>
+        ) : (
+          <>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '8px' }}>
+              {countries.map(c => {
+                const count = peerCounts[c.code] ?? 0
+                const selected = selectedCountry === c.code
+                return (
+                  <button
+                    key={c.code}
+                    onClick={() => { const next = selected ? null : c.code; setSelectedCountry(next); setConnectError(null); if (next) setPrivateCodeInput('') }}
+                    style={{ background: selected ? 'var(--accent-dim)' : 'var(--bg)', border: `1px solid ${selected ? 'var(--accent)' : 'var(--border)'}`, borderRadius: '8px', padding: '10px 6px', cursor: 'pointer', textAlign: 'center', transition: 'all 0.15s' }}
+                  >
+                    <div style={{ fontSize: '20px', marginBottom: '3px' }}>{c.flag}</div>
+                    <div style={{ fontSize: '10px', color: 'var(--text)', marginBottom: '2px' }}>{c.name}</div>
+                    <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '9px', color: count > 0 ? 'var(--accent)' : 'var(--muted)' }}>{count} devices</div>
+                  </button>
+                )
+              })}
+            </div>
+            {countriesTotalPages > 1 && (
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '10px' }}>
+                <button onClick={() => loadCountries(countriesPage - 1, countriesSearch)} disabled={countriesPage <= 1} style={{ background: 'none', border: '1px solid var(--border)', color: countriesPage <= 1 ? 'var(--muted)' : 'var(--text)', borderRadius: '6px', padding: '5px 12px', fontFamily: 'var(--font-geist-mono)', fontSize: '10px', cursor: countriesPage <= 1 ? 'not-allowed' : 'pointer' }}>← PREV</button>
+                <span style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--muted)' }}>{countriesPage} / {countriesTotalPages}</span>
+                <button onClick={() => loadCountries(countriesPage + 1, countriesSearch)} disabled={countriesPage >= countriesTotalPages} style={{ background: 'none', border: '1px solid var(--border)', color: countriesPage >= countriesTotalPages ? 'var(--muted)' : 'var(--text)', borderRadius: '6px', padding: '5px 12px', fontFamily: 'var(--font-geist-mono)', fontSize: '10px', cursor: countriesPage >= countriesTotalPages ? 'not-allowed' : 'pointer' }}>NEXT →</button>
+              </div>
+            )}
+          </>
+        )}
       </div>
 
       {/* Connect error */}

@@ -240,10 +240,10 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: true, private_share: serializePrivateShare(data) })
   }
 
-  // Web dashboard: { isSharing: boolean } or { dailyLimitMb: number | null }
-  const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  // Web dashboard or desktop: { isSharing: boolean } or { dailyLimitMb: number | null }
+  // resolveUserId accepts Supabase cookie, Supabase Bearer token, AND desktop device token
+  const userId = await resolveUserId(req)
+  if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   // Setting daily share limit
   if ('dailyLimitMb' in body) {
@@ -251,7 +251,7 @@ export async function POST(req: Request) {
     if (limitMb === undefined) {
       return NextResponse.json({ error: 'dailyLimitMb must be null or at least 1024 MB (1 GB)' }, { status: 400 })
     }
-    await adminClient.from('profiles').update({ daily_share_limit_mb: limitMb ?? null }).eq('id', user.id)
+    await adminClient.from('profiles').update({ daily_share_limit_mb: limitMb ?? null }).eq('id', userId)
     return NextResponse.json({ ok: true, daily_share_limit_mb: limitMb ?? null })
   }
 
@@ -259,7 +259,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'isSharing must be boolean' }, { status: 400 })
   }
 
-  await adminClient.from('profiles').update({ is_sharing: body.isSharing }).eq('id', user.id)
+  await adminClient.from('profiles').update({ is_sharing: body.isSharing }).eq('id', userId)
   return NextResponse.json({ success: true, isSharing: body.isSharing })
 }
 
