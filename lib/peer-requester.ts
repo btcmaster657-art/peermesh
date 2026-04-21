@@ -110,10 +110,11 @@ export class PeerRequester {
 
           if (msg.type === 'session_reconnected') {
             this.agentSessionId = msg.sessionId
+            const reconnectRelay = msg.relayEndpoint || relay
             this.sessionInfo = {
               sessionId: msg.sessionId,
               country: msg.country ?? country,
-              relayEndpoint: relay,
+              relayEndpoint: reconnectRelay,
             }
             this.onReconnect?.(this.sessionInfo, msg.attempt)
           }

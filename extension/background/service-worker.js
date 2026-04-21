@@ -1010,14 +1010,17 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
       // ── Auto-reconnect: relay found a new provider transparently ─────────
       if (msg.type === 'session_reconnected') {
         agentSessionId = msg.sessionId
-        if (currentSession) currentSession = { ...currentSession, sessionId: msg.sessionId }
-        log('info', `[CONNECT] session_reconnected attempt=${msg.attempt} newSession=${msg.sessionId?.slice(0,8)}`)
+        // Use the relayEndpoint from the message if provided — it's the relay the
+        // requester is already on, so the desktop proxy-session must point there.
+        const reconnectRelay = msg.relayEndpoint || relayEndpoint
+        if (currentSession) currentSession = { ...currentSession, sessionId: msg.sessionId, relayEndpoint: reconnectRelay }
+        log('info', `[CONNECT] session_reconnected attempt=${msg.attempt} newSession=${msg.sessionId?.slice(0,8)} relay=${reconnectRelay}`)
 
-        // Update desktop local proxy with new sessionId so tunnels route correctly
+        // Update desktop local proxy with new sessionId and correct relayEndpoint
         fetch(`http://127.0.0.1:${CONTROL_PORT}/proxy-session`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sessionId: msg.sessionId, relayEndpoint, country: msg.country }),
+          body: JSON.stringify({ sessionId: msg.sessionId, relayEndpoint: reconnectRelay, country: msg.country }),
         }).catch(() => {})
 
         // Reapply header rules if provider country changed

@@ -37,7 +37,7 @@ async function getLiveRelays() {
 const CONFIG_DIR = join(homedir(), '.peermesh')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
 const SHARED_IDENTITY_FILE = join(CONFIG_DIR, 'machine-identity.json')
-const VERSION     = '1.0.43'
+const VERSION     = '1.0.44'
 const DEBUG_LOG = join(homedir(), 'Desktop', 'peermesh-debug.log')
 
 const CONTROL_PORT = 7654
@@ -282,6 +282,7 @@ function createSlotState(index) {
     requestsHandled: 0,
     connectedAt: null,
     activeTunnels: new Map(),
+    lastRelay: null,
   }
 }
 
@@ -717,7 +718,7 @@ async function handleFetch(slot, request, limitBytes) {
   }
 }
 
-function attachSlotSocketHandlers(slot, limitBytes, ws) {
+function attachSlotSocketHandlers(slot, limitBytes, ws, relay) {
   ws.on('open', () => {
     // Stale socket: stopRelay ran or a newer socket replaced this one
     if (!config.shareEnabled || slot.ws !== ws) {
@@ -765,6 +766,7 @@ function attachSlotSocketHandlers(slot, limitBytes, ws) {
 
       switch (msg.type) {
         case 'registered':
+          slot.lastRelay = relay
           if (config.token) persistSharingState(true)
           printStatus(limitBytes)
           break
@@ -855,6 +857,14 @@ function attachSlotSocketHandlers(slot, limitBytes, ws) {
   })
 }
 
+function getProviderRelay(relays) {
+  // All slots must connect to the same relay — relay state is process-local so a
+  // requester can only see providers registered on the same relay instance.
+  // Anchor to slot 0's lastRelay; fall back to relays[0] if it left the live list.
+  const anchor = slotStates[0]?.lastRelay
+  return anchor && relays.includes(anchor) ? anchor : relays[0]
+}
+
 function connectSlot(slot, limitBytes) {
   if (!config.token || !config.userId) return
   if (slot.ws && (slot.ws.readyState === WebSocket.OPEN || slot.ws.readyState === WebSocket.CONNECTING)) return
@@ -862,11 +872,11 @@ function connectSlot(slot, limitBytes) {
     // If stopRelay ran while awaiting, or another call already created a socket, bail
     if (!config.shareEnabled) return
     if (slot.ws && (slot.ws.readyState === WebSocket.OPEN || slot.ws.readyState === WebSocket.CONNECTING)) return
-    const relay = relays[slot.index % relays.length]
+    const relay = getProviderRelay(relays)
     slotLog(slot, `connecting to relay ${relay}`)
     const ws = new WebSocket(relay)
     slot.ws = ws
-    attachSlotSocketHandlers(slot, limitBytes, ws)
+    attachSlotSocketHandlers(slot, limitBytes, ws, relay)
   }).catch(e => {
     clog.warn('RELAY', `connectSlot getLiveRelays error`, { slot: slot.index, err: e.message })
     if (config.shareEnabled && !_userStopped) {

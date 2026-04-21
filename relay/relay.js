@@ -235,11 +235,14 @@ async function attemptReconnect(requesterWs, droppedSession) {
 
   const newSessionId = createSession(requesterWs, nextProvider, country, dbSessionId)
 
-  // Tell requester a reconnect happened so extension/desktop can update proxySession
+  // Tell requester a reconnect happened so extension/desktop can update proxySession.
+  // Include relayEndpoint so the requester can update its /proxy-session correctly —
+  // the requester is already on this relay (its WS never moved), so requesterWs.relayUrl is authoritative.
   send(requesterWs, {
     type: 'session_reconnected',
     sessionId: newSessionId,
     country,
+    relayEndpoint: requesterWs.relayUrl ?? '',
     attempt: (reconnectAttempts ?? 0) + 1,
   })
 }
@@ -363,6 +366,9 @@ wss.on('connection', (ws, req) => {
   const peerId = randomUUID()
   const clientIp = req.headers['x-forwarded-for'] ?? req.socket.remoteAddress
 
+  const host = req.headers['host'] ?? ''
+  const relayUrl = host ? `wss://${host}` : ''
+
   Object.assign(ws, {
     peerId, role: null, country: null, userId: null,
     trustScore: 50, sessionId: null, providerKind: 'unknown',
@@ -370,6 +376,7 @@ wss.on('connection', (ws, req) => {
     supportsHttp: true, supportsTunnel: false,
     privateOnly: false,
     bytesTransferred: 0, isAlive: true,
+    relayUrl,
     clientIp: req.headers['fly-client-ip'] || (req.headers['x-forwarded-for']?.split(',')[0].trim()) || req.socket.remoteAddress || null,
   })
 

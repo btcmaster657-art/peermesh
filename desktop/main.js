@@ -262,6 +262,7 @@ function createSlotState(index) {
     requestsHandled: 0,
     connectedAt: null,
     activeTunnels: new Map(),
+    lastRelay: null,
   }
 }
 
@@ -1054,11 +1055,19 @@ function sendHeartbeat(slot) {
     .catch(e => log.warn('HEARTBEAT', 'PUT error', { err: e.message, slot: slot.index }))
 }
 
+function getProviderRelay(relays) {
+  // All slots must connect to the same relay so a requester on that relay can
+  // see all slots from this provider. Use slot 0's lastRelay as the anchor —
+  // if it's still in the live list every slot uses it, otherwise pick relays[0].
+  const anchor = slotStates[0]?.lastRelay
+  return anchor && relays.includes(anchor) ? anchor : relays[0]
+}
+
 function connectSlot(slot) {
   if (!config.token || !config.userId) return
   if (slot.ws && (slot.ws.readyState === WebSocket.OPEN || slot.ws.readyState === WebSocket.CONNECTING)) return
   getLiveRelays().then(relays => {
-    const relay = relays[slot.index % relays.length]
+    const relay = getProviderRelay(relays)
     log.info('RELAY', `${slotPrefix(slot)} connecting`, { deviceId: slot.deviceId, relay })
     slot.ws = new WebSocket(relay)
 
@@ -1106,6 +1115,7 @@ function connectSlot(slot) {
 
       if (msg.type === 'registered') {
         slot.running = true
+        slot.lastRelay = relay
         slot.connectedAt = new Date().toISOString()
         syncAggregateState()
         if (slot.index === 0) {
@@ -1172,6 +1182,10 @@ function connectSlot(slot) {
     slot.ws = null
     syncAggregateState()
     updateTray()
+    // Clear proxySession immediately so Chrome gets 503 on new CONNECT requests
+    // rather than a tunnel that silently hangs waiting for a provider on the old relay.
+    // It will be restored when session_reconnected arrives via the extension.
+    if (proxySession) { proxySession = null; log.debug('RELAY', `${slotPrefix(slot)} cleared proxySession on WS close`) }
     if (code !== 1000 && !_userStopped && config.shareEnabled) {
       slot.reconnectTimer = setTimeout(() => connectSlot(slot), slot.reconnectDelay)
       slot.reconnectDelay = Math.min(slot.reconnectDelay * 2, 30000)
