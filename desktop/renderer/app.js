@@ -7,6 +7,7 @@ const startupBusy = {
 
 let devicePollInterval = null
 let deviceFlowActive = false
+let signingIn = false
 let togglingShare = false // 'idle' | 'starting' | 'stopping'
 let _shareState = 'idle'
 function setShareState(s) { _shareState = s; togglingShare = s !== 'idle' }
@@ -365,6 +366,7 @@ let _deviceFlowStartedAt = 0
 
 async function startDeviceFlow() {
   if (typeof api.requestDeviceCode !== 'function') return
+  if (signingIn) return
   // If a flow is active but the code was never shown and it's been >15s, restart it
   const codeEl = document.getElementById('device-code-display')
   const codeVisible = codeEl && codeEl.style.display !== 'none' && codeEl.textContent
@@ -463,6 +465,7 @@ async function startDeviceFlow() {
         waiting.style.display = 'flex'
         waiting.innerHTML = '<span style="display:inline-block;width:10px;height:10px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin 0.8s linear infinite"></span> SIGNING IN...'
       }
+      signingIn = true
       const signInResult = await invoke('signIn', {
         token: poll.user.token,
         userId: poll.user.id,
@@ -470,6 +473,7 @@ async function startDeviceFlow() {
         trust: poll.user.trustScore || 50,
       })
       if (signInResult?.success === false) {
+        signingIn = false
         if (errorText) errorText.textContent = signInResult.error || 'Sign-in failed - please try again'
         if (errEl) errEl.style.display = 'block'
         if (btn) {
@@ -485,6 +489,7 @@ async function startDeviceFlow() {
         if (state?.running) break
       }
       await pollState()
+      signingIn = false
     } else if (poll.status === 'denied') {
       stopDevicePoll()
       if (codeEl) codeEl.style.display = 'none'
