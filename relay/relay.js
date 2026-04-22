@@ -169,6 +169,21 @@ function createSession(requesterWs, provider, country, dbSessionId) {
   send(provider, { type: 'session_request', sessionId })
   send(requesterWs, { type: 'session_created', sessionId })
   log(requesterWs.peerId.slice(0,8), `SESSION_CREATED id=${sessionId.slice(0,8)} provider=${provider.peerId.slice(0,8)} country=${country}`)
+
+  // If the provider doesn't respond with agent_ready within 10s, treat it as
+  // unresponsive and attempt reconnect to a different provider.
+  setTimeout(() => {
+    const session = sessions.get(sessionId)
+    if (!session || session.providerUserId) return // already got agent_ready
+    if (requesterWs.readyState !== WebSocket.OPEN) return // requester already gone
+    log(requesterWs.peerId.slice(0,8), `SESSION_AGENT_READY_TIMEOUT sessionId=${sessionId.slice(0,8)} provider=${provider.peerId.slice(0,8)}`)
+    // Evict the unresponsive provider slot and reconnect
+    provider.sessionId = null
+    requesterWs.sessionId = null
+    sessions.delete(sessionId)
+    attemptReconnect(requesterWs, { ...session, providerId: provider.peerId, reconnectAttempts: 0 })
+  }, 10_000)
+
   return sessionId
 }
 

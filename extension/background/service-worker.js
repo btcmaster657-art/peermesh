@@ -1099,11 +1099,11 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
 
     setTimeout(() => {
       if (!settled) {
-        log('warn', `[CONNECT] timeout — no peer found in ${country} after 25s`)
+        log('warn', `[CONNECT] timeout — no peer found in ${country} after 15s`)
         ws.close(1000)
         settle(reject, new Error('No peer available in ' + country + ' — try again shortly'))
       }
-    }, 25000)
+    }, 15000)
   })
 }
 

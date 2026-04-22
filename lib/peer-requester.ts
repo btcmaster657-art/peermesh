@@ -172,7 +172,7 @@ export class PeerRequester {
             this.ws?.close()
             rejectOnce(new Error('No peer available in ' + country + ' - try another country'))
           }
-        }, 20_000)
+        }, 15_000)
       }
 
       tryConnect()
