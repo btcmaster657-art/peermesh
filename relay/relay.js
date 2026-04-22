@@ -425,7 +425,14 @@ async function handleMessage(ws, msg) {
           if (msg.deviceId && peer.deviceId && peer.deviceId !== msg.deviceId) continue
           if (peer.sessionId) {
             const oldSession = sessions.get(peer.sessionId)
-            if (oldSession) { oldSession.providerId = ws.peerId; ws.sessionId = peer.sessionId }
+            if (oldSession) {
+              // Transfer session ownership to the new WS before terminating the old one
+              // so cleanupSession on the old peer's close event is a no-op and does not
+              // trigger a spurious attemptReconnect that would drop the requester.
+              oldSession.providerId = ws.peerId
+              ws.sessionId = peer.sessionId
+              peer.sessionId = null  // ← prevent cleanupSession from firing on old peer close
+            }
           }
           send(peer, { type: 'error', message: 'Replaced by new connection' })
           peer.terminate()
@@ -521,7 +528,21 @@ async function handleMessage(ws, msg) {
       if (!agentSession) break
       const requester = peers.get(agentSession.requesterId)
       if (requester) {
-        send(requester, { type: 'agent_session_ready', sessionId: msg.sessionId })
+        // If providerUserId is already set on the session, agent_ready was already
+        // processed once — this is a provider reconnect mid-session. Send
+        // session_reconnected so the extension updates agentSessionId + proxySession
+        // rather than ignoring a duplicate agent_session_ready.
+        if (agentSession.providerUserId) {
+          send(requester, {
+            type: 'session_reconnected',
+            sessionId: msg.sessionId,
+            country: agentSession.country,
+            relayEndpoint: requester.relayUrl ?? '',
+            attempt: 1,
+          })
+        } else {
+          send(requester, { type: 'agent_session_ready', sessionId: msg.sessionId })
+        }
         log(ws.peerId.slice(0,8), `AGENT_READY session=${msg.sessionId.slice(0,8)} → requester notified`)
       }
       agentSession.providerUserId = ws.userId
