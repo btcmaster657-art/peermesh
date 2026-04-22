@@ -80,7 +80,11 @@ export class PeerRequester {
       }
 
       const tryConnect = () => {
-        const relay = fallbackList[attemptIndex % fallbackList.length]
+        if (attemptIndex >= fallbackList.length) {
+          rejectOnce(new Error('No peer available in ' + country + ' - try another country'))
+          return
+        }
+        const relay = fallbackList[attemptIndex]
         this.ws = new WebSocket(relay)
 
         this.ws.onopen = () => {

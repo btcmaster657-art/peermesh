@@ -947,17 +947,16 @@ async function connectToRelay(opts, attempt = 0) {
   const liveFallbackList = await getLiveRelays()
   // Merge: server-ordered list first (health-aware), then any live relays not already included
   const fallbackList = [...new Set([...serverFallbackList, ...liveFallbackList])]
-  const relay = fallbackList[attempt % fallbackList.length]
+  if (attempt >= fallbackList.length) {
+    throw new Error('No peer available in ' + opts.country + ' — try again shortly')
+  }
+  const relay = fallbackList[attempt]
   try {
     return await connectOnce({ ...opts, relayEndpoint: relay })
   } catch (error) {
     if (attempt < fallbackList.length - 1) {
-      log('warn', `[CONNECT] relay ${relay} failed, trying next fallback`)
-      await new Promise(resolve => setTimeout(resolve, 1500))
-      return connectToRelay(opts, attempt + 1)
-    }
-    if (attempt < fallbackList.length + 1) {
-      await new Promise(resolve => setTimeout(resolve, 3000))
+      log('warn', `[CONNECT] relay ${relay} failed (${error.message}), trying next fallback`)
+      await new Promise(resolve => setTimeout(resolve, 500))
       return connectToRelay(opts, attempt + 1)
     }
     throw error
