@@ -852,6 +852,10 @@ document.getElementById('share-toggle').addEventListener('click', async () => {
   clearMainError()
   const state = await pollState() || await invoke('getState')
   const isSharing = !!(state?.running || state?.peerRunning)
+  const isStarting = !isSharing && !!state?.shareEnabled
+
+  // Already in the process of starting — ignore the click
+  if (isStarting) return
 
   if (!isSharing) {
     let accepted = !!state?.config?.hasAcceptedProviderTerms

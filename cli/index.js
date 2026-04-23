@@ -8,15 +8,9 @@ import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import http from 'http'
 import { randomUUID } from 'crypto'
-import { API_BASE as _ENV_API_BASE, RELAY_ENDPOINTS as _ENV_RELAY_ENDPOINTS } from '../lib/env.js'
 
-if (process.platform === 'win32') {
-  try { process.stdout.setEncoding('utf8') } catch {}
-  try { process.stderr.setEncoding('utf8') } catch {}
-}
+const API_BASE     = 'https://peermesh-beta.vercel.app'
 
-const API_BASE = _ENV_API_BASE
-const RELAY_FALLBACK = _ENV_RELAY_ENDPOINTS
 let _liveRelays = null
 let _liveRelaysFetchedAt = 0
 const RELAY_CONFIG_TTL = 5 * 60 * 1000
@@ -36,7 +30,7 @@ async function getLiveRelays() {
 const CONFIG_DIR = join(homedir(), '.peermesh')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
 const SHARED_IDENTITY_FILE = join(CONFIG_DIR, 'machine-identity.json')
-const VERSION     = '1.0.46'
+const VERSION     = '1.0.48'
 const DEBUG_LOG = join(homedir(), 'Desktop', 'peermesh-debug.log')
 
 const CONTROL_PORT = 7654
@@ -131,7 +125,7 @@ function banner() {
     .then(r => r.json())
     .then(d => {
       if (d.version && d.version !== VERSION) {
-        console.log(`  ! Update available: v${VERSION} â†’ v${d.version}`)
+        console.log(`  ! Update available: v${VERSION} → v${d.version}`)
         console.log(`  ! Run: npm install -g @btcmaster1000/peermesh-provider@latest`)
         console.log('')
       }
@@ -410,8 +404,13 @@ function hydratePrivateShareRows(rows) {
     return byDeviceId.get(slot.deviceId) ?? createDisabledPrivateShareRow(slot.deviceId, slot.index)
   })
 
+  // Only include extra DB rows that belong to this device's _slot_N namespace.
+  // Bare baseDeviceId rows (legacy, no _slot_N suffix) are excluded.
+  const _base = getBaseDeviceId()
   for (const row of byDeviceId.values()) {
-    if (!hydratedRows.some(candidate => candidate.device_id === row.device_id)) hydratedRows.push(row)
+    if (hydratedRows.some(r => r.device_id === row.device_id)) continue
+    if (!row.device_id.startsWith(_base + '_slot_')) continue
+    hydratedRows.push(row)
   }
 
   return hydratedRows
@@ -544,7 +543,7 @@ function enforceLocalLimit(limitBytes) {
   limitHit = true
   clog.warn('LIMIT', 'daily limit reached', { totalToday, limitBytes })
   console.log('')
-  console.log(`  Daily limit of ${formatBytes(limitBytes)} reached â€” sharing paused until midnight.`)
+  console.log(`  Daily limit of ${formatBytes(limitBytes)} reached — sharing paused until midnight.`)
   console.log('')
   stopRelay()
   const msUntilMidnight = new Date(new Date().toDateString()).getTime() + 86400000 - Date.now()
@@ -553,7 +552,7 @@ function enforceLocalLimit(limitBytes) {
     limitHit = false
     config.todaySharedBytes = 0
     saveConfig(config)
-    clog.info('LIMIT', 'midnight reset â€” resuming sharing')
+    clog.info('LIMIT', 'midnight reset — resuming sharing')
     if (config.shareEnabled) connectRelay(_controlLimitBytes)
   }, msUntilMidnight)
 }
@@ -1003,7 +1002,7 @@ function attachSlotSocketHandlers(slot, limitBytes, ws, relay) {
 }
 
 function getProviderRelay(relays) {
-  // All slots must connect to the same relay â€” relay state is process-local.
+  // All slots must connect to the same relay — relay state is process-local.
   // Use lastRelay if it's still live (sticky after first registration).
   // Rendezvous/HRW consistent hashing: adding/removing a relay only moves ~1/n
   // providers instead of reshuffling all of them (vs simple modulo).
@@ -1044,7 +1043,7 @@ function connectSlot(slot, limitBytes) {
 
 function connectRelay(limitBytes) {
   if (!config.token || !config.userId) {
-    clog.warn('RELAY', 'connectRelay skipped â€” no token/userId')
+    clog.warn('RELAY', 'connectRelay skipped — no token/userId')
     return
   }
   _userStopped = false
@@ -1088,6 +1087,16 @@ function applyConnectionSlots(nextSlots, { syncPeer = true } = {}) {
   config.privateShareActive = !!(config.privateShare?.enabled && config.privateShare?.active)
   saveConfig(config)
 
+  // Notify server to clean up stale private share slots
+  if (config.token && config.userId) {
+    fetch(`${API_BASE}/api/user/sharing`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
+      body: JSON.stringify({ connectionSlots: normalizedSlots, baseDeviceId: getBaseDeviceId() }),
+      signal: AbortSignal.timeout(3000),
+    }).catch(() => {})
+  }
+
   if (shouldResume) {
     stopRelay()
     config.shareEnabled = true
@@ -1095,7 +1104,7 @@ function applyConnectionSlots(nextSlots, { syncPeer = true } = {}) {
     connectRelay(_controlLimitBytes)
   }
 
-  // Only notify peer if we weren't called by the peer â€” prevents ping-pong loop
+  // Only notify peer if we weren't called by the peer — prevents ping-pong loop
   if (syncPeer && peerPort) {
     fetch(`http://127.0.0.1:${peerPort}/native/connection-slots`, {
       method: 'POST',
@@ -1109,8 +1118,8 @@ function applyConnectionSlots(nextSlots, { syncPeer = true } = {}) {
 }
 
 function getSlotWarning(slots) {
-  if (slots > 16) return 'Very high resource usage â€” recommended for servers or dedicated machines only.'
-  if (slots > 8) return 'High resource usage â€” ensure a stable connection.'
+  if (slots > 16) return 'Very high resource usage — recommended for servers or dedicated machines only.'
+  if (slots > 8) return 'High resource usage — ensure a stable connection.'
   return null
 }
 
@@ -1124,8 +1133,8 @@ function printStatus(limitBytes) {
     : `${formatBytes(totalToday)} today (no limit)`
   const privBadge = config.privateShareActive ? '\uD83D\uDD12 PRIVATE' : '\uD83C\uDF10 PUBLIC'
   console.log('')
-  console.log(`  Sharing active [${privBadge}] â€” ${active} / ${configured} slots active`)
-  console.log(`  ${aggregate.requestsHandled} requests â€” ${formatBytes(aggregate.bytesServed)} served`)
+  console.log(`  Sharing active [${privBadge}] — ${active} / ${configured} slots active`)
+  console.log(`  ${aggregate.requestsHandled} requests — ${formatBytes(aggregate.bytesServed)} served`)
   console.log(`  ${limitStr}`)
   if (config.privateShare?.code) console.log(`  Private code: ${config.privateShare.code}`)
   const warning = getSlotWarning(configured)
@@ -1278,13 +1287,13 @@ async function syncSlotsWithPeer(targetPort) {
     const peerSlots = state.connectionSlots ?? state.slots?.configured ?? null
     const peerRunning = !!state.running
     if (peerRunning && peerSlots && peerSlots !== getConnectionSlots()) {
-      // Peer is actively sharing â€” adopt their slot count
+      // Peer is actively sharing — adopt their slot count
       clog.info('SLOTS', 'adopting slot count from running peer', { peerSlots, ourSlots: getConnectionSlots() })
       config.connectionSlots = peerSlots
       ensureSlotStates()
       saveConfig(config)
     } else {
-      // Neither is sharing â€” we are the registrant so we win; push with _fromPeer=true so peer doesn't echo back
+      // Neither is sharing — we are the registrant so we win; push with _fromPeer=true so peer doesn't echo back
       fetch(`http://127.0.0.1:${targetPort}/native/connection-slots`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1315,7 +1324,7 @@ function startControlServer() {
         const res = await fetch(`http://127.0.0.1:${CONTROL_PORT}/native/state`, { signal: AbortSignal.timeout(1500) })
         if (res.ok) {
           const state = await res.json()
-          if (state.running) log('Desktop is sharing â€” CLI standing by')
+          if (state.running) log('Desktop is sharing — CLI standing by')
         }
       } catch {}
     })
@@ -1363,7 +1372,7 @@ async function authenticate() {
           reject(new Error('Sign-in was denied'))
         } else if (data.status === 'expired') {
           clearInterval(poll)
-          reject(new Error('Code expired â€” run again to get a new code'))
+          reject(new Error('Code expired — run again to get a new code'))
         }
       } catch {}
     }, interval * 1000)
@@ -1393,7 +1402,7 @@ function printDocs() {
   const G = '\x1b[32m', C = '\x1b[36m', R = '\x1b[0m', B = '\x1b[1m', D = '\x1b[90m'
   const h = (t) => console.log(`\n${B}${C}  ${t}${R}`)
   const row = (lbl, cmd) => { console.log(`  ${D}${lbl}${R}`); console.log(`  ${G}${cmd}${R}`) }
-  console.log(`\n${B}  PeerMesh Provider v${VERSION} — CLI Reference${R}`)
+  console.log(`\n${B}  PeerMesh Provider v${VERSION} -- CLI Reference${R}`)
   h('INSTALL')
   row('Run once (no install)',           'npx @btcmaster1000/peermesh-provider')
   row('Install globally',                'npm install -g @btcmaster1000/peermesh-provider')
@@ -1405,7 +1414,7 @@ function printDocs() {
   row('Skip terms prompt (CI/scripts)',  'peermesh-provider --serve')
   row('Verbose debug logs to console',   'peermesh-provider --debug')
   row('Sign out and revoke device',      'peermesh-provider --reset')
-  h('CONNECTION SLOTS  (1–32, default 1)')
+  h('CONNECTION SLOTS  (1�32, default 1)')
   row('Run with 4 concurrent slots',     'peermesh-provider --slots 4')
   row('Run with 16 slots',               'peermesh-provider --slots 16')
   row('--slot is an alias for --slots',  'peermesh-provider --slot 4')
@@ -1431,9 +1440,9 @@ function printDocs() {
   row('8 slots, slot 2 private 24h',     'peermesh-provider --slots 8 --private-on --private-slot 2 --private-expiry 24 --serve')
   row('Status check only',               'peermesh-provider --status')
   h('RUN AT STARTUP')
-  row('Windows — PowerShell (as admin)', 'See: peermesh-provider --docs  (startup section)')
-  row('macOS — launchd',                 'See: peermesh-provider --docs  (startup section)')
-  row('Linux — systemd',                 'See: peermesh-provider --docs  (startup section)')
+  row('Windows -- PowerShell (as admin)', 'See: peermesh-provider --docs  (startup section)')
+  row('macOS -- launchd',                 'See: peermesh-provider --docs  (startup section)')
+  row('Linux -- systemd',                 'See: peermesh-provider --docs  (startup section)')
   h('UNINSTALL')
   row('Remove CLI',                      'npm uninstall -g @btcmaster1000/peermesh-provider')
   row('Remove saved credentials',        'rm -rf ~/.peermesh')
@@ -1467,6 +1476,10 @@ async function main() {
     rotateCliIdentity()
     saveConfig(config)
     log('Credentials cleared and device revoked - please sign in again')
+    console.log('')
+    console.log('  To completely remove PeerMesh:')
+    console.log('  npm uninstall -g @btcmaster1000/peermesh-provider')
+    console.log('  rm -rf ~/.peermesh')
     console.log('')
   }
 
@@ -1537,6 +1550,14 @@ async function main() {
     log(`Signed in as ${config.username ?? config.userId.slice(0, 8)}`)
   }
 
+  console.log('')
+  console.log('  Welcome to PeerMesh Provider!')
+  console.log('  Documentation: peermesh-provider --docs')
+  console.log('  Status check:  peermesh-provider --status')
+  console.log('  Update:        npm install -g @btcmaster1000/peermesh-provider@latest')
+  console.log('  Uninstall:     npm uninstall -g @btcmaster1000/peermesh-provider')
+  console.log('')
+
   syncUsageDay()
   const profile = await pollTodayBytes()
   startProfileSync()
@@ -1575,7 +1596,7 @@ async function main() {
       })
       clogResponse('POST', `${API_BASE}/api/user/sharing`, res.status)
     } catch {
-      log('Could not save limit to server â€” using local value', 'warn')
+      log('Could not save limit to server — using local value', 'warn')
     }
   }
 
@@ -1671,7 +1692,7 @@ async function main() {
         }
       }
     } catch {}
-    log('Desktop is sharing â€” CLI standing by (press Ctrl+C to stop both)')
+    log('Desktop is sharing — CLI standing by (press Ctrl+C to stop both)')
   } else {
     config.shareEnabled = true
     saveConfig(config)

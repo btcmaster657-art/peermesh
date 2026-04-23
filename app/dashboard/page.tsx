@@ -725,6 +725,9 @@ export default function Dashboard() {
     }
     setShareError(null)
 
+    // Already starting (shareEnabled=true but not yet running) — ignore
+    if (!isSharing && desktop?.shareEnabled) return
+
     if (isSharing) {
       pendingShareTargetRef.current = false
       setShareTarget(false)
@@ -758,64 +761,75 @@ export default function Dashboard() {
     setShareToggling(true)
     setShareError(null)
 
-    if (!navigator.onLine) {
-      setShareError('No internet connection – check your network and try again')
-      setShareToggling(false)
-      return
-    }
-
-    const dt = await checkDesktop()
-    setDesktop(dt)
-
-    if (!dt.available) {
-      setShareError('desktop_required')
-      setShareToggling(false)
-      return
-    }
-    if (!isDesktopOwnedByUser(dt, profile!.id)) {
-      setShareError(getHelperMismatchError(dt.where))
-      setShareToggling(false)
-      return
-    }
-
-    const { data: { session } } = await supabase.auth.getSession()
-    if (!session) {
-      setShareError('Session expired – please sign out and sign back in')
-      setShareToggling(false)
-      return
-    }
-
-    pendingShareTargetRef.current = true
-    setShareTarget(true)
-    const result = await startDesktopSharing({
-      token: await getDesktopAuthToken(),
-      userId: profile!.id,
-      country: profile!.country_code,
-      trust: profile!.trust_score,
-    })
-
-    if (!result.ok) {
+    // Safety: always clear shareToggling after 15s regardless
+    const safetyTimer = setTimeout(() => {
       pendingShareTargetRef.current = null
       setShareTarget(null)
-      setShareError(result.error ?? 'desktop_required')
       setShareToggling(false)
-      return
-    }
+    }, 15000)
 
-    if (result.state) {
-      applyDesktopSnapshot(result.state, profile!.id)
-    } else {
+    try {
+      if (!navigator.onLine) {
+        setShareError('No internet connection – check your network and try again')
+        return
+      }
+
+      const dt = await checkDesktop()
+      setDesktop(dt)
+
+      if (!dt.available) {
+        setShareError('desktop_required')
+        return
+      }
+      if (!isDesktopOwnedByUser(dt, profile!.id)) {
+        setShareError(getHelperMismatchError(dt.where))
+        return
+      }
+
+      const { data: { session } } = await supabase.auth.getSession()
+      if (!session) {
+        setShareError('Session expired – please sign out and sign back in')
+        return
+      }
+
+      pendingShareTargetRef.current = true
+      setShareTarget(true)
+      const result = await startDesktopSharing({
+        token: await getDesktopAuthToken(),
+        userId: profile!.id,
+        country: profile!.country_code,
+        trust: profile!.trust_score,
+      })
+
+      if (!result.ok) {
+        pendingShareTargetRef.current = null
+        setShareTarget(null)
+        setShareError(result.error ?? 'desktop_required')
+        setShareToggling(false)
+        return
+      }
+
+      if (result.state) {
+        applyDesktopSnapshot(result.state, profile!.id)
+      } else {
+        pendingShareTargetRef.current = null
+        setShareTarget(null)
+        setIsSharing(true)
+        setShareToggling(false)
+      }
+      setPrivateShareStoppedSharing(false)
+      await fetch('/api/user/sharing', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ isSharing: true }),
+      }).catch(() => {})
+    } catch {
       pendingShareTargetRef.current = null
       setShareTarget(null)
-      setIsSharing(true)
       setShareToggling(false)
+    } finally {
+      clearTimeout(safetyTimer)
     }
-    setPrivateShareStoppedSharing(false)
-    await fetch('/api/user/sharing', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ isSharing: true }),
-    }).catch(() => {})
   }
 
   // ── Connect ─────────────────────────────────────────────────────────────────

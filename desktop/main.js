@@ -60,17 +60,8 @@ process.on('uncaughtException', (err) => {
   if (err.code === 'EADDRINUSE') return
 })
 
-const _ENV = (process.env.PEERMESH_ENV ?? 'production').toLowerCase()
-const _IS_LOCAL = _ENV === 'local'
-const _IS_DEV   = _ENV === 'dev'
-const _IS_PROD  = _ENV === 'production'
-const _API_BASE_KEY = _IS_LOCAL ? 'API_BASE_LOCAL' : _IS_DEV ? 'API_BASE_DEV' : 'API_BASE'
-if (!process.env[_API_BASE_KEY]) {
-  const { dialog } = require('electron')
-  dialog.showErrorBox('PeerMesh config error', `${_API_BASE_KEY} is not set (PEERMESH_ENV=${_ENV})`)
-  process.exit(1)
-}
-const API_BASE = process.env[_API_BASE_KEY]
+
+const API_BASE = 'https://peermesh-beta.vercel.app'
 let _liveRelays = null
 let _liveRelaysFetchedAt = 0
 const RELAY_CONFIG_TTL = 5 * 60 * 1000
