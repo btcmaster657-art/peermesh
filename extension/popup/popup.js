@@ -50,6 +50,7 @@ let state = {
   user: null,
   session: null,
   isSharing: false,
+  sharePending: false,
   shareToggling: false,
   connecting: false,
   disconnecting: false,
@@ -68,6 +69,7 @@ let state = {
   selectedPrivateSlot: null,
   privateExpiryHours: '24',
   privateShareSaving: false,
+  privateShareAction: null,
   privateShareRestartRequired: false,
   slotUpdating: false,
   dailyLimitInput: '',
@@ -87,6 +89,14 @@ function helperOwnerMismatch(helper = state.helper, user = state.user) {
 
 function ownedHelper(helper = state.helper, user = state.user) {
   return helperOwnerMismatch(helper, user) ? null : helper
+}
+
+function helperSharingActive(helper = ownedHelper()) {
+  return !!helper?.running
+}
+
+function helperSharingPending(helper = ownedHelper()) {
+  return !!(helper?.available && !helper?.running && helper?.shareEnabled)
 }
 
 function getUserSharingToken() {
@@ -177,8 +187,9 @@ function applyPrivateShareRows(rows, baseDeviceId, preferredDeviceId = null) {
     return
   }
   state.privateShares = mergePrivateShares(rows, baseDeviceId)
-  state.privateShare = selectPrivateShare(state.privateShares, preferredDeviceId || state.selectedPrivateSlot, baseDeviceId)
-  state.selectedPrivateSlot = state.privateShare?.device_id ?? preferredDeviceId ?? null
+  const preferredSelection = state.selectedPrivateSlot || preferredDeviceId
+  state.privateShare = selectPrivateShare(state.privateShares, preferredSelection, baseDeviceId)
+  state.selectedPrivateSlot = state.privateShare?.device_id ?? preferredSelection ?? null
   state.privateExpiryHours = getPrivateShareExpiryPreset(state.privateShare?.expires_at ?? null)
   syncSlotDailyLimitInput()
 }
@@ -220,6 +231,7 @@ async function handleExpiredSession() {
   state.user = null
   state.session = null
   state.isSharing = false
+  state.sharePending = false
   state.helper = null
   state.supabaseToken = null
   state.dailyLimitInput = ''
@@ -329,7 +341,9 @@ async function refreshRuntimeStatus() {
     if (!status) return
     state.session = status.session || null
     state.helper = status.helper || null
-    state.isSharing = !!(state.helper?.available && !helperOwnerMismatch(state.helper, state.user) && (state.helper?.running || state.helper?.shareEnabled))
+    const helper = ownedHelper(status.helper || null, state.user)
+    state.isSharing = helperSharingActive(helper)
+    state.sharePending = helperSharingPending(helper)
     if (state.isSharing) state.privateShareRestartRequired = false
     const baseDeviceId = ownedHelper(status.helper || null, state.user)?.baseDeviceId ?? null
     if (baseDeviceId) applyPrivateShareRows(state.privateShares, baseDeviceId, state.selectedPrivateSlot)
@@ -380,6 +394,7 @@ async function savePrivateShareState(input) {
     render()
     return
   }
+  state.privateShareAction = input.refresh === true ? 'refresh' : 'toggle'
   state.privateShareSaving = true
   state.error = null
   render()
@@ -424,6 +439,7 @@ async function savePrivateShareState(input) {
     state.error = err.message || 'Could not update private sharing'
   } finally {
     state.privateShareSaving = false
+    state.privateShareAction = null
     render()
   }
 }
@@ -561,7 +577,7 @@ function renderAuth(app) {
 }
 
 function renderDashboard(app) {
-  const { session, isSharing, selectedCountry, user, helper } = state
+  const { session, isSharing, sharePending, selectedCountry, user, helper } = state
   const helperMismatch = helperOwnerMismatch(helper, user)
   const activeHelper = helperMismatch ? null : helper
   const helperReady = !!activeHelper?.available
@@ -582,6 +598,8 @@ function renderDashboard(app) {
     ? (isSharing
       ? 'Extension standalone sharing active â€” single-slot web mode.'
       : 'Extension standalone ready â€” one slot. Desktop or CLI adds full-browser tunnels and up to 32 slots.')
+    : sharePending
+      ? 'Helper is starting sharing...'
     : helperReady
       ? (isSharing ? `${helperSource} sharing active â€” earning credits.` : `${helperSource} helper detected â€” ready to share.`)
       : 'Sharing is unavailable right now.'
@@ -700,7 +718,7 @@ function renderDashboard(app) {
               <div>
                 <div style="font-family:'Courier New',monospace;font-size:9px;color:var(--muted);letter-spacing:0.5px">CONNECTION SLOTS</div>
                 <div style="margin-top:4px;display:flex;align-items:center;gap:5px;flex-wrap:wrap">${slotDots}</div>
-                <p style="font-size:10px;color:var(--muted);margin-top:6px">${activeSlots} / ${configuredSlots} slots active${activeHelper?.slots?.warning ? ` - ${activeHelper.slots.warning}` : ''}</p>
+                <p style="font-size:10px;color:var(--muted);margin-top:6px">${state.slotUpdating ? 'Updating slot count...' : `${activeSlots} / ${configuredSlots} slots active${activeHelper?.slots?.warning ? ` - ${activeHelper.slots.warning}` : ''}`}</p>
               </div>
               <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
                 <button id="decrementSlotsBtn" style="width:28px;height:28px;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:${configuredSlots <= 1 ? 'var(--muted)' : 'var(--text)'};cursor:${configuredSlots <= 1 || state.slotUpdating || !helperReady ? 'not-allowed' : 'pointer'};font-family:'Courier New',monospace;font-size:16px" ${configuredSlots <= 1 || state.slotUpdating || !helperReady ? 'disabled' : ''}>-</button>
@@ -713,7 +731,7 @@ function renderDashboard(app) {
             <div style="font-family:'Courier New',monospace;font-size:9px;color:var(--muted);letter-spacing:0.5px;margin-bottom:6px">DAILY SHARE LIMIT</div>
             <div style="display:grid;grid-template-columns:1fr auto;gap:6px">
               <input id="dailyLimitInput" value="${state.dailyLimitInput || ''}" placeholder="1024+ MB" inputmode="numeric" style="padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-family:'Courier New',monospace;font-size:10px" ${state.dailyLimitSaving || helperMismatch ? 'disabled' : ''} />
-              <button id="saveDailyLimitBtn" style="padding:0 10px;background:var(--accent);border:none;border-radius:8px;color:#000;font-family:'Courier New',monospace;font-size:10px;font-weight:700;cursor:${state.dailyLimitSaving || helperMismatch ? 'not-allowed' : 'pointer'}" ${state.dailyLimitSaving || helperMismatch ? 'disabled' : ''}>${state.dailyLimitSaving ? '...' : 'APPLY'}</button>
+              <button id="saveDailyLimitBtn" style="padding:0 10px;background:var(--accent);border:none;border-radius:8px;color:#000;font-family:'Courier New',monospace;font-size:10px;font-weight:700;cursor:${state.dailyLimitSaving || helperMismatch ? 'not-allowed' : 'pointer'}" ${state.dailyLimitSaving || helperMismatch ? 'disabled' : ''}>${state.dailyLimitSaving ? 'APPLYING...' : 'APPLY'}</button>
             </div>
             <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
               <button id="dailyLimit1gbBtn" style="padding:6px 8px;background:${user?.dailyLimitMb === 1024 ? 'var(--accent-dim)' : 'var(--bg)'};border:1px solid ${user?.dailyLimitMb === 1024 ? 'rgba(0,255,136,0.35)' : 'var(--border)'};border-radius:7px;color:${user?.dailyLimitMb === 1024 ? 'var(--accent)' : 'var(--text)'};font-family:'Courier New',monospace;font-size:9px;cursor:${state.dailyLimitSaving || helperMismatch ? 'not-allowed' : 'pointer'}" ${state.dailyLimitSaving || helperMismatch ? 'disabled' : ''}>1 GB</button>
@@ -730,7 +748,7 @@ function renderDashboard(app) {
                <span style="width:10px;height:10px;border:2px solid rgba(255,255,255,0.2);border-top-color:#00ff88;border-radius:50%;animation:spin 0.7s linear infinite;display:inline-block"></span>
              </div>`
           : `<label class="toggle">
-               <input type="checkbox" id="shareToggle" ${isSharing ? 'checked' : ''} ${!helperReady || !state.isOnline || helperMismatch ? 'disabled style="opacity:0.4;cursor:not-allowed"' : ''}>
+               <input type="checkbox" id="shareToggle" ${isSharing ? 'checked' : ''} ${!helperReady || !state.isOnline || helperMismatch || sharePending ? 'disabled style="opacity:0.4;cursor:not-allowed"' : ''}>
                <span class="toggle-slider"></span>
              </label>`
         }
@@ -755,7 +773,7 @@ function renderDashboard(app) {
         <div style="font-family:'Courier New',monospace;font-size:9px;color:var(--muted);letter-spacing:0.5px;margin-bottom:6px">SLOT DAILY LIMIT</div>
         <div style="display:grid;grid-template-columns:1fr auto;gap:6px">
           <input id="slotDailyLimitInput" value="${state.slotDailyLimitInput || ''}" placeholder="1024+ MB" inputmode="numeric" style="padding:8px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;color:var(--text);font-family:'Courier New',monospace;font-size:10px" ${state.slotDailyLimitSaving || helperMismatch ? 'disabled' : ''} />
-          <button id="saveSlotDailyLimitBtn" style="padding:0 10px;background:var(--accent);border:none;border-radius:8px;color:#000;font-family:'Courier New',monospace;font-size:10px;font-weight:700;cursor:${state.slotDailyLimitSaving || helperMismatch ? 'not-allowed' : 'pointer'}" ${state.slotDailyLimitSaving || helperMismatch ? 'disabled' : ''}>${state.slotDailyLimitSaving ? '...' : 'APPLY'}</button>
+          <button id="saveSlotDailyLimitBtn" style="padding:0 10px;background:var(--accent);border:none;border-radius:8px;color:#000;font-family:'Courier New',monospace;font-size:10px;font-weight:700;cursor:${state.slotDailyLimitSaving || helperMismatch ? 'not-allowed' : 'pointer'}" ${state.slotDailyLimitSaving || helperMismatch ? 'disabled' : ''}>${state.slotDailyLimitSaving ? 'APPLYING...' : 'APPLY'}</button>
         </div>
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
           <button id="slotLimit1gbBtn" style="padding:6px 8px;background:${selectedSlotLimit?.daily_limit_mb === 1024 ? 'var(--accent-dim)' : 'var(--surface)'};border:1px solid ${selectedSlotLimit?.daily_limit_mb === 1024 ? 'rgba(0,255,136,0.35)' : 'var(--border)'};border-radius:7px;color:${selectedSlotLimit?.daily_limit_mb === 1024 ? 'var(--accent)' : 'var(--text)'};font-family:'Courier New',monospace;font-size:9px;cursor:${state.slotDailyLimitSaving || helperMismatch ? 'not-allowed' : 'pointer'}" ${state.slotDailyLimitSaving || helperMismatch ? 'disabled' : ''}>1 GB</button>
@@ -777,10 +795,11 @@ function renderDashboard(app) {
           <option value="168" ${state.privateExpiryHours === '168' ? 'selected' : ''}>7 days</option>
         </select>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
-          <button id="togglePrivateShareBtn" style="padding:7px 10px;background:${state.privateShare?.enabled ? 'transparent' : 'var(--accent)'};border:1px solid ${state.privateShare?.enabled ? 'var(--border)' : 'var(--accent)'};border-radius:7px;color:${state.privateShare?.enabled ? 'var(--text)' : '#000'};font-family:'Courier New',monospace;font-size:10px;cursor:${state.privateShareSaving ? 'not-allowed' : 'pointer'}" ${state.privateShareSaving ? 'disabled' : ''}>${state.privateShare?.enabled ? 'DISABLE' : 'ENABLE'}</button>
-          <button id="refreshPrivateShareBtn" style="padding:7px 10px;background:transparent;border:1px solid var(--border);border-radius:7px;color:var(--text);font-family:'Courier New',monospace;font-size:10px;cursor:${state.privateShareSaving ? 'not-allowed' : 'pointer'}" ${state.privateShareSaving ? 'disabled' : ''}>REFRESH</button>
+          <button id="togglePrivateShareBtn" style="padding:7px 10px;background:${state.privateShare?.enabled ? 'transparent' : 'var(--accent)'};border:1px solid ${state.privateShare?.enabled ? 'var(--border)' : 'var(--accent)'};border-radius:7px;color:${state.privateShare?.enabled ? 'var(--text)' : '#000'};font-family:'Courier New',monospace;font-size:10px;cursor:${state.privateShareSaving ? 'not-allowed' : 'pointer'}" ${state.privateShareSaving ? 'disabled' : ''}>${state.privateShareSaving && state.privateShareAction !== 'refresh' ? 'SAVING...' : (state.privateShare?.enabled ? 'DISABLE' : 'ENABLE')}</button>
+          <button id="refreshPrivateShareBtn" style="padding:7px 10px;background:transparent;border:1px solid var(--border);border-radius:7px;color:var(--text);font-family:'Courier New',monospace;font-size:10px;cursor:${state.privateShareSaving ? 'not-allowed' : 'pointer'}" ${state.privateShareSaving ? 'disabled' : ''}>${state.privateShareSaving && state.privateShareAction === 'refresh' ? 'REFRESHING...' : 'REFRESH'}</button>
         </div>
       </div>
+      ${state.privateShareSaving ? `<div style="margin-top:8px;font-size:10px;color:var(--muted)">Updating private sharing...</div>` : ''}
       ${state.privateShare?.expires_at ? `<div style="margin-top:8px;font-size:10px;color:var(--muted)">Expires ${new Date(state.privateShare.expires_at).toLocaleString()}</div>` : ''}
       ${state.privateShareRestartRequired && !isSharing ? `<div style="margin-top:8px;font-size:10px;color:#ffaa00;background:rgba(255,170,0,0.08);border:1px solid rgba(255,170,0,0.25);border-radius:7px;padding:7px 9px;line-height:1.5">Sharing was stopped. Start sharing again to apply the new privacy setting.</div>` : ''}
     </div>` : ''}
@@ -1118,6 +1137,7 @@ async function toggleSharing(on) {
 
   const previous = state.isSharing
   state.isSharing = on
+  state.sharePending = false
   render()
 
   const response = await chrome.runtime.sendMessage({
@@ -1132,6 +1152,7 @@ async function toggleSharing(on) {
 
   if (!response?.success) {
     state.isSharing = previous
+    state.sharePending = false
     state.helper = response?.helper || state.helper
     state.shareToggling = false
     state.error = response?.error === 'Failed to fetch'
@@ -1142,8 +1163,7 @@ async function toggleSharing(on) {
   }
 
   state.error = null
-  state.isSharing = on
-  state.shareToggling = false
+  state.isSharing = false
   if (on) state.privateShareRestartRequired = false
   state.helper = response.helper || state.helper
   await chrome.storage.local.set({ isSharing: on, helper: state.helper })
@@ -1160,6 +1180,7 @@ async function toggleSharing(on) {
   } catch {}
 
   await refreshRuntimeStatus()
+  state.shareToggling = false
   render()
 }
 
@@ -1320,6 +1341,7 @@ async function signOut() {
   state.user = null
   state.session = null
   state.isSharing = false
+  state.sharePending = false
   state.helper = null
   state.dailyLimitInput = ''
   state.dailyLimitSaving = false

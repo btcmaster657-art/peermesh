@@ -67,7 +67,11 @@ function isDesktopOwnedByUser(state: DesktopState | null, userId: string | null 
 }
 
 function isDesktopSharing(state: DesktopState | null): boolean {
-  return !!(state?.running || state?.shareEnabled)
+  return !!state?.running
+}
+
+function isDesktopSharePending(state: DesktopState | null): boolean {
+  return !!(state?.shareEnabled && !state?.running)
 }
 
 function createDisabledPrivateShare(deviceId: string, baseDeviceId: string, slotIndex: number): PrivateShare {
@@ -213,6 +217,7 @@ export default function Dashboard() {
   const [privateShareDeviceId, setPrivateShareDeviceId] = useState<string | null>(null)
   const [privateExpiryHours, setPrivateExpiryHours] = useState('24')
   const [privateShareSaving, setPrivateShareSaving] = useState(false)
+  const [privateShareAction, setPrivateShareAction] = useState<'toggle' | 'refresh' | null>(null)
   const [privateShareStoppedSharing, setPrivateShareStoppedSharing] = useState(false)
   const [slotUpdating, setSlotUpdating] = useState(false)
   const [dailyLimitInput, setDailyLimitInput] = useState('')
@@ -569,29 +574,38 @@ export default function Dashboard() {
       'desktopState.peer.slots.configured=' + (desktopState?.peer?.slots?.configured ?? 'null'),
     )
 
+    const requestedDeviceId = userSelectedSlotRef.current
+      ?? preferredDeviceId
+      ?? desktopState?.privateShareDeviceId
+      ?? desktopState?.peer?.privateShareDeviceId
+      ?? null
+    const requestedSelectionStillExists = requestedDeviceId
+      ? merged.some((share) => share.device_id === requestedDeviceId)
+      : false
     const nextSelected = selectPrivateShare(
       merged,
-      userSelectedSlotRef.current
-        ?? preferredDeviceId
-        ?? desktopState?.privateShareDeviceId
-        ?? desktopState?.peer?.privateShareDeviceId
-        ?? null,
+      requestedDeviceId,
       baseDeviceId,
     )
+    const resolvedDeviceId = nextSelected?.device_id ?? preferredDeviceId ?? null
+    const resetUserSelectedSlot = !!userSelectedSlotRef.current && !requestedSelectionStillExists
 
     log('applyPrivateShareRows SELECTED',
       'nextSelected.device_id=' + (nextSelected?.device_id ?? 'null'),
       'nextSelected.slot_index=' + (nextSelected?.slot_index ?? 'null'),
       'nextSelected.enabled=' + (nextSelected?.enabled ?? 'null'),
       'nextSelected.active=' + (nextSelected?.active ?? 'null'),
-      'willUpdateDeviceIdState=' + (!userSelectedSlotRef.current ? 'YES' : 'NO (ref is set)'),
+      'requestedDeviceId=' + (requestedDeviceId ?? 'null'),
+      'requestedSelectionStillExists=' + String(requestedSelectionStillExists),
+      'willResetUserSelectedSlot=' + String(resetUserSelectedSlot),
     )
 
     setPrivateShares(merged)
     setPrivateShare(nextSelected)
-    if (!userSelectedSlotRef.current) {
-      setPrivateShareDeviceId(nextSelected?.device_id ?? preferredDeviceId ?? null)
+    if (resetUserSelectedSlot) {
+      userSelectedSlotRef.current = resolvedDeviceId
     }
+    setPrivateShareDeviceId(userSelectedSlotRef.current ?? resolvedDeviceId)
     setPrivateExpiryHours(getExpiryPreset(nextSelected?.expires_at ?? null))
     
     log('applyPrivateShareRows AFTER STATE UPDATE',
@@ -653,6 +667,7 @@ export default function Dashboard() {
       'privateShareDeviceId_state=' + (privateShareDeviceId ?? 'null'),
       'privateShare.device_id=' + (privateShare?.device_id ?? 'null'),
     )
+    setPrivateShareAction(input.refresh === true ? 'refresh' : 'toggle')
     setPrivateShareSaving(true)
     setShareError(null)
     try {
@@ -697,6 +712,7 @@ export default function Dashboard() {
       setShareError(err instanceof Error ? err.message : 'Could not update private sharing')
     } finally {
       setPrivateShareSaving(false)
+      setPrivateShareAction(null)
     }
   }
 
@@ -1014,6 +1030,7 @@ export default function Dashboard() {
   const selectedSlotDeviceId = privateShareDeviceId ?? privateShare?.device_id ?? (helperBaseDeviceId ? `${helperBaseDeviceId}_slot_0` : null)
   const selectedSlotLimit = selectedSlotDeviceId ? slotLimits[selectedSlotDeviceId] : null
   const displayIsSharing = shareTarget ?? isSharing
+  const helperStarting = isDesktopSharePending(desktop)
   const privateConnectReady = !selectedCountry && !!privateCodeInput.trim()
 
   const detectedOS: 'windows' | 'mac' | 'linux' = typeof navigator !== 'undefined'
@@ -1305,6 +1322,8 @@ export default function Dashboard() {
                     })()
                   : !helperOwnedByCurrentUser
                     ? 'Local helper belongs to another user.'
+                    : helperStarting
+                      ? 'Starting local sharing...'
                     : desktopAvailableForUser
                       ? `${cliRunningForUser && desktopRunningForUser ? 'CLI + Desktop' : cliRunningForUser ? 'CLI' : 'Desktop'} ready – toggle to start sharing`
                       : 'Install the desktop app or run the CLI to share your connection'}
@@ -1312,8 +1331,8 @@ export default function Dashboard() {
           </div>
           <button
             onClick={handleShareToggle}
-            disabled={shareToggling}
-            style={{ width: '44px', height: '24px', borderRadius: '12px', border: 'none', background: displayIsSharing ? 'var(--accent)' : 'var(--border)', cursor: shareToggling ? 'not-allowed' : 'pointer', position: 'relative', transition: 'background 0.2s', flexShrink: 0, opacity: shareToggling ? 0.6 : 1 }}
+            disabled={shareToggling || helperStarting}
+            style={{ width: '44px', height: '24px', borderRadius: '12px', border: 'none', background: displayIsSharing ? 'var(--accent)' : 'var(--border)', cursor: shareToggling || helperStarting ? 'not-allowed' : 'pointer', position: 'relative', transition: 'background 0.2s', flexShrink: 0, opacity: shareToggling || helperStarting ? 0.6 : 1 }}
           >
             {shareToggling
               ? <span style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><span style={{ width: '10px', height: '10px', border: '2px solid rgba(255,255,255,0.3)', borderTopColor: 'white', borderRadius: '50%', animation: 'spin 0.7s linear infinite', display: 'inline-block' }} /></span>
@@ -1344,7 +1363,7 @@ export default function Dashboard() {
                 })}
               </div>
               <div style={{ fontSize: '11px', color: 'var(--muted)' }}>
-                {slotDisplayActive} / {slotDisplayCount} active{helperSlots?.warning ? ` – ${helperSlots.warning}` : ''}
+                {slotUpdating ? 'Updating slot count...' : `${slotDisplayActive} / ${slotDisplayCount} active${helperSlots?.warning ? ` – ${helperSlots.warning}` : ''}`}
               </div>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
@@ -1388,7 +1407,7 @@ export default function Dashboard() {
                 disabled={dailyLimitSaving || !helperOwnedByCurrentUser}
                 style={{ padding: '7px 12px', background: 'var(--accent)', color: '#000', border: 'none', borderRadius: '6px', fontFamily: 'var(--font-geist-mono)', fontSize: '10px', fontWeight: 700, cursor: dailyLimitSaving || !helperOwnedByCurrentUser ? 'not-allowed' : 'pointer', opacity: dailyLimitSaving || !helperOwnedByCurrentUser ? 0.6 : 1 }}
               >
-                {dailyLimitSaving ? '...' : 'APPLY'}
+                {dailyLimitSaving ? 'APPLYING...' : 'APPLY'}
               </button>
             </div>
             <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
@@ -1499,7 +1518,7 @@ export default function Dashboard() {
                 disabled={slotDailyLimitSaving || !helperOwnedByCurrentUser}
                 style={{ padding: '7px 10px', background: 'var(--accent)', color: '#000', border: 'none', borderRadius: '6px', fontFamily: 'var(--font-geist-mono)', fontSize: '10px', fontWeight: 700, cursor: slotDailyLimitSaving || !helperOwnedByCurrentUser ? 'not-allowed' : 'pointer', opacity: slotDailyLimitSaving || !helperOwnedByCurrentUser ? 0.6 : 1 }}
               >
-                {slotDailyLimitSaving ? '...' : 'APPLY'}
+                {slotDailyLimitSaving ? 'APPLYING...' : 'APPLY'}
               </button>
             </div>
             <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginTop: '6px' }}>
@@ -1561,17 +1580,22 @@ export default function Dashboard() {
                 disabled={privateShareSaving}
                 style={{ padding: '7px 12px', background: privateShare?.enabled ? 'transparent' : 'var(--accent)', color: privateShare?.enabled ? 'var(--text)' : '#000', border: `1px solid ${privateShare?.enabled ? 'var(--border)' : 'var(--accent)'}`, borderRadius: '7px', fontFamily: 'var(--font-geist-mono)', fontSize: '10px', cursor: privateShareSaving ? 'not-allowed' : 'pointer', opacity: privateShareSaving ? 0.6 : 1 }}
               >
-                {privateShare?.enabled ? 'DISABLE' : 'ENABLE'}
+                {privateShareSaving && privateShareAction !== 'refresh' ? 'SAVING...' : (privateShare?.enabled ? 'DISABLE' : 'ENABLE')}
               </button>
               <button
                 onClick={() => savePrivateShare({ enabled: true, refresh: true, expiryHours: privateExpiryHours })}
                 disabled={privateShareSaving}
                 style={{ padding: '7px 12px', background: 'transparent', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: '7px', fontFamily: 'var(--font-geist-mono)', fontSize: '10px', cursor: privateShareSaving ? 'not-allowed' : 'pointer', opacity: privateShareSaving ? 0.6 : 1 }}
               >
-                REFRESH CODE
+                {privateShareSaving && privateShareAction === 'refresh' ? 'REFRESHING...' : 'REFRESH CODE'}
               </button>
             </div>
           </div>
+          {privateShareSaving && (
+            <div style={{ marginTop: '8px', fontSize: '10px', color: 'var(--muted)', fontFamily: 'var(--font-geist-mono)' }}>
+              Updating private sharing...
+            </div>
+          )}
 
           {isSharing && (() => {
             const publicCount = privateShares.filter(s => !s.active).length

@@ -14,9 +14,15 @@ function setShareState(s) { _shareState = s; togglingShare = s !== 'idle' }
 let privateShare = null
 let privateShares = []
 let privateShareDeviceId = null
+let privateShareSelectionLocked = false
 let privateShareSaving = false
+let privateShareAction = null
 let privateShareExpiry = '24'
+let slotLimits = {}
+let slotDailyLimitInput = ''
+let slotDailyLimitSaving = false
 let dailyLimitSaving = false
+let slotUpdating = false
 let lastPrivateShareLoadAt = 0
 const PRIVATE_SHARE_REFRESH_TTL = 2500
 
@@ -126,6 +132,20 @@ function getPrivateShareLabel(row, fallbackIndex = 0) {
   return `Slot ${fallbackIndex + 1}`
 }
 
+function mapSlotLimits(rows = []) {
+  const mapped = {}
+  for (const row of rows) {
+    if (!row?.device_id) continue
+    mapped[row.device_id] = row
+  }
+  return mapped
+}
+
+function syncSlotDailyLimitInput() {
+  const selected = privateShareDeviceId ? slotLimits[privateShareDeviceId] : null
+  slotDailyLimitInput = selected?.daily_limit_mb != null ? String(selected.daily_limit_mb) : ''
+}
+
 function renderPrivateShare() {
   const codeEl = document.getElementById('private-share-code')
   const copyBtn = document.getElementById('copy-private-share')
@@ -134,9 +154,18 @@ function renderPrivateShare() {
   const expiryEl = document.getElementById('private-share-expiry')
   const deviceSelect = document.getElementById('private-share-device')
   const statusEl = document.getElementById('private-share-status')
+  const slotLimitInput = document.getElementById('slot-daily-limit-input')
+  const slotLimitSaveBtn = document.getElementById('slot-daily-limit-save')
+  const slotLimitStatusEl = document.getElementById('slot-daily-limit-status')
   const state = window.__lastPeerMeshState || null
   const signedIn = !!state?.config?.userId
   const rows = getPrivateShareRows(state)
+  const slotLimitPresets = [
+    { id: 'slot-daily-limit-1gb', value: 1024 },
+    { id: 'slot-daily-limit-2gb', value: 2048 },
+    { id: 'slot-daily-limit-5gb', value: 5120 },
+  ]
+  const slotLimitNoneBtn = document.getElementById('slot-daily-limit-none')
 
   // Only reset selection when there is genuinely no selection yet — not on every render
   if (!privateShareDeviceId) {
@@ -144,8 +173,10 @@ function renderPrivateShare() {
   } else if (rows.length > 0 && !rows.some(row => row.device_id === privateShareDeviceId)) {
     // Selected slot no longer exists (e.g. slot count reduced) — fall back gracefully
     privateShareDeviceId = rows[0]?.device_id ?? null
+    privateShareSelectionLocked = false
   }
   privateShare = rows.find(row => row.device_id === privateShareDeviceId) ?? rows[0] ?? privateShare
+  syncSlotDailyLimitInput()
 
   if (codeEl) codeEl.textContent = privateShare?.code ?? '---------'
   if (expiryEl) expiryEl.value = privateShareExpiry
@@ -158,17 +189,59 @@ function renderPrivateShare() {
           return `<option value="${row.device_id}" ${selected}>${label} - ${status}</option>`
         }).join('')
       : '<option value="">No slots available</option>'
-    deviceSelect.disabled = !signedIn || privateShareSaving || rows.length === 0
+    deviceSelect.disabled = !signedIn || privateShareSaving || slotDailyLimitSaving || rows.length === 0
     deviceSelect.value = privateShareDeviceId ?? ''
   }
 
   if (copyBtn) copyBtn.disabled = !signedIn || !privateShare?.code || privateShareSaving
-  if (refreshBtn) refreshBtn.disabled = !signedIn || privateShareSaving
+  if (refreshBtn) {
+    refreshBtn.disabled = !signedIn || privateShareSaving
+    refreshBtn.textContent = privateShareSaving && privateShareAction === 'refresh' ? 'REFRESHING...' : 'REFRESH CODE'
+  }
   if (toggleBtn) {
     toggleBtn.disabled = !signedIn || privateShareSaving
-    toggleBtn.textContent = privateShareSaving
+    toggleBtn.textContent = privateShareSaving && privateShareAction !== 'refresh'
       ? 'SAVING...'
       : ((privateShare?.enabled ?? false) ? 'DISABLE PRIVATE' : 'ENABLE PRIVATE')
+  }
+  const currentSlotLimit = privateShareDeviceId ? slotLimits[privateShareDeviceId]?.daily_limit_mb ?? null : null
+  if (slotLimitInput) {
+    if (document.activeElement !== slotLimitInput) {
+      slotLimitInput.value = slotDailyLimitInput
+    }
+    slotLimitInput.disabled = !signedIn || slotDailyLimitSaving || !privateShareDeviceId
+  }
+  if (slotLimitSaveBtn) {
+    slotLimitSaveBtn.disabled = !signedIn || slotDailyLimitSaving || !privateShareDeviceId
+    slotLimitSaveBtn.textContent = slotDailyLimitSaving ? 'APPLYING...' : 'APPLY'
+  }
+  if (slotLimitNoneBtn) {
+    slotLimitNoneBtn.disabled = !signedIn || slotDailyLimitSaving || !privateShareDeviceId
+    slotLimitNoneBtn.style.borderColor = currentSlotLimit == null ? 'rgba(0,255,136,0.45)' : 'var(--border)'
+    slotLimitNoneBtn.style.color = currentSlotLimit == null ? 'var(--accent)' : 'var(--text)'
+    slotLimitNoneBtn.style.background = currentSlotLimit == null ? 'var(--accent-dim)' : 'transparent'
+  }
+  slotLimitPresets.forEach(({ id, value }) => {
+    const button = document.getElementById(id)
+    if (!button) return
+    button.disabled = !signedIn || slotDailyLimitSaving || !privateShareDeviceId
+    button.style.borderColor = currentSlotLimit === value ? 'rgba(0,255,136,0.45)' : 'var(--border)'
+    button.style.color = currentSlotLimit === value ? 'var(--accent)' : 'var(--text)'
+    button.style.background = currentSlotLimit === value ? 'var(--accent-dim)' : 'transparent'
+  })
+
+  if (slotLimitStatusEl) {
+    if (!signedIn) {
+      slotLimitStatusEl.textContent = 'Sign in to manage per-slot limits.'
+    } else if (!privateShareDeviceId) {
+      slotLimitStatusEl.textContent = 'Select a slot to configure a per-slot limit.'
+    } else if (slotDailyLimitSaving) {
+      slotLimitStatusEl.textContent = 'Updating slot limit...'
+    } else {
+      slotLimitStatusEl.textContent = currentSlotLimit != null
+        ? `${getPrivateShareLabel(privateShare)} capped at ${currentSlotLimit} MB/day.`
+        : `No per-slot cap on ${getPrivateShareLabel(privateShare)}.`
+    }
   }
 
   if (!statusEl) return
@@ -177,7 +250,7 @@ function renderPrivateShare() {
     return
   }
   if (privateShareSaving) {
-    statusEl.textContent = 'Updating private sharing...'
+    statusEl.textContent = privateShareAction === 'refresh' ? 'Refreshing private code...' : 'Updating private sharing...'
     return
   }
 
@@ -196,19 +269,27 @@ async function loadPrivateShare(force = false) {
   lastPrivateShareLoadAt = now
   const result = await invoke('getPrivateShare')
   if (!result?.success) return
-  privateShares = result.privateShares ?? privateShares
-  privateShare = result.privateShare ?? privateShares[0] ?? null
-  if (result.privateShareDeviceId) {
-    privateShareDeviceId = result.privateShareDeviceId
-  } else if (!privateShareDeviceId || !privateShares.some(row => row.device_id === privateShareDeviceId)) {
-    privateShareDeviceId = privateShare?.device_id ?? privateShares[0]?.device_id ?? null
+  const nextShares = Array.isArray(result.privateShares) ? result.privateShares : privateShares
+  privateShares = nextShares
+  slotLimits = mapSlotLimits(result.slotLimits ?? Object.values(slotLimits))
+  const preferredDeviceId = privateShareSelectionLocked
+    ? privateShareDeviceId
+    : (result.privateShareDeviceId ?? privateShareDeviceId)
+  if (preferredDeviceId && nextShares.some(row => row.device_id === preferredDeviceId)) {
+    privateShareDeviceId = preferredDeviceId
+  } else {
+    privateShareDeviceId = result.privateShare?.device_id ?? nextShares[0]?.device_id ?? null
+    privateShareSelectionLocked = false
   }
+  privateShare = nextShares.find(row => row.device_id === privateShareDeviceId) ?? result.privateShare ?? nextShares[0] ?? null
   privateShareExpiry = result.expiryPreset ?? getPrivateShareExpiryPreset(privateShare?.expires_at ?? null)
+  syncSlotDailyLimitInput()
   renderPrivateShare()
 }
 
 async function savePrivateShare(payload) {
   if (privateShareSaving) return
+  privateShareAction = payload?.refresh ? 'refresh' : 'toggle'
   privateShareSaving = true
   clearMainError()
   renderPrivateShare()
@@ -218,15 +299,22 @@ async function savePrivateShare(payload) {
       deviceId: payload?.deviceId ?? privateShareDeviceId ?? privateShare?.device_id ?? privateShares[0]?.device_id ?? null,
     })
     if (!result?.success) throw new Error(result?.error || 'Could not update private sharing')
-    privateShares = result.privateShares ?? privateShares
-    privateShare = result.privateShare ?? privateShare
-    privateShareDeviceId = result.privateShareDeviceId ?? privateShare?.device_id ?? privateShareDeviceId
+    privateShares = Array.isArray(result.privateShares) ? result.privateShares : privateShares
+    slotLimits = mapSlotLimits(result.slotLimits ?? Object.values(slotLimits))
+    const nextDeviceId = result.privateShareDeviceId ?? privateShareDeviceId ?? result.privateShare?.device_id ?? null
+    if (nextDeviceId) {
+      privateShareDeviceId = nextDeviceId
+      privateShareSelectionLocked = true
+    }
+    privateShare = privateShares.find(row => row.device_id === privateShareDeviceId) ?? result.privateShare ?? privateShare
     privateShareExpiry = result.expiryPreset ?? getPrivateShareExpiryPreset(privateShare?.expires_at ?? null)
+    syncSlotDailyLimitInput()
     await pollState()
   } catch (error) {
     showMainError(error?.message || 'Could not update private sharing')
   } finally {
     privateShareSaving = false
+    privateShareAction = null
     renderPrivateShare()
   }
 }
@@ -246,9 +334,9 @@ function renderSlots(configured, slots) {
   const incrementBtn = document.getElementById('slots-increment')
   if (!dots || !summary || !warning || !slotValue || !decrementBtn || !incrementBtn) return
 
-  slotValue.textContent = String(configured)
-  decrementBtn.disabled = configured <= 1
-  incrementBtn.disabled = configured >= 32
+  slotValue.textContent = slotUpdating ? '...' : String(configured)
+  decrementBtn.disabled = slotUpdating || configured <= 1
+  incrementBtn.disabled = slotUpdating || configured >= 32
   dots.innerHTML = ''
 
   const statuses = slots?.statuses ?? []
@@ -260,7 +348,7 @@ function renderSlots(configured, slots) {
     dots.appendChild(dot)
   }
 
-  summary.textContent = `${active} / ${configured} slots active`
+  summary.textContent = slotUpdating ? 'Applying slot change...' : `${active} / ${configured} slots active`
   const warningText = getSlotWarning(configured)
   warning.textContent = warningText ?? ''
   warning.style.display = warningText ? 'block' : 'none'
@@ -615,44 +703,58 @@ async function doToggleSharing(isSharing) {
   if (desc) desc.textContent = 'Please wait...'
 
   try {
-    if (isSharing) {
-      await Promise.allSettled([
-        fetch('http://127.0.0.1:7654/native/share/stop', { method: 'POST', signal: AbortSignal.timeout(2000) }),
-        fetch('http://127.0.0.1:7656/native/share/stop', { method: 'POST', signal: AbortSignal.timeout(2000) }),
-      ])
-    } else {
-      const result = await invoke('toggleSharing')
-      if (result?.error) showMainError(result.error)
+    try {
+      if (isSharing) {
+        await Promise.allSettled([
+          fetch('http://127.0.0.1:7654/native/share/stop', { method: 'POST', signal: AbortSignal.timeout(2000) }),
+          fetch('http://127.0.0.1:7656/native/share/stop', { method: 'POST', signal: AbortSignal.timeout(2000) }),
+        ])
+      } else {
+        const result = await invoke('toggleSharing')
+        if (result?.error) showMainError(result.error)
+      }
+    } catch {
+      showMainError('Could not toggle sharing - please try again')
+    } finally {
+      if (dot) dot.style.cssText = ''
     }
-  } catch {
-    showMainError('Could not toggle sharing - please try again')
-  } finally {
-    if (dot) dot.style.cssText = ''
-  }
 
-  for (let i = 0; i < 6; i += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 500))
-    const state = await pollState()
-    if (!state) continue
-    const shouldBreak = !isSharing
-      ? (state.running || state.peerRunning)
-      : (!state.running && !state.peerRunning)
-    if (shouldBreak) break
+    for (let i = 0; i < 6; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 500))
+      let state = null
+      try {
+        state = await pollState()
+      } catch {}
+      if (!state) continue
+      const shouldBreak = !isSharing
+        ? (state.running || state.peerRunning)
+        : (!state.running && !state.peerRunning)
+      if (shouldBreak) break
+    }
+  } finally {
+    setShareState('idle')
+    try {
+      await pollState()
+    } catch {}
   }
-  setShareState('idle')
 }
 
 function updateUI(state) {
   window.__lastPeerMeshState = state
   privateShares = Array.isArray(state?.privateShares) ? state.privateShares : privateShares
-  if (state?.privateShareDeviceId) privateShareDeviceId = state.privateShareDeviceId
-  if (state?.privateShare?.device_id) privateShareDeviceId = state.privateShare.device_id
+  if (!privateShareSelectionLocked && state?.privateShareDeviceId) privateShareDeviceId = state.privateShareDeviceId
+  if (!privateShareSelectionLocked && state?.privateShare?.device_id) privateShareDeviceId = state.privateShare.device_id
   const running = !!state?.running
   const config = state?.config ?? {}
   const stats = state?.stats ?? { requestsHandled: 0, bytesServed: 0 }
 
   if (!config.userId) {
     privateShare = null
+    privateShares = []
+    privateShareDeviceId = null
+    privateShareSelectionLocked = false
+    slotLimits = {}
+    slotDailyLimitInput = ''
     renderPrivateShare()
     renderStartupPreferences(state)
     renderDailyLimit(state)
@@ -894,7 +996,12 @@ document.getElementById('btn-signout').addEventListener('click', async () => {
   resetAuthUI()
   await invoke('signOut')
   privateShare = null
+  privateShares = []
+  privateShareDeviceId = null
+  privateShareSelectionLocked = false
   privateShareExpiry = '24'
+  slotLimits = {}
+  slotDailyLimitInput = ''
   renderPrivateShare()
   await pollState()
   if (btn) { btn.disabled = false; btn.textContent = 'Sign out' }
@@ -905,9 +1012,11 @@ document.getElementById('btn-signout').addEventListener('click', async () => {
 
 document.getElementById('private-share-device').addEventListener('change', (event) => {
   privateShareDeviceId = event.target.value || null
+  privateShareSelectionLocked = !!privateShareDeviceId
   const rows = getPrivateShareRows(window.__lastPeerMeshState || null)
   privateShare = rows.find(row => row.device_id === privateShareDeviceId) ?? rows[0] ?? null
   privateShareExpiry = getPrivateShareExpiryPreset(privateShare?.expires_at ?? null)
+  syncSlotDailyLimitInput()
   renderPrivateShare()
 })
 
@@ -941,11 +1050,19 @@ document.getElementById('toggle-private-share').addEventListener('click', async 
 
 async function updateConnectionSlots(slots) {
   const nextSlots = Math.max(1, Math.min(32, parseInt(String(slots), 10) || 1))
+  if (slotUpdating) return
+  slotUpdating = true
+  clearMainError()
+  renderSlots(parseInt(document.getElementById('slots-value')?.textContent || String(nextSlots), 10) || nextSlots, window.__lastPeerMeshState?.slots)
   try {
     await invoke('setConnectionSlots', nextSlots)
     await pollState()
+    await loadPrivateShare(true)
   } catch {
     showMainError('Could not update connection slots')
+  } finally {
+    slotUpdating = false
+    renderSlots(window.__lastPeerMeshState?.slots?.configured ?? nextSlots, window.__lastPeerMeshState?.slots)
   }
 }
 
@@ -963,6 +1080,29 @@ async function saveDailyLimit(limitMb) {
   } finally {
     dailyLimitSaving = false
     renderDailyLimit(window.__lastPeerMeshState || null)
+  }
+}
+
+async function saveSlotDailyLimit(limitMb) {
+  if (slotDailyLimitSaving) return
+  slotDailyLimitSaving = true
+  clearMainError()
+  renderPrivateShare()
+  try {
+    const result = await invoke('setSlotDailyLimit', {
+      limitMb,
+      deviceId: privateShareDeviceId ?? privateShare?.device_id ?? null,
+      baseDeviceId: window.__lastPeerMeshState?.baseDeviceId ?? window.__lastPeerMeshState?.config?.baseDeviceId ?? null,
+    })
+    if (!result?.success) throw new Error(result?.error || 'Could not update slot daily limit')
+    slotLimits = mapSlotLimits(result.slotLimits ?? Object.values(slotLimits))
+    syncSlotDailyLimitInput()
+    await pollState()
+  } catch (error) {
+    showMainError(error?.message || 'Could not update slot daily limit')
+  } finally {
+    slotDailyLimitSaving = false
+    renderPrivateShare()
   }
 }
 
@@ -1017,6 +1157,53 @@ document.getElementById('daily-limit-5gb').addEventListener('click', async () =>
   const input = document.getElementById('daily-limit-input')
   if (input) input.value = '5120'
   await saveDailyLimit(5120)
+})
+
+document.getElementById('slot-daily-limit-input').addEventListener('input', (event) => {
+  slotDailyLimitInput = event.target.value.replace(/\D/g, '')
+})
+
+document.getElementById('slot-daily-limit-input').addEventListener('keydown', async (event) => {
+  if (event.key !== 'Enter') return
+  event.preventDefault()
+  const raw = event.target.value.trim()
+  const nextLimit = raw ? parseInt(raw, 10) : null
+  await saveSlotDailyLimit(nextLimit)
+})
+
+document.getElementById('slot-daily-limit-save').addEventListener('click', async () => {
+  const input = document.getElementById('slot-daily-limit-input')
+  const raw = input?.value?.trim() || ''
+  const nextLimit = raw ? parseInt(raw, 10) : null
+  await saveSlotDailyLimit(nextLimit)
+})
+
+document.getElementById('slot-daily-limit-none').addEventListener('click', async () => {
+  const input = document.getElementById('slot-daily-limit-input')
+  if (input) input.value = ''
+  slotDailyLimitInput = ''
+  await saveSlotDailyLimit(null)
+})
+
+document.getElementById('slot-daily-limit-1gb').addEventListener('click', async () => {
+  const input = document.getElementById('slot-daily-limit-input')
+  if (input) input.value = '1024'
+  slotDailyLimitInput = '1024'
+  await saveSlotDailyLimit(1024)
+})
+
+document.getElementById('slot-daily-limit-2gb').addEventListener('click', async () => {
+  const input = document.getElementById('slot-daily-limit-input')
+  if (input) input.value = '2048'
+  slotDailyLimitInput = '2048'
+  await saveSlotDailyLimit(2048)
+})
+
+document.getElementById('slot-daily-limit-5gb').addEventListener('click', async () => {
+  const input = document.getElementById('slot-daily-limit-input')
+  if (input) input.value = '5120'
+  slotDailyLimitInput = '5120'
+  await saveSlotDailyLimit(5120)
 })
 
 setInterval(() => {

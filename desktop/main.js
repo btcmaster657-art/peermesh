@@ -141,6 +141,7 @@ let config = {
   privateShare: null,
   privateShareDeviceId: null,
   privateShares: [],
+  slotLimits: [],
 }
 let stats = { bytesServed: 0, requestsHandled: 0, connectedAt: null }
 const activeTunnels = new Map()
@@ -238,6 +239,7 @@ async function clearDesktopAuth(reason, { rotateIdentity = false, revoke = true 
     privateShare: null,
     privateShareDeviceId: null,
     privateShares: [],
+    slotLimits: [],
   }
   if (rotateIdentity) rotateDesktopIdentity({ rotateBaseDeviceId: true })
   else ensureSlotStates()
@@ -396,6 +398,11 @@ function hydratePrivateShareRows(rows) {
   return hydratedRows
 }
 
+function normalizeSlotLimitRows(rows) {
+  if (!Array.isArray(rows)) return []
+  return rows.filter(row => row && typeof row === 'object' && typeof row.device_id === 'string')
+}
+
 function getDefaultPrivateShareDeviceId() {
   if (typeof config.privateShareDeviceId === 'string' && config.privateShareDeviceId.trim()) {
     return config.privateShareDeviceId.trim()
@@ -439,6 +446,7 @@ function applySharingProfileData(data, { source = 'remote' } = {}) {
   config.privateShare = selectedPrivateShare ?? nextPrivateShare
   config.privateShareDeviceId = config.privateShare?.device_id ?? config.privateShare?.base_device_id ?? config.privateShareDeviceId ?? null
   config.privateShareActive = !!(config.privateShare?.enabled && config.privateShare?.active)
+  config.slotLimits = normalizeSlotLimitRows(data.slot_limits ?? config.slotLimits)
   limitHit = data.daily_limit_bytes == null
     ? false
     : ((config.todaySharedBytes ?? 0) + getAggregateStats().bytesServed) >= data.daily_limit_bytes
@@ -699,6 +707,7 @@ function loadConfig() {
   config.privateShare = config.privateShare ?? null
   config.privateShareDeviceId = config.privateShareDeviceId ?? config.privateShare?.device_id ?? null
   config.privateShares = hydratePrivateShareRows(config.privateShares)
+  config.slotLimits = normalizeSlotLimitRows(config.slotLimits)
   config.privateShare = selectPrivateShareRow(config.privateShares, config.privateShareDeviceId) ?? config.privateShare ?? null
   config.privateShareDeviceId = config.privateShare?.device_id ?? config.privateShareDeviceId ?? null
   config.privateShareActive = !!(config.privateShare?.enabled && config.privateShare?.active)
@@ -881,7 +890,8 @@ function getPrivateShareExpiryPreset(expiresAt) {
 
 async function getPrivateShareState(forceRefresh = true) {
   if (!config.token || !config.baseDeviceId) return null
-  if (forceRefresh) await pollTodayBytes()
+  let latest = null
+  if (forceRefresh) latest = await pollTodayBytes().catch(() => null)
   const privateShares = hydratePrivateShareRows(config.privateShares)
   const privateShare = selectPrivateShareRow(privateShares, config.privateShareDeviceId) ?? config.privateShare ?? null
   return {
@@ -889,6 +899,7 @@ async function getPrivateShareState(forceRefresh = true) {
     privateShares,
     privateShareDeviceId: privateShare?.device_id ?? config.privateShareDeviceId ?? null,
     expiryPreset: getPrivateShareExpiryPreset(privateShare?.expires_at ?? null),
+    slotLimits: normalizeSlotLimitRows(latest?.slot_limits ?? config.slotLimits),
   }
 }
 
@@ -936,6 +947,7 @@ async function updatePrivateShareState({ enabled, refresh = false, expiryHours, 
   config.privateShare = selectPrivateShareRow(config.privateShares, targetDeviceId) ?? data.private_share ?? null
   config.privateShareDeviceId = config.privateShare?.device_id ?? targetDeviceId
   config.privateShareActive = !!(config.privateShare?.enabled && config.privateShare?.active)
+  config.slotLimits = normalizeSlotLimitRows(data.slot_limits ?? config.slotLimits)
   saveConfig()
 
   if (previousEnabled !== !!config.privateShare?.enabled && (config.shareEnabled || activeSlotCount() > 0)) {
@@ -956,6 +968,55 @@ async function updatePrivateShareState({ enabled, refresh = false, expiryHours, 
     privateShares: hydratePrivateShareRows(config.privateShares),
     privateShareDeviceId: config.privateShareDeviceId ?? null,
     expiryPreset: getPrivateShareExpiryPreset(config.privateShare?.expires_at ?? null),
+    slotLimits: normalizeSlotLimitRows(config.slotLimits),
+  }
+}
+
+async function setSlotDailyShareLimit(limitMb, { deviceId, baseDeviceId } = {}) {
+  if (!config.token || !config.baseDeviceId) throw new Error('Sign in required')
+
+  const normalizedLimit = limitMb == null ? null : parseInt(String(limitMb), 10)
+  if (normalizedLimit != null && (!Number.isInteger(normalizedLimit) || normalizedLimit < 1024)) {
+    throw new Error('Slot limit must be at least 1024 MB (1 GB), or unset it')
+  }
+
+  const resolvedBaseDeviceId = String(baseDeviceId || config.baseDeviceId || '').trim()
+  const resolvedDeviceId = String(deviceId || config.privateShareDeviceId || getDefaultPrivateShareDeviceId() || '').trim()
+  if (!resolvedBaseDeviceId || !resolvedDeviceId) {
+    throw new Error('Select a slot before setting a slot limit')
+  }
+
+  logRequest('POST', `${API_BASE}/api/user/sharing`, {
+    slotDailyLimitMb: normalizedLimit,
+    slotDeviceId: resolvedDeviceId,
+    baseDeviceId: resolvedBaseDeviceId,
+  })
+
+  const res = await fetch(`${API_BASE}/api/user/sharing`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
+    body: JSON.stringify({
+      slotDailyLimitMb: normalizedLimit,
+      slotDeviceId: resolvedDeviceId,
+      baseDeviceId: resolvedBaseDeviceId,
+    }),
+    signal: AbortSignal.timeout(5000),
+  })
+  logResponse('POST', `${API_BASE}/api/user/sharing`, res.status)
+
+  const data = await res.json().catch(() => ({}))
+  if (res.status === 401 || res.status === 403) {
+    const stillValid = await confirmDesktopAuthStillValid('slot_daily_limit', res.status, { preserveWhileSharing: true })
+    throw new Error(stillValid ? 'Could not update slot daily limit - please try again' : 'Session expired - please sign in again')
+  }
+  if (!res.ok || data.error) throw new Error(data.error || 'Could not update slot daily limit')
+
+  config.slotLimits = normalizeSlotLimitRows(data.slot_limits ?? config.slotLimits)
+  saveConfig()
+
+  return {
+    slotLimits: normalizeSlotLimitRows(config.slotLimits),
+    state: getPublicState(),
   }
 }
 
@@ -966,6 +1027,28 @@ async function applyConnectionSlots(nextSlots, { syncPeer = true } = {}) {
   config.connectionSlots = normalizedSlots
   ensureSlotStates()
   saveConfig()
+
+  if (config.token && config.baseDeviceId) {
+    try {
+      logRequest('POST', `${API_BASE}/api/user/sharing`, {
+        connectionSlots: normalizedSlots,
+        baseDeviceId: config.baseDeviceId,
+      })
+      const response = await fetch(`${API_BASE}/api/user/sharing`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
+        body: JSON.stringify({
+          connectionSlots: normalizedSlots,
+          baseDeviceId: config.baseDeviceId,
+        }),
+        signal: AbortSignal.timeout(5000),
+      })
+      logResponse('POST', `${API_BASE}/api/user/sharing`, response.status)
+      if (response.ok) await pollTodayBytes().catch(() => {})
+    } catch (e) {
+      log.warn('SLOTS', 'remote slot cleanup sync failed', { err: e.message, slots: normalizedSlots })
+    }
+  }
 
   let peerState = null
   if (syncPeer && peerPort) {
@@ -2036,6 +2119,18 @@ ipcMain.handle('set-daily-share-limit', async (_, limitMb) => {
   }
 })
 
+ipcMain.handle('set-slot-daily-limit', async (_, payload = {}) => {
+  try {
+    const result = await setSlotDailyShareLimit(payload.limitMb, {
+      deviceId: payload.deviceId,
+      baseDeviceId: payload.baseDeviceId,
+    })
+    return { success: true, ...result }
+  } catch (e) {
+    return { success: false, error: e.message, state: getPublicState() }
+  }
+})
+
 ipcMain.handle('get-private-share', async () => {
   const result = await getPrivateShareState(true)
   return {
@@ -2045,6 +2140,7 @@ ipcMain.handle('get-private-share', async () => {
     privateShares: result?.privateShares ?? hydratePrivateShareRows(config.privateShares),
     privateShareDeviceId: result?.privateShareDeviceId ?? config.privateShareDeviceId ?? null,
     expiryPreset: result?.expiryPreset ?? getPrivateShareExpiryPreset(config.privateShare?.expires_at ?? null),
+    slotLimits: result?.slotLimits ?? normalizeSlotLimitRows(config.slotLimits),
   }
 })
 
@@ -2058,6 +2154,7 @@ ipcMain.handle('update-private-share', async (_, payload = {}) => {
       privateShares: result.privateShares,
       privateShareDeviceId: result.privateShareDeviceId ?? null,
       expiryPreset: result.expiryPreset,
+      slotLimits: result.slotLimits ?? normalizeSlotLimitRows(config.slotLimits),
       state: getPublicState(),
     }
   } catch (e) {

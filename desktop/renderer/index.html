@@ -458,8 +458,28 @@
       <div class="private-head">
         <div>
           <div class="private-title">Private sharing</div>
-          <div class="private-subtitle">Optional 9-digit access code for trusted connections. Applies to every slot on this desktop.</div>
+          <div class="private-subtitle">Optional 9-digit access code for trusted connections. Private access is managed per slot.</div>
         </div>
+      </div>
+      <div class="private-controls" style="grid-template-columns:1fr">
+        <select class="private-select" id="private-share-device">
+          <option value="">No slots available</option>
+        </select>
+      </div>
+      <div class="private-card" style="background:#0d0d14;border-style:dashed;margin-bottom:10px;padding:12px">
+        <div class="private-title" style="font-size:11px;margin-bottom:4px">Slot daily limit</div>
+        <div class="private-subtitle" style="margin-top:0;margin-bottom:8px">Optional cap for the currently selected slot only.</div>
+        <div class="private-controls" style="grid-template-columns:1fr auto">
+          <input id="slot-daily-limit-input" inputmode="numeric" placeholder="1024+ MB" style="width:100%;padding:8px 10px;border-radius:8px;border:1px solid var(--border);background:#13131a;color:var(--text);font-family:'Courier New',monospace;font-size:11px" />
+          <button class="mini-btn" id="slot-daily-limit-save">APPLY</button>
+        </div>
+        <div class="private-controls" style="grid-template-columns:repeat(4, minmax(0, 1fr));margin-top:8px">
+          <button class="mini-btn" id="slot-daily-limit-1gb">1 GB</button>
+          <button class="mini-btn" id="slot-daily-limit-2gb">2 GB</button>
+          <button class="mini-btn" id="slot-daily-limit-5gb">5 GB</button>
+          <button class="mini-btn" id="slot-daily-limit-none">NO LIMIT</button>
+        </div>
+        <div class="private-status" id="slot-daily-limit-status">No per-slot cap on the selected slot.</div>
       </div>
       <div class="private-code-row">
         <div class="private-code" id="private-share-code">---------</div>

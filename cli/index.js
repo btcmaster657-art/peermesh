@@ -30,7 +30,7 @@ async function getLiveRelays() {
 const CONFIG_DIR = join(homedir(), '.peermesh')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
 const SHARED_IDENTITY_FILE = join(CONFIG_DIR, 'machine-identity.json')
-const VERSION     = '1.0.48'
+const VERSION     = '1.0.49'
 const DEBUG_LOG = join(homedir(), 'Desktop', 'peermesh-debug.log')
 
 const CONTROL_PORT = 7654
@@ -770,6 +770,21 @@ function printPrivateShareState(privateShare, rows = config.privateShares) {
       console.log(`    - ${getPrivateShareLabel(row, index)}: ${rowMode} (${rowCode})`)
     })
   }
+}
+
+async function getLiveStatusState() {
+  const ports = [CONTROL_PORT, PEER_PORT]
+  const states = []
+  for (const port of ports) {
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/native/state`, { signal: AbortSignal.timeout(1500) })
+      if (!res.ok) continue
+      states.push(await res.json())
+    } catch {}
+  }
+  const cliState = states.find(state => state?.where === 'cli')
+  if (cliState) return cliState
+  return states.find(state => state?.running) ?? states[0] ?? null
 }
 
 function sendMsg(slot, data) {
@@ -1616,24 +1631,35 @@ async function main() {
   _controlLimitBytes = limitBytes
 
     if (statusFlag) {
-    const slots = getConnectionSlots()
-    const privateRows = hydratePrivateShareRows(config.privateShares)
+    const liveState = await getLiveStatusState()
+    const slots = liveState?.connectionSlots ?? liveState?.slots?.configured ?? getConnectionSlots()
+    const privateRows = Array.isArray(liveState?.privateShares)
+      ? hydratePrivateShareRows(liveState.privateShares)
+      : hydratePrivateShareRows(config.privateShares)
+    const slotStatuses = Array.isArray(liveState?.slots?.statuses) ? liveState.slots.statuses : getSlotSummary()
     console.log('')
     console.log(`  User:          ${config.username ?? '-'}`)
     console.log(`  Country:       ${config.country ?? '-'}`)
     console.log(`  Slots:         ${slots}`)
+    console.log(`  Sharing:       ${liveState?.running ? 'active' : (config.shareEnabled ? 'enabled' : 'idle')}`)
     console.log(`  Shared today:  ${formatBytes(config.todaySharedBytes ?? 0)}`)
     console.log(`  Requests today:${String(config.todayRequestsHandled ?? 0).padStart(2)}`)
     console.log(`  Daily limit:   ${limitMb ? `${limitMb} MB` : 'none'}`)
     console.log('')
-    console.log('  Private sharing per slot:')
-    privateRows.forEach((row, i) => {
-      const label = getPrivateShareLabel(row, i)
-      const mode  = row.enabled ? (row.active ? 'ACTIVE' : 'ENABLED') : 'DISABLED'
-      const code  = row.code || '---------'
-      const exp   = row.expires_at ? new Date(row.expires_at).toLocaleString() : 'no expiry'
-      console.log(`    ${label}: ${mode}  code=${code}  expiry=${exp}`)
-    })
+    console.log('  Slot state:')
+    for (let index = 0; index < slots; index += 1) {
+      const slotStatus = slotStatuses[index] ?? null
+      const deviceId = slotStatus?.deviceId ?? `${getBaseDeviceId()}_slot_${index}`
+      const share = privateRows.find(row => row.device_id === deviceId) ?? createDisabledPrivateShareRow(deviceId, index)
+      const label = getPrivateShareLabel(share, index)
+      const relayState = slotStatus?.running ? 'RUNNING' : 'IDLE'
+      const visibility = share.enabled ? (share.active ? 'PRIVATE' : 'PRIVATE (expired)') : 'PUBLIC'
+      const code = share.code || '---------'
+      const exp = share.expires_at ? new Date(share.expires_at).toLocaleString() : 'no expiry'
+      const requests = slotStatus?.requestsHandled ?? 0
+      const served = slotStatus?.bytesServed ?? 0
+      console.log(`    ${label}: ${relayState}  req=${requests}  served=${formatBytes(served)}  mode=${visibility}  code=${code}  expiry=${exp}`)
+    }
     console.log('')
     process.exit(0)
   }
