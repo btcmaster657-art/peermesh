@@ -1,7 +1,5 @@
 // background/service-worker.js - PeerMesh Extension Service Worker
 import { APP_URL } from '../config.js'
-import '../content/country-data.js'
-import '../content/persona-data.js'
 
 const EXTENSION_VERSION = chrome.runtime.getManifest().version
 const BLOCKED_HOSTS = [/\.onion$/i, /^smtp\./i, /^mail\./i, /torrent/i]
