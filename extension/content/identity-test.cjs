@@ -11,6 +11,7 @@ const fs     = require('fs')
 const path   = require('path')
 const vm     = require('vm')
 const crypto = require('crypto')
+const { URL: NodeURL } = require('url')
 
 // ── Profile ────────────────────────────────────────────────────────────────────
 const PERSONA = process.argv[3] || 'mobile'
@@ -91,6 +92,15 @@ navProp('mediaDevices', {
     { kind: 'audiooutput', label: '', deviceId: 'real-spk', groupId: 'g1' },
   ],
 })
+class FakeServiceWorkerContainer {}
+global.ServiceWorkerContainer = { prototype: FakeServiceWorkerContainer.prototype }
+global.ServiceWorkerRegistration = { prototype: {} }
+global.ServiceWorker = { prototype: {} }
+Object.defineProperty(FakeNavigator.prototype, 'serviceWorker', {
+  get: () => Object.create(FakeServiceWorkerContainer.prototype),
+  configurable: true,
+  enumerable: true,
+})
 Object.defineProperty(FakeNavigator.prototype, 'getBattery', {
   value: () => Promise.resolve({ charging: true, chargingTime: 0, dischargingTime: Infinity, level: 1.0 }),
   writable: true, configurable: true, enumerable: true,
@@ -124,9 +134,16 @@ global.innerWidth = 1098; global.innerHeight = 529
 global.outerWidth = 1098; global.outerHeight = 618
 global.devicePixelRatio = 1.75
 global.visualViewport   = { width: 1098, height: 529.1428833007812, scale: 1, offsetTop: 0, offsetLeft: 0, pageTop: 0, pageLeft: 0 }
+global.location = { href: 'https://example.com/', origin: 'https://example.com' }
 global.locationbar  = { visible: false }; global.menubar     = { visible: false }
 global.personalbar  = { visible: false }; global.scrollbars  = { visible: false }
 global.statusbar    = { visible: false }; global.toolbar     = { visible: false }
+const REAL_VIEWPORT = {
+  innerWidth: global.innerWidth,
+  innerHeight: global.innerHeight,
+  outerWidth: global.outerWidth,
+  outerHeight: global.outerHeight,
+}
 
 // Canvas
 class FakeCRCTX {
@@ -165,6 +182,28 @@ global.OfflineAudioContext = FakeOAC; global.webkitOfflineAudioContext = FakeOAC
 global.RTCPeerConnection = function(c) { this.config = c }
 global.RTCPeerConnection.prototype = {}
 
+// Workers
+const workerBlobs = new Map()
+let workerBlobId = 0
+global.URL = class URLWithBlob extends NodeURL {
+  static createObjectURL(blob) {
+    const id = `blob:peermesh-${++workerBlobId}`
+    workerBlobs.set(id, blob)
+    return id
+  }
+  static revokeObjectURL(id) {
+    workerBlobs.delete(id)
+  }
+}
+class FakeWorker {
+  constructor(url, options = {}) {
+    this.url = url
+    this.options = options
+  }
+}
+global.Worker = FakeWorker
+global.SharedWorker = FakeWorker
+
 // WebAssembly
 global.WebAssembly = { validate(buf) { try { return buf.byteLength > 4 } catch { return false } } }
 
@@ -196,7 +235,12 @@ global.performance = new FakePerf()
 // Misc
 global.HTMLElement  = { prototype: {} }
 global.DOMException = class DOMException extends Error {}
-global.Blob         = class Blob {}
+global.Blob         = class Blob {
+  constructor(parts = [], options = {}) {
+    this.parts = parts
+    this.type = options.type || ''
+  }
+}
 global.chrome       = {
   runtime: { getManifest: () => ({ version: '1.0.0' }), getURL: s => `chrome-extension://x/${s}` },
   storage: { local: { get: (k, cb) => cb({}) } },
@@ -258,17 +302,17 @@ test('Screen', 'colorDepth',  g(screen,'colorDepth'),  P.colorDepth)
 test('Screen', 'pixelDepth',  g(screen,'pixelDepth'),  P.pixelDepth)
 
 // Window
-test('Window', 'innerWidth',                  g(window,'innerWidth'),        P.screen.innerWidth)
-test('Window', 'innerHeight',                 g(window,'innerHeight'),       P.screen.innerHeight)
-test('Window', 'outerWidth',                  g(window,'outerWidth'),        P.screen.width)
-test('Window', 'outerHeight',                 g(window,'outerHeight'),       P.screen.height)
+test('Window', 'innerWidth',                  g(window,'innerWidth'),        REAL_VIEWPORT.innerWidth)
+test('Window', 'innerHeight',                 g(window,'innerHeight'),       REAL_VIEWPORT.innerHeight)
+test('Window', 'outerWidth',                  g(window,'outerWidth'),        REAL_VIEWPORT.outerWidth)
+test('Window', 'outerHeight',                 g(window,'outerHeight'),       REAL_VIEWPORT.outerHeight)
 test('Window', 'devicePixelRatio',            g(window,'devicePixelRatio'),  IS_MOB ? 2.625 : 1.0)
 test('Window', 'DPR not leaking real 1.75',   g(window,'devicePixelRatio') !== 1.75, true)
 
 // ViewPort
 const vvp = g(window,'visualViewport')
-test('ViewPort', 'width',              vvp?.width,  P.screen.innerWidth)
-test('ViewPort', 'height',             vvp?.height, P.screen.innerHeight)
+test('ViewPort', 'width',              vvp?.width,  REAL_VIEWPORT.innerWidth)
+test('ViewPort', 'height',             vvp?.height, REAL_VIEWPORT.innerHeight)
 test('ViewPort', 'scale',              vvp?.scale,  1)
 test('ViewPort', 'height is integer',  Number.isInteger(vvp?.height ?? 0), true)
 
@@ -328,6 +372,29 @@ const rtc = new RTCPeerConnection({ iceTransportPolicy: 'all', iceServers: [{ ur
 test('WebRTC', 'iceTransportPolicy = relay', rtc.config?.iceTransportPolicy, 'relay')
 test('WebRTC', 'STUN servers stripped',      rtc.config?.iceServers?.length,  0)
 
+// Workers
+const worker = new Worker('/worker.js')
+test('Workers', 'Worker uses blob wrapper', /^blob:/.test(worker?.url), true)
+test('Workers', 'Worker keeps classic type', worker?.options?.type, 'classic')
+test('Workers', 'Worker bootstrap contains spoofed UA', workerBlobs.get(worker?.url)?.parts?.join('')?.includes(P.userAgent), true)
+
+// Service Workers
+const swContainer = g(navigator, 'serviceWorker')
+test('ServiceWorker', 'container patched', typeof swContainer?.register, 'function')
+const swP = Promise.resolve()
+  .then(() => swContainer?.register('/sw.js'))
+  .then((fakeRegistration) => {
+    test('ServiceWorker', 'register resolves active worker', !!fakeRegistration?.active, true)
+    test('ServiceWorker', 'active scriptURL is spoofed', /\/sw\.js$/.test(fakeRegistration?.active?.scriptURL || ''), true)
+    return swContainer?.ready
+  })
+  .then((readyRegistration) => {
+    test('ServiceWorker', 'ready resolves', !!readyRegistration, true)
+  })
+  .catch(() => {
+    test('ServiceWorker', 'register resolves active worker', false, true)
+  })
+
 // Orientation
 test('Orient', 'type matches persona', g(screen, 'orientation')?.type, IS_MOB ? 'portrait-primary' : 'landscape-primary')
 
@@ -377,7 +444,7 @@ const enumP = navigator.mediaDevices.enumerateDevices().then(devs => {
   test('Devices', 'audio outputs', devs.filter(d=>d.kind==='audiooutput').length, IS_MOB ? 1 : 2)
 }).catch(() => test('Devices', 'enumerateDevices resolves', false, true))
 
-Promise.all([battP, enumP]).then(render)
+Promise.all([battP, enumP, swP]).then(render)
 
 // ── Render ────────────────────────────────────────────────────────────────────
 function render() {

@@ -1,5 +1,10 @@
-// injector.js - runs in ISOLATED world, injects identity.js into MAIN world
-// Only active when a PeerMesh session is connected.
+// injector.js - runs in the isolated world.
+// It computes the active spoof profile and publishes it through the DOM so the
+// main-world content script can apply it without relying on a page-inserted
+// <script> tag that can be blocked by CSP.
+
+const PROFILE_ATTR = 'data-peermesh-profile'
+const PROFILE_EVENT = 'peermesh:profile'
 
 const COUNTRY_DATA_MAP = globalThis.__PEERMESH_COUNTRY_DATA__ || {
   XX: { tz: 'UTC', lang: 'en-US', lat: 51.5074, lon: -0.1278, persona: 'desktop' },
@@ -189,25 +194,56 @@ function markExtensionPresence() {
   return true
 }
 
-if (!markExtensionPresence()) {
-  const ensureMarked = () => {
-    if (!markExtensionPresence()) return
-    document.removeEventListener('readystatechange', ensureMarked)
-    document.removeEventListener('DOMContentLoaded', ensureMarked)
+function withDocumentRoot(callback) {
+  if (callback()) return
+
+  const retry = () => {
+    if (!callback()) return
+    document.removeEventListener('readystatechange', retry)
+    document.removeEventListener('DOMContentLoaded', retry)
   }
 
-  document.addEventListener('readystatechange', ensureMarked)
-  document.addEventListener('DOMContentLoaded', ensureMarked)
+  document.addEventListener('readystatechange', retry)
+  document.addEventListener('DOMContentLoaded', retry)
 }
 
-chrome.storage.local.get(['session'], ({ session }) => {
-  if (!session?.country) return
+function publishProfile(profile) {
+  const root = document.documentElement
+  if (!root) return false
 
-  const profile = buildProfile(session)
-  const script = document.createElement('script')
-  script.src = chrome.runtime.getURL('content/identity.js')
-  script.dataset.profile = JSON.stringify(profile)
-  script.onload = () => script.remove()
-  script.onerror = () => script.remove()
-  ;(document.head || document.documentElement).appendChild(script)
+  const rawProfile = JSON.stringify(profile)
+  root.setAttribute(PROFILE_ATTR, rawProfile)
+  document.dispatchEvent(new CustomEvent(PROFILE_EVENT, { detail: rawProfile }))
+  return true
+}
+
+function clearPublishedProfile() {
+  const root = document.documentElement
+  if (!root) return false
+
+  root.removeAttribute(PROFILE_ATTR)
+  return true
+}
+
+function syncProfile(session) {
+  withDocumentRoot(() => {
+    markExtensionPresence()
+
+    if (!session?.country) {
+      return clearPublishedProfile()
+    }
+
+    return publishProfile(buildProfile(session))
+  })
+}
+
+withDocumentRoot(markExtensionPresence)
+
+chrome.storage.local.get(['session'], ({ session }) => {
+  syncProfile(session)
+})
+
+chrome.storage.onChanged?.addListener((changes, areaName) => {
+  if (areaName !== 'local' || !changes.session) return
+  syncProfile(changes.session.newValue ?? null)
 })
