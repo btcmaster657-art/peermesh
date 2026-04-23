@@ -638,6 +638,13 @@ export async function POST(req: Request) {
   if ('connectionSlots' in body && typeof body.connectionSlots === 'number') {
     const baseDeviceId = body.baseDeviceId ? String(body.baseDeviceId).trim() : null
     if (baseDeviceId) {
+      const normalizedSlots = Math.max(1, Math.min(32, Number.parseInt(String(body.connectionSlots), 10) || 1))
+      await adminClient
+        .from('provider_devices')
+        .update({ connection_slots: normalizedSlots })
+        .eq('user_id', userId)
+        .like('device_id', `${baseDeviceId}_slot_%`)
+
       const resultPrivate = await cleanupStalePrivateShareSlots(userId, baseDeviceId, body.connectionSlots)
       const resultLimits = await cleanupStaleSlotLimits(userId, baseDeviceId, body.connectionSlots)
       console.log(`Slot cleanup for ${userId}/${baseDeviceId}: private=${resultPrivate.deletedCount} slotLimits=${resultLimits.deletedCount}`)
@@ -708,6 +715,16 @@ export async function PUT(req: Request) {
   try { await adminClient.rpc('cleanup_stale_providers') } catch {}
 
   if (rpcError) return NextResponse.json({ error: rpcError.message }, { status: 500 })
+
+  const connectionSlots = Number.parseInt(String(body.connection_slots ?? ''), 10)
+  if (Number.isInteger(connectionSlots) && connectionSlots >= 1 && connectionSlots <= 32) {
+    await adminClient
+      .from('provider_devices')
+      .update({ connection_slots: connectionSlots })
+      .eq('user_id', userId)
+      .eq('device_id', device_id)
+  }
+
   return NextResponse.json({ ok: true })
 }
 

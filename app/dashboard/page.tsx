@@ -193,6 +193,7 @@ export default function Dashboard() {
   const desktopAuthTokenRef = useRef('')
   // FIX: tracks the explicit user slot selection — survives polls and stale closures
   const userSelectedSlotRef = useRef<string | null>(null)
+  const privateShareReqSeqRef = useRef(0)
 
   const [profile, setProfile] = useState<Profile | null>(null)
   const [peerCounts, setPeerCounts] = useState<Record<string, number>>({})
@@ -602,11 +603,16 @@ export default function Dashboard() {
   }
 
   async function loadPrivateShare(baseDeviceId: string, desktopState: DesktopState | null = null) {
+    const requestSeq = ++privateShareReqSeqRef.current
     const effectiveDesktopState = desktopState ?? desktop
     log('loadPrivateShare START', 'baseDeviceId=' + baseDeviceId, 'userSelectedSlotRef=' + (userSelectedSlotRef.current ?? 'null'))
     const res = await fetch(`/api/user/sharing?baseDeviceId=${encodeURIComponent(baseDeviceId)}`)
     if (!res.ok) throw new Error('Could not load private sharing state')
     const data = await res.json()
+    if (requestSeq !== privateShareReqSeqRef.current) {
+      log('loadPrivateShare STALE_RESPONSE', 'requestSeq=' + requestSeq, 'latest=' + privateShareReqSeqRef.current)
+      return
+    }
     const apiShares: PrivateShare[] = data.private_shares ?? (data.private_share ? [data.private_share] : [])
     const apiSlotLimits: SlotLimitEntry[] = data.slot_limits ?? []
     log('loadPrivateShare API RESPONSE',
@@ -626,6 +632,7 @@ export default function Dashboard() {
   }
 
   async function savePrivateShare(input: { enabled?: boolean; refresh?: boolean; expiryHours?: string }) {
+    privateShareReqSeqRef.current += 1
     if (profile && !isDesktopOwnedByUser(desktop, profile.id)) {
       setShareError(getHelperMismatchError(desktop?.where))
       return

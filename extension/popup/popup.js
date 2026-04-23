@@ -213,6 +213,8 @@ async function handleAuthFailure(status, { preserveWhileSharing = false } = {}) 
 // â”€â”€ Session expiry â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async function handleExpiredSession() {
+  stopPeerPolling()
+  if (authPollInterval) { clearInterval(authPollInterval); authPollInterval = null }
   await chrome.runtime.sendMessage({ type: 'STOP_SHARING' }).catch(() => {})
   await chrome.runtime.sendMessage({ type: 'DISCONNECT' }).catch(() => {})
   state.user = null
@@ -313,6 +315,13 @@ async function init() {
 let authPollInterval = null
 let peerPollInterval = null
 let statusPollInterval = null
+let profilePollInterval = null
+
+function stopPeerPolling() {
+  if (peerPollInterval) { clearInterval(peerPollInterval); peerPollInterval = null }
+  if (statusPollInterval) { clearInterval(statusPollInterval); statusPollInterval = null }
+  if (profilePollInterval) { clearInterval(profilePollInterval); profilePollInterval = null }
+}
 
 async function refreshRuntimeStatus() {
   try {
@@ -450,7 +459,7 @@ function startPeerPolling() {
   }
 
   // Poll fresh profile stats from DB every 10s (matches dashboard refresh rate)
-  setInterval(async () => {
+  if (!profilePollInterval) profilePollInterval = setInterval(async () => {
     const authToken = getUserSharingToken()
     if (!state.user || !authToken) return
     try {
@@ -1291,6 +1300,8 @@ async function saveSlotDailyLimit(limitMb) {
 
 async function signOut() {
   if (!confirm('Sign out of PeerMesh?')) return
+  stopPeerPolling()
+  if (authPollInterval) { clearInterval(authPollInterval); authPollInterval = null }
   if (state.isSharing) {
     await chrome.runtime.sendMessage({ type: 'STOP_SHARING' }).catch(() => {})
   }

@@ -798,7 +798,12 @@ function sendHeartbeat(slot) {
   fetch(`${API_BASE}/api/user/sharing`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
-    body: JSON.stringify({ device_id: slot.deviceId, user_id: config.userId, relay_url: slot.lastRelay ?? null }),
+    body: JSON.stringify({
+      device_id: slot.deviceId,
+      user_id: config.userId,
+      relay_url: slot.lastRelay ?? null,
+      connection_slots: getConnectionSlots(),
+    }),
   })
     .then(async (res) => {
       clogResponse('PUT', `${API_BASE}/api/user/sharing`, res.status)
