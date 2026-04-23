@@ -48,6 +48,8 @@ export class PeerRequester {
 
     return new Promise((resolve, reject) => {
       let attemptIndex = 0
+      let retries = 0
+      const MAX_RETRIES = 3
       let settled = false
       let disconnected = false
       let connectTimer: ReturnType<typeof setTimeout> | null = null
@@ -81,6 +83,13 @@ export class PeerRequester {
 
       const tryConnect = () => {
         if (attemptIndex >= fallbackList.length) {
+          // Exhausted all relays — retry with backoff if providers were busy
+          if (retries < MAX_RETRIES) {
+            retries++
+            attemptIndex = 0
+            setTimeout(tryConnect, 3000)
+            return
+          }
           rejectOnce(new Error('No peer available in ' + country + ' - try another country'))
           return
         }
@@ -141,7 +150,10 @@ export class PeerRequester {
                 this.ws?.close()
                 setTimeout(tryConnect, 500)
               } else {
-                rejectOnce(new Error(msg.message))
+                // Last relay failed — advance past end to trigger retry-with-backoff
+                attemptIndex = fallbackList.length
+                this.ws?.close()
+                setTimeout(tryConnect, 0)
               }
             } else {
               notifyDisconnect(msg.message)

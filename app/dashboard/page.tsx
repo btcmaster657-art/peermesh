@@ -5,11 +5,17 @@ import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 import { checkDesktop, syncDesktopAuth, startDesktopSharing, stopDesktopSharing, setDesktopConnectionSlots } from '@/lib/agent-client'
 import { formatBytes } from '@/lib/utils'
-import type { Profile, PeerAvailability } from '@/lib/types'
+import type { Profile, PeerAvailability, PrivateShare } from '@/lib/types'
 import type { DesktopState } from '@/lib/agent-client'
 
 type Country = { code: string; name: string; flag: string }
 const COUNTRIES_PAGE_SIZE = 20
+
+// ── Debug logger — all strings, no objects, easy to copy from console ──────────
+function log(tag: string, ...parts: (string | number | boolean | null | undefined)[]) {
+  const ts = new Date().toISOString().slice(11, 23)
+  console.log(`[SLOT ${ts}] [${tag}]`, parts.map(p => String(p ?? 'null')).join(' | '))
+}
 
 
 function CliSection({ label, cmd }: { label: string; cmd: string }) {
@@ -30,13 +36,7 @@ function CliSection({ label, cmd }: { label: string; cmd: string }) {
   )
 }
 
-type PrivateShareState = {
-  base_device_id: string
-  code: string
-  enabled: boolean
-  expires_at: string | null
-  active: boolean
-} | null
+type PrivateShareState = PrivateShare | null
 
 function getHelperMismatchError(where: string | null | undefined): string {
   const source = where === 'cli' ? 'CLI' : 'desktop app'
@@ -62,11 +62,120 @@ function isDesktopSharing(state: DesktopState | null): boolean {
   return !!(state?.running || state?.shareEnabled)
 }
 
+function createDisabledPrivateShare(deviceId: string, baseDeviceId: string, slotIndex: number): PrivateShare {
+  return {
+    device_id: deviceId,
+    base_device_id: baseDeviceId,
+    slot_index: slotIndex,
+    code: '',
+    enabled: false,
+    expires_at: null,
+    active: false,
+  }
+}
+
+function hasPrivateShareSlot(rows: Iterable<PrivateShare>, baseDeviceId: string, slotIndex: number): boolean {
+  for (const row of rows) {
+    if (row.base_device_id !== baseDeviceId) continue
+    if (row.slot_index === slotIndex) return true
+    if (slotIndex === 0 && row.device_id === baseDeviceId) return true
+  }
+  return false
+}
+
+function sortPrivateShares(rows: PrivateShare[]): PrivateShare[] {
+  return [...rows].sort((a, b) => {
+    if (a.base_device_id !== b.base_device_id) return a.base_device_id.localeCompare(b.base_device_id)
+    const aSlot = a.slot_index ?? -1
+    const bSlot = b.slot_index ?? -1
+    if (aSlot !== bSlot) return aSlot - bSlot
+    return a.device_id.localeCompare(b.device_id)
+  })
+}
+
+function mergePrivateShares(rows: PrivateShare[] | null | undefined, baseDeviceId: string, desktop: DesktopState | null): PrivateShare[] {
+  const merged = new Map<string, PrivateShare>()
+  const add = (share: PrivateShare | null | undefined) => {
+    if (share?.device_id) merged.set(share.device_id, share)
+  }
+
+  // First, add all API rows
+  for (const row of rows ?? []) add(row)
+
+  const sources: Array<{
+    baseDeviceId?: string | null
+    connectionSlots?: number | null
+    slots?: DesktopState['slots'] | null
+    privateShare?: PrivateShareState
+    privateShares?: PrivateShare[] | null
+  }> = []
+  if (desktop?.baseDeviceId === baseDeviceId) sources.push(desktop)
+  if (desktop?.peer?.baseDeviceId === baseDeviceId) sources.push(desktop.peer)
+
+  for (const source of sources) {
+    for (const row of source.privateShares ?? []) add(row)
+    add(source.privateShare ?? null)
+
+    const configuredSlots = Math.max(1, source.slots?.configured ?? source.connectionSlots ?? 1)
+    
+    // FIX: If there's a base device share with slot_index=null and code, replicate it to all slot placeholders
+    const baseShare = merged.get(baseDeviceId)
+    const hasBaseShareWithCode = baseShare && !Number.isInteger(baseShare.slot_index) && baseShare.code
+    
+    for (let index = 0; index < configuredSlots; index++) {
+      const slotDeviceId = `${baseDeviceId}_slot_${index}`
+      if (!merged.has(slotDeviceId)) {
+        if (hasBaseShareWithCode) {
+          // Clone the base share to this slot
+          merged.set(slotDeviceId, {
+            ...baseShare,
+            device_id: slotDeviceId,
+            slot_index: index,
+          })
+        } else {
+          // Create empty placeholder
+          merged.set(slotDeviceId, createDisabledPrivateShare(slotDeviceId, baseDeviceId, index))
+        }
+      }
+    }
+  }
+
+  if (merged.size === 0) {
+    const deviceId = `${baseDeviceId}_slot_0`
+    merged.set(deviceId, createDisabledPrivateShare(deviceId, baseDeviceId, 0))
+  }
+
+  return sortPrivateShares([...merged.values()])
+}
+
+function selectPrivateShare(rows: PrivateShare[], deviceId?: string | null, baseDeviceId?: string | null): PrivateShareState {
+  if (rows.length === 0) return null
+  if (deviceId) {
+    const exact = rows.find(row => row.device_id === deviceId)
+    if (exact) return exact
+  }
+  if (baseDeviceId) {
+    const exactBase = rows.find(row => row.device_id === baseDeviceId)
+    if (exactBase) return exactBase
+    const slotZero = rows.find(row => row.base_device_id === baseDeviceId && (row.slot_index === 0 || row.device_id === `${baseDeviceId}_slot_0`))
+    if (slotZero) return slotZero
+  }
+  return rows[0] ?? null
+}
+
+function getPrivateShareLabel(share: PrivateShareState, fallbackIndex = 0): string {
+  if (Number.isInteger(share?.slot_index)) return `Slot ${(share?.slot_index ?? 0) + 1}`
+  return `Slot ${fallbackIndex + 1}`
+}
+
 export default function Dashboard() {
   const router = useRouter()
   const supabase = createClient()
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const pendingShareTargetRef = useRef<boolean | null>(null)
+  const desktopAuthTokenRef = useRef('')
+  // FIX: tracks the explicit user slot selection — survives polls and stale closures
+  const userSelectedSlotRef = useRef<string | null>(null)
 
   const [profile, setProfile] = useState<Profile | null>(null)
   const [peerCounts, setPeerCounts] = useState<Record<string, number>>({})
@@ -82,6 +191,8 @@ export default function Dashboard() {
   const [showDisclosure, setShowDisclosure] = useState(false)
   const [privateCodeInput, setPrivateCodeInput] = useState('')
   const [privateShare, setPrivateShare] = useState<PrivateShareState>(null)
+  const [privateShares, setPrivateShares] = useState<PrivateShare[]>([])
+  const [privateShareDeviceId, setPrivateShareDeviceId] = useState<string | null>(null)
   const [privateExpiryHours, setPrivateExpiryHours] = useState('24')
   const [privateShareSaving, setPrivateShareSaving] = useState(false)
   const [privateShareStoppedSharing, setPrivateShareStoppedSharing] = useState(false)
@@ -126,8 +237,7 @@ export default function Dashboard() {
       setCountriesTotalPages(data.pages ?? 1)
       setCountriesPage(page)
       if (page === 1 && !search && data.detectedCountry && !selectedCountry) {
-        const found = (data.countries as Country[]).find((c: Country) => c.code === data.detectedCountry)
-        if (found) setSelectedCountry(found.code)
+        // auto-select removed — let user choose their own country
       }
     } catch {
       setCountriesError(true)
@@ -141,6 +251,17 @@ export default function Dashboard() {
   function getFlagForCountry(code: string): string {
     return countries.find(c => c.code === code)?.flag ?? '🌍'
   }
+
+  const getDesktopAuthToken = useCallback(async () => {
+    if (desktopAuthTokenRef.current) return desktopAuthTokenRef.current
+    const response = await fetch('/api/device-token', { signal: AbortSignal.timeout(5000) })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok || !data.token) {
+      throw new Error(data.error ?? 'Could not issue a desktop auth token')
+    }
+    desktopAuthTokenRef.current = data.token
+    return data.token as string
+  }, [])
 
   // ── Mobile detection ────────────────────────────────────────────────────────
   useEffect(() => {
@@ -194,7 +315,7 @@ export default function Dashboard() {
             setShareError(getHelperMismatchError(dt.where))
           } else {
             const authResult = await syncDesktopAuth({
-              token: session.access_token,
+              token: await getDesktopAuthToken(),
               userId: user.id,
               country: data.country_code,
               trust: data.trust_score,
@@ -275,8 +396,20 @@ export default function Dashboard() {
     const baseDeviceId = isDesktopOwnedByUser(desktop, profile?.id)
       ? (desktop?.baseDeviceId ?? desktop?.peer?.baseDeviceId ?? null)
       : null
+    log('useEffect[desktop/profile]',
+      'baseDeviceId=' + (baseDeviceId ?? 'null'),
+      'desktop.baseDeviceId=' + (desktop?.baseDeviceId ?? 'null'),
+      'desktop.peer.baseDeviceId=' + (desktop?.peer?.baseDeviceId ?? 'null'),
+      'desktop.userId=' + (desktop?.userId ?? 'null'),
+      'profile.id=' + (profile?.id ?? 'null'),
+      'userSelectedSlotRef=' + (userSelectedSlotRef.current ?? 'null'),
+    )
     if (!profile || !baseDeviceId) {
+      log('useEffect[desktop/profile] CLEARING', 'reason=' + (!profile ? 'no profile' : 'no baseDeviceId'))
       setPrivateShare(null)
+      setPrivateShares([])
+      setPrivateShareDeviceId(null)
+      userSelectedSlotRef.current = null
       return
     }
     loadPrivateShare(baseDeviceId).catch(() => {})
@@ -355,9 +488,21 @@ export default function Dashboard() {
       }
       if (tick % 2 === 0) {
         if (currentBaseDeviceId && !desktopOwnedByOther) {
-          loadPrivateShare(currentBaseDeviceId).catch(() => {})
+          log('poll LOAD PRIVATE SHARE',
+            'tick=' + tick,
+            'baseDeviceId=' + currentBaseDeviceId,
+            'userSelectedSlotRef=' + (userSelectedSlotRef.current ?? 'null'),
+          )
+          loadPrivateShare(currentBaseDeviceId, dt).catch(() => {})
         } else {
+          log('poll CLEAR PRIVATE SHARE',
+            'tick=' + tick,
+            'currentBaseDeviceId=' + (currentBaseDeviceId ?? 'null'),
+            'desktopOwnedByOther=' + String(!!desktopOwnedByOther),
+          )
           setPrivateShare(null)
+          setPrivateShares([])
+          setPrivateShareDeviceId(null)
         }
       }
     }, 3000)
@@ -367,12 +512,86 @@ export default function Dashboard() {
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
   }
 
-  async function loadPrivateShare(baseDeviceId: string) {
+  // FIX: userSelectedSlotRef.current is the highest-priority selection signal.
+  // It is set explicitly by the user and survives stale closures in polling.
+  // We only update privateShareDeviceId state when no explicit user selection is active.
+  function applyPrivateShareRows(rows: PrivateShare[], baseDeviceId: string, preferredDeviceId?: string | null, desktopState: DesktopState | null = desktop) {
+    const merged = mergePrivateShares(rows, baseDeviceId, desktopState)
+
+    const resolvedBy = userSelectedSlotRef.current ? 'userSelectedSlotRef'
+      : preferredDeviceId ? 'preferredDeviceId'
+      : desktopState?.privateShareDeviceId ? 'desktopState.privateShareDeviceId'
+      : desktopState?.peer?.privateShareDeviceId ? 'desktopState.peer.privateShareDeviceId'
+      : 'fallback/first'
+
+    log('applyPrivateShareRows',
+      'baseDeviceId=' + baseDeviceId,
+      'rows=' + rows.length,
+      'merged=' + merged.length,
+      'mergedIds=' + merged.map(s => s.device_id + '[' + (s.enabled ? 'ON' : 'off') + (s.active ? '+ACTIVE' : '') + ']').join(','),
+      'userSelectedSlotRef=' + (userSelectedSlotRef.current ?? 'null'),
+      'preferredDeviceId=' + (preferredDeviceId ?? 'null'),
+      'desktopState.privateShareDeviceId=' + (desktopState?.privateShareDeviceId ?? 'null'),
+      'desktopState.peer.privateShareDeviceId=' + (desktopState?.peer?.privateShareDeviceId ?? 'null'),
+      'resolvedBy=' + resolvedBy,
+      'desktopState.connectionSlots=' + (desktopState?.connectionSlots ?? 'null'),
+      'desktopState.slots.configured=' + (desktopState?.slots?.configured ?? 'null'),
+      'desktopState.peer.connectionSlots=' + (desktopState?.peer?.connectionSlots ?? 'null'),
+      'desktopState.peer.slots.configured=' + (desktopState?.peer?.slots?.configured ?? 'null'),
+    )
+
+    const nextSelected = selectPrivateShare(
+      merged,
+      userSelectedSlotRef.current
+        ?? preferredDeviceId
+        ?? desktopState?.privateShareDeviceId
+        ?? desktopState?.peer?.privateShareDeviceId
+        ?? null,
+      baseDeviceId,
+    )
+
+    log('applyPrivateShareRows SELECTED',
+      'nextSelected.device_id=' + (nextSelected?.device_id ?? 'null'),
+      'nextSelected.slot_index=' + (nextSelected?.slot_index ?? 'null'),
+      'nextSelected.enabled=' + (nextSelected?.enabled ?? 'null'),
+      'nextSelected.active=' + (nextSelected?.active ?? 'null'),
+      'willUpdateDeviceIdState=' + (!userSelectedSlotRef.current ? 'YES' : 'NO (ref is set)'),
+    )
+
+    setPrivateShares(merged)
+    setPrivateShare(nextSelected)
+    if (!userSelectedSlotRef.current) {
+      setPrivateShareDeviceId(nextSelected?.device_id ?? preferredDeviceId ?? null)
+    }
+    setPrivateExpiryHours(getExpiryPreset(nextSelected?.expires_at ?? null))
+    
+    log('applyPrivateShareRows AFTER STATE UPDATE',
+      'privateShare.device_id=' + (nextSelected?.device_id ?? 'null'),
+      'privateShare.code=' + (nextSelected?.code || 'EMPTY'),
+      'privateShare.enabled=' + (nextSelected?.enabled ?? 'null'),
+      'privateShare.active=' + (nextSelected?.active ?? 'null'),
+    )
+  }
+
+  async function loadPrivateShare(baseDeviceId: string, desktopState: DesktopState | null = null) {
+    const effectiveDesktopState = desktopState ?? desktop
+    log('loadPrivateShare START', 'baseDeviceId=' + baseDeviceId, 'userSelectedSlotRef=' + (userSelectedSlotRef.current ?? 'null'))
     const res = await fetch(`/api/user/sharing?baseDeviceId=${encodeURIComponent(baseDeviceId)}`)
     if (!res.ok) throw new Error('Could not load private sharing state')
     const data = await res.json()
-    setPrivateShare(data.private_share ?? null)
-    setPrivateExpiryHours(getExpiryPreset(data.private_share?.expires_at ?? null))
+    const apiShares: PrivateShare[] = data.private_shares ?? (data.private_share ? [data.private_share] : [])
+    log('loadPrivateShare API RESPONSE',
+      'private_shares.length=' + apiShares.length,
+      'ids=' + apiShares.map((s: PrivateShare) => s.device_id + '[enabled=' + s.enabled + ',active=' + s.active + ',slot=' + s.slot_index + ',code=' + (s.code || 'EMPTY') + ']').join(','),
+      'primary_device_id=' + (data.private_share?.device_id ?? 'null'),
+      'primary_code=' + (data.private_share?.code ?? 'null'),
+    )
+    applyPrivateShareRows(
+      apiShares,
+      baseDeviceId,
+      data.private_share?.device_id ?? null,
+      effectiveDesktopState,
+    )
   }
 
   async function savePrivateShare(input: { enabled?: boolean; refresh?: boolean; expiryHours?: string }) {
@@ -385,6 +604,17 @@ export default function Dashboard() {
       setShareError('A local desktop app or CLI device is required to manage private sharing')
       return
     }
+    const targetDeviceId = privateShareDeviceId ?? privateShare?.device_id ?? `${baseDeviceId}_slot_0`
+    log('savePrivateShare START',
+      'targetDeviceId=' + targetDeviceId,
+      'baseDeviceId=' + baseDeviceId,
+      'enabled=' + (input.enabled ?? 'undefined'),
+      'refresh=' + (input.refresh ?? false),
+      'expiryHours=' + (input.expiryHours ?? 'undefined'),
+      'userSelectedSlotRef=' + (userSelectedSlotRef.current ?? 'null'),
+      'privateShareDeviceId_state=' + (privateShareDeviceId ?? 'null'),
+      'privateShare.device_id=' + (privateShare?.device_id ?? 'null'),
+    )
     setPrivateShareSaving(true)
     setShareError(null)
     try {
@@ -396,6 +626,7 @@ export default function Dashboard() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           privateSharing: {
+            deviceId: targetDeviceId,
             baseDeviceId,
             enabled: input.enabled,
             refresh: input.refresh === true,
@@ -405,9 +636,25 @@ export default function Dashboard() {
       })
       const data = await res.json()
       if (!res.ok || data.error) throw new Error(data.error ?? 'Could not update private sharing')
-      setPrivateShare(data.private_share ?? null)
-      if (input.expiryHours !== undefined) setPrivateExpiryHours(input.expiryHours)
+
+      const returnedId = data.private_share?.device_id ?? targetDeviceId
+      const apiShares: PrivateShare[] = data.private_shares ?? (data.private_share ? [data.private_share] : [])
+      log('savePrivateShare RESPONSE',
+        'returnedId=' + returnedId,
+        'private_shares.length=' + apiShares.length,
+        'ids=' + apiShares.map((s: PrivateShare) => s.device_id + '[enabled=' + s.enabled + ',active=' + s.active + ',slot=' + s.slot_index + ']').join(','),
+      )
+
+      if (returnedId) {
+        log('savePrivateShare SET REF', 'userSelectedSlotRef=' + returnedId)
+        userSelectedSlotRef.current = returnedId
+        setPrivateShareDeviceId(returnedId)
+      }
+
+      applyPrivateShareRows(apiShares, baseDeviceId, returnedId)
+      if (input.expiryHours !== undefined && data.private_share) setPrivateExpiryHours(input.expiryHours)
     } catch (err: unknown) {
+      log('savePrivateShare ERROR', String(err))
       setShareError(err instanceof Error ? err.message : 'Could not update private sharing')
     } finally {
       setPrivateShareSaving(false)
@@ -430,6 +677,8 @@ export default function Dashboard() {
       const result = await setDesktopConnectionSlots(nextSlots)
       if (!result.ok || !result.state) throw new Error(result.error ?? 'Could not update connection slots')
       applyDesktopSnapshot(result.state, profile?.id ?? null)
+      const baseDeviceId = result.state.baseDeviceId ?? result.state.peer?.baseDeviceId ?? null
+      if (baseDeviceId) await loadPrivateShare(baseDeviceId, result.state)
     } catch (err: unknown) {
       setShareError(err instanceof Error ? err.message : 'Could not update connection slots')
     } finally {
@@ -539,7 +788,7 @@ export default function Dashboard() {
     pendingShareTargetRef.current = true
     setShareTarget(true)
     const result = await startDesktopSharing({
-      token: session.access_token,
+      token: await getDesktopAuthToken(),
       userId: profile!.id,
       country: profile!.country_code,
       trust: profile!.trust_score,
@@ -948,7 +1197,14 @@ export default function Dashboard() {
               {shareToggling && shareTarget === true
                 ? 'Connecting...'
                 : displayIsSharing
-                  ? `${sharingStats.requestsHandled} requests · ${formatBytes(sharingStats.bytesServed)} served · ${privateShare?.active ? '🔒 PRIVATE' : '🌐 PUBLIC'}`
+                  ? (() => {
+                      const publicCount = privateShares.filter(s => !s.active).length
+                      const privateCount = privateShares.filter(s => s.active).length
+                      const modeLabel = publicCount > 0 && privateCount > 0
+                        ? `${publicCount} 🌐 · ${privateCount} 🔒`
+                        : privateCount > 0 ? '🔒 PRIVATE' : '🌐 PUBLIC'
+                      return `${sharingStats.requestsHandled} requests · ${formatBytes(sharingStats.bytesServed)} served · ${modeLabel}`
+                    })()
                   : !helperOwnedByCurrentUser
                     ? 'Local helper belongs to another user.'
                     : desktopAvailableForUser
@@ -1083,14 +1339,49 @@ export default function Dashboard() {
               <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--accent)', letterSpacing: '1px', marginBottom: '4px' }}>PRIVATE SHARING</div>
               <div style={{ fontSize: '12px', color: 'var(--muted)', lineHeight: 1.6 }}>
                 {privateShare?.active
-                  ? 'Enabled for this local device. The 9-digit code is pinned to this device and all of its active slots.'
-                  : 'Optional device-scoped sharing for trusted requesters only.'}
+                  ? `Enabled for ${getPrivateShareLabel(privateShare)} only. Requesters need this code for that slot.`
+                  : 'Optional per-slot sharing for trusted requesters only.'}
               </div>
             </div>
             <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: privateShare?.active ? 'var(--accent)' : 'var(--muted)', whiteSpace: 'nowrap' }}>
               {privateShare?.active ? '● ACTIVE' : '○ OFF'}
             </div>
           </div>
+
+          {/* FIX: Always show selector when slotDisplayCount > 1 (from desktop state)
+              This prevents transient disappearance when privateShares is temporarily empty */}
+          {slotDisplayCount > 1 && privateShares.length > 0 && (
+            <div style={{ marginBottom: '10px' }}>
+              <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '9px', color: 'var(--muted)', letterSpacing: '0.5px', marginBottom: '6px', textTransform: 'uppercase' }}>Selected Slot</div>
+              <select
+                value={privateShareDeviceId ?? privateShare?.device_id ?? ''}
+                onChange={(e) => {
+                  const nextDeviceId = e.target.value
+                  const nextShare = selectPrivateShare(privateShares, nextDeviceId, helperBaseDeviceId)
+                  log('USER SELECTED SLOT',
+                    'nextDeviceId=' + nextDeviceId,
+                    'prevUserSelectedSlotRef=' + (userSelectedSlotRef.current ?? 'null'),
+                    'prevPrivateShareDeviceId=' + (privateShareDeviceId ?? 'null'),
+                    'nextShare.device_id=' + (nextShare?.device_id ?? 'null'),
+                    'nextShare.slot_index=' + (nextShare?.slot_index ?? 'null'),
+                    'nextShare.enabled=' + (nextShare?.enabled ?? 'null'),
+                  )
+                  // FIX: write to ref so polls respect this selection and don't override it
+                  userSelectedSlotRef.current = nextDeviceId
+                  setPrivateShareDeviceId(nextDeviceId)
+                  setPrivateShare(nextShare)
+                  setPrivateExpiryHours(getExpiryPreset(nextShare?.expires_at ?? null))
+                }}
+                style={{ width: '100%', background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: '8px', padding: '8px 10px', fontFamily: 'var(--font-geist-mono)', fontSize: '10px', cursor: 'pointer' }}
+              >
+                {privateShares.map((share, index) => {
+                  const label = getPrivateShareLabel(share, index)
+                  const badge = share.enabled ? (share.active ? ' [ACTIVE]' : ' [ON]') : ' [OFF]'
+                  return <option key={share.device_id} value={share.device_id}>{label}{badge}</option>
+                })}
+              </select>
+            </div>
+          )}
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '10px', marginBottom: '10px' }}>
             <div style={{ padding: '10px 12px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '8px', fontFamily: 'var(--font-geist-mono)', fontSize: '15px', letterSpacing: '3px', color: privateShare?.code ? 'var(--accent)' : 'var(--muted)' }}>
@@ -1118,22 +1409,7 @@ export default function Dashboard() {
             </select>
             <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
               <button
-                onClick={async () => {
-                  const nextEnabled = !(privateShare?.enabled ?? false)
-                  await savePrivateShare({ enabled: nextEnabled, expiryHours: privateExpiryHours })
-                  if (isSharing) {
-                    pendingShareTargetRef.current = false
-                    const result = await stopDesktopSharing()
-                    if (result.state) applyDesktopSnapshot(result.state, profile.id)
-                    else { pendingShareTargetRef.current = null; setIsSharing(false) }
-                    setPrivateShareStoppedSharing(true)
-                    await fetch('/api/user/sharing', {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ isSharing: false }),
-                    }).catch(() => {})
-                  }
-                }}
+                onClick={() => savePrivateShare({ enabled: !(privateShare?.enabled ?? false), expiryHours: privateExpiryHours })}
                 disabled={privateShareSaving}
                 style={{ padding: '7px 12px', background: privateShare?.enabled ? 'transparent' : 'var(--accent)', color: privateShare?.enabled ? 'var(--text)' : '#000', border: `1px solid ${privateShare?.enabled ? 'var(--border)' : 'var(--accent)'}`, borderRadius: '7px', fontFamily: 'var(--font-geist-mono)', fontSize: '10px', cursor: privateShareSaving ? 'not-allowed' : 'pointer', opacity: privateShareSaving ? 0.6 : 1 }}
               >
@@ -1149,21 +1425,19 @@ export default function Dashboard() {
             </div>
           </div>
 
-          {privateShareStoppedSharing && !isSharing && (
-            <div style={{ marginTop: '8px', fontSize: '11px', color: '#ffaa00', fontFamily: 'var(--font-geist-mono)', background: 'rgba(255,170,0,0.07)', border: '1px solid rgba(255,170,0,0.3)', borderRadius: '6px', padding: '6px 10px' }}>
-              Sharing was stopped. Toggle sharing above to restart with the new privacy setting.
-            </div>
-          )}
-          {isSharing && privateShare?.active && (
-            <div style={{ marginTop: '8px', fontSize: '11px', color: 'var(--muted)', fontFamily: 'var(--font-geist-mono)', background: 'rgba(0,255,136,0.05)', border: '1px solid rgba(0,255,136,0.15)', borderRadius: '6px', padding: '6px 10px' }}>
-              Sharing is PRIVATE – only requesters with your code can connect.
-            </div>
-          )}
-          {isSharing && !privateShare?.active && (
-            <div style={{ marginTop: '8px', fontSize: '11px', color: 'var(--muted)', fontFamily: 'var(--font-geist-mono)', background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)', borderRadius: '6px', padding: '6px 10px' }}>
-              Sharing is PUBLIC – any verified user can connect.
-            </div>
-          )}
+          {isSharing && (() => {
+            const publicCount = privateShares.filter(s => !s.active).length
+            const privateCount = privateShares.filter(s => s.active).length
+            return (
+              <div style={{ marginTop: '8px', fontSize: '11px', color: 'var(--muted)', fontFamily: 'var(--font-geist-mono)', background: 'rgba(0,255,136,0.05)', border: '1px solid rgba(0,255,136,0.15)', borderRadius: '6px', padding: '6px 10px' }}>
+                {publicCount > 0 && privateCount > 0
+                  ? `${publicCount} public slot${publicCount !== 1 ? 's' : ''} · ${privateCount} private slot${privateCount !== 1 ? 's' : ''}`
+                  : privateCount > 0
+                    ? `All ${privateCount} slot${privateCount !== 1 ? 's are' : ' is'} private – only code holders can connect`
+                    : `All ${publicCount} slot${publicCount !== 1 ? 's are' : ' is'} public – any verified user can connect`}
+              </div>
+            )
+          })()}
           {privateShare?.expires_at && (
             <div style={{ marginTop: '10px', fontSize: '11px', color: 'var(--muted)' }}>
               Expires {new Date(privateShare.expires_at).toLocaleString()}
@@ -1340,22 +1614,28 @@ export default function Dashboard() {
 
             <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '9px', color: 'var(--muted)', letterSpacing: '0.5px', marginBottom: '10px' }}>PRIVATE SHARING</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '20px' }}>
-              <CliSection label="Enable private sharing (generates a 9-digit code)" cmd="peermesh-provider --private-on" />
-              <CliSection label="Disable private sharing (back to public)" cmd="peermesh-provider --private-off" />
-              <CliSection label="Rotate the private code (keep sharing enabled)" cmd="peermesh-provider --private-refresh" />
-              <CliSection label="Show current private sharing status and code" cmd="peermesh-provider --private-status" />
-              <CliSection label="Set code expiry to 1 hour" cmd="peermesh-provider --private-on --private-expiry 1" />
-              <CliSection label="Set code expiry to 7 days" cmd="peermesh-provider --private-on --private-expiry 168" />
-              <CliSection label="Set code with no expiry" cmd="peermesh-provider --private-on --private-expiry none" />
+              <CliSection label="Show private sharing status for all slots" cmd="peermesh-provider --private-status" />
+              <CliSection label="Enable private sharing on slot 1 (default)" cmd="peermesh-provider --private-on" />
+              <CliSection label="Enable private sharing on slot 2" cmd="peermesh-provider --private-on --private-slot 2" />
+              <CliSection label="Enable private sharing on slot 3" cmd="peermesh-provider --private-on --private-slot 3" />
+              <CliSection label="Disable private sharing on slot 1" cmd="peermesh-provider --private-off" />
+              <CliSection label="Disable private sharing on slot 2" cmd="peermesh-provider --private-off --private-slot 2" />
+              <CliSection label="Rotate the code on slot 1 (keep enabled)" cmd="peermesh-provider --private-refresh" />
+              <CliSection label="Rotate the code on slot 2" cmd="peermesh-provider --private-refresh --private-slot 2" />
+              <CliSection label="Enable slot 1 with 1-hour expiry" cmd="peermesh-provider --private-on --private-expiry 1" />
+              <CliSection label="Enable slot 2 with 24-hour expiry" cmd="peermesh-provider --private-on --private-slot 2 --private-expiry 24" />
+              <CliSection label="Enable slot 3 with 7-day expiry" cmd="peermesh-provider --private-on --private-slot 3 --private-expiry 168" />
+              <CliSection label="Enable slot 1 with no expiry" cmd="peermesh-provider --private-on --private-expiry none" />
               <div style={{ fontSize: '11px', color: 'var(--muted)', lineHeight: 1.6, padding: '8px 10px', background: 'var(--bg)', borderRadius: '7px', border: '1px solid var(--border)' }}>
-                Private sharing restricts connections to requesters who know your 9-digit code. Changing the mode (on/off) stops sharing – restart manually to apply. The code and state sync with the dashboard and desktop app.
+                <strong style={{ color: 'var(--text)', fontFamily: 'var(--font-geist-mono)', fontSize: '10px' }}>--private-slot N</strong> selects which slot to configure (1-based, matches the slot number shown in the dashboard). Omitting it defaults to slot 1. Each slot has its own independent code, enabled state, and expiry. Privacy changes apply immediately without disconnecting — the CLI/desktop automatically sync the new state. Codes and state sync with the dashboard and desktop app in real time.
               </div>
             </div>
 
             <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '9px', color: 'var(--muted)', letterSpacing: '0.5px', marginBottom: '10px' }}>COMBINING FLAGS</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '20px' }}>
               <CliSection label="4 slots, 1 GB/day cap, verbose logs" cmd="peermesh-provider --slots 4 --limit 1024 --debug" />
-              <CliSection label="8 slots, private, 24h expiry, no terms prompt" cmd="peermesh-provider --slots 8 --private-on --private-expiry 24 --serve" />
+              <CliSection label="8 slots, slot 1 private with 24h expiry, no terms prompt" cmd="peermesh-provider --slots 8 --private-on --private-expiry 24 --serve" />
+              <CliSection label="Enable slot 2 private, slot 3 private, check status" cmd={`peermesh-provider --private-on --private-slot 2 --private-expiry 168\npeermesh-provider --private-on --private-slot 3 --private-expiry 168\npeermesh-provider --private-status`} />
               <CliSection label="Check live status without starting" cmd="peermesh-provider --status" />
             </div>
 

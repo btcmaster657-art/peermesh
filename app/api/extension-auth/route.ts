@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server'
+﻿import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { adminClient } from '@/lib/supabase/admin'
 import { issueDesktopToken, verifyDesktopToken } from '@/lib/desktop-token'
@@ -10,6 +10,7 @@ const CORS = {
 }
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? 'https://peermesh-beta.vercel.app'
+const EXTENSION_AUTH_TTL_MS = 365 * 24 * 60 * 60 * 1000
 
 function generateDeviceCode(): string {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
@@ -26,15 +27,15 @@ export async function OPTIONS() {
   return new NextResponse(null, { status: 204, headers: CORS })
 }
 
-// ── POST ──────────────────────────────────────────────────────────────────────
+// â”€â”€ POST â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Two uses:
-//   1. Website after sign-in → body: { ext_id }  (extension flow)
-//   2. Desktop app           → body: { device: true }  (device flow — request code)
+//   1. Website after sign-in â†’ body: { ext_id }  (extension flow)
+//   2. Desktop app           â†’ body: { device: true }  (device flow â€” request code)
 
 export async function POST(req: Request) {
   const body = await req.json().catch(() => ({}))
 
-  // ── Device flow: desktop requests a code ──────────────────────────────────
+  // â”€â”€ Device flow: desktop requests a code â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   if (body.device === true) {
     const device_code = generateDeviceCode()
     const user_code = generateUserCode()
@@ -55,7 +56,7 @@ export async function POST(req: Request) {
     }, { headers: CORS })
   }
 
-  // ── Extension flow: website writes token after sign-in ────────────────────
+  // â”€â”€ Extension flow: website writes token after sign-in â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const supabase = await createClient()
   const { data: { session } } = await supabase.auth.getSession()
   if (!session) return NextResponse.json({ error: 'Not authenticated' }, { status: 401, headers: CORS })
@@ -73,13 +74,13 @@ export async function POST(req: Request) {
     token,
     supabase_token: session.access_token,
     used: false,
-    expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+    expires_at: new Date(Date.now() + EXTENSION_AUTH_TTL_MS).toISOString(),
   }, { onConflict: 'ext_id' })
 
   return NextResponse.json({ ok: true }, { headers: CORS })
 }
 
-// ── PATCH ─────────────────────────────────────────────────────────────────────
+// â”€â”€ PATCH â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Website (authenticated) approves or denies a device code.
 // Body: { user_code, action: 'approve' | 'deny' }
 
@@ -122,28 +123,65 @@ export async function PATCH(req: Request) {
   return NextResponse.json({ ok: true }, { headers: CORS })
 }
 
-// ── GET ───────────────────────────────────────────────────────────────────────
+// â”€â”€ GET â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Three uses (via query params):
-//   ?device_code=<code>          — desktop polls for approval
-//   ?verify=1&userId=<id>        — desktop verifies its token (Authorization: Bearer <token>)
-//   ?ext_id=<uuid>               — extension exchanges for user data
+//   ?device_code=<code>          â€” desktop polls for approval
+//   ?verify=1&userId=<id>        â€” desktop verifies its token (Authorization: Bearer <token>)
+//   ?ext_id=<uuid>               â€” extension exchanges for user data
 
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url)
 
-  // ── Token verify ──────────────────────────────────────────────────────────
+  // â”€â”€ Token refresh â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Called by desktop/CLI/extension when their token has expired mid-session.
+  // Re-issues a fresh desktop token for the userId if the user still exists and
+  // is verified. No old token required â€” the userId is the identity anchor.
+  if (searchParams.get('refresh') === '1') {
+    // Desktop/CLI agents refresh their token using only userId â€” no old token required.
+    // Refused only if the device has been explicitly revoked (status = 'revoked').
+    const userId = searchParams.get('userId') ?? ''
+    if (!userId) return NextResponse.json({ error: 'userId required' }, { status: 400, headers: CORS })
+    const { data: profile } = await adminClient
+      .from('profiles').select('id, is_verified').eq('id', userId).maybeSingle()
+    if (!profile?.is_verified) return NextResponse.json({ error: 'Not found or not verified' }, { status: 404, headers: CORS })
+    const { data: revokedRow } = await adminClient
+      .from('device_codes').select('id').eq('user_id', userId).eq('status', 'revoked').maybeSingle()
+    if (revokedRow) return NextResponse.json({ revoked: true }, { status: 403, headers: CORS })
+    return NextResponse.json({ token: issueDesktopToken(userId) }, { headers: CORS })
+  }
+
+  // â”€â”€ Token verify â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Returns { ok: true } when valid, { revoked: true } when explicitly revoked.
+  // A 401 (expired token) is NOT revocation â€” clients should refresh, not sign out.
   if (searchParams.get('verify') === '1') {
     const auth = req.headers.get('authorization') ?? ''
     const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
     const userId = searchParams.get('userId') ?? ''
     if (!token) return NextResponse.json({ error: 'Missing token' }, { status: 401, headers: CORS })
     const tokenUserId = verifyDesktopToken(token)
-    if (!tokenUserId) return NextResponse.json({ error: 'Invalid or expired token' }, { status: 401, headers: CORS })
+    if (!tokenUserId) {
+      // Token is cryptographically invalid or expired â€” not the same as revoked.
+      // Return 401 so the client can attempt a refresh, not a sign-out.
+      return NextResponse.json({ error: 'Invalid or expired token' }, { status: 401, headers: CORS })
+    }
     if (userId && tokenUserId !== userId) return NextResponse.json({ error: 'Token mismatch' }, { status: 403, headers: CORS })
+
+    // Check if this device has been explicitly revoked in device_codes
+    const { data: revokedRow } = await adminClient
+      .from('device_codes')
+      .select('id')
+      .eq('user_id', tokenUserId)
+      .eq('status', 'revoked')
+      .maybeSingle()
+
+    if (revokedRow) {
+      return NextResponse.json({ revoked: true }, { status: 403, headers: CORS })
+    }
+
     return NextResponse.json({ ok: true, userId: tokenUserId }, { headers: CORS })
   }
 
-  // ── Device code poll ──────────────────────────────────────────────────────
+  // â”€â”€ Device code poll â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const device_code = searchParams.get('device_code')
   if (device_code) {
     const { data: row } = await adminClient
@@ -190,7 +228,7 @@ export async function GET(req: Request) {
     return NextResponse.json({ status: row.status }, { headers: CORS })
   }
 
-  // ── Extension ext_id exchange ─────────────────────────────────────────────
+  // â”€â”€ Extension ext_id exchange â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const ext_id = searchParams.get('ext_id')
   if (!ext_id) return NextResponse.json({ error: 'Missing parameter' }, { status: 400, headers: CORS })
 
@@ -218,6 +256,13 @@ export async function GET(req: Request) {
   if (!profile?.is_verified) {
     return NextResponse.json({ error: 'Account not verified' }, { status: 403, headers: CORS })
   }
+
+  try {
+    await adminClient
+      .from('extension_auth_tokens')
+      .update({ expires_at: new Date(Date.now() + EXTENSION_AUTH_TTL_MS).toISOString() })
+      .eq('id', row.id)
+  } catch {}
 
   return NextResponse.json({
     user: {

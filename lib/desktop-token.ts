@@ -1,7 +1,7 @@
 import { createHmac } from 'crypto'
 
 const TOKEN_SECRET = process.env.SUPABASE_SERVICE_ROLE!
-const TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000 // 30 days
+const TOKEN_TTL_MS = 365 * 24 * 60 * 60 * 1000 // 1 year
 
 export function issueDesktopToken(userId: string): string {
   const payload = Buffer.from(JSON.stringify({ sub: userId, iat: Date.now(), exp: Date.now() + TOKEN_TTL_MS })).toString('base64url')

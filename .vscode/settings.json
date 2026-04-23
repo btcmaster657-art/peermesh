@@ -1,2 +1,88 @@
 {
+    // 🔧 General UX
+    "explorer.confirmDelete": false,
+    "git.confirmSync": false,
+    "git.enableSmartCommit": true,
+
+    // ⚡ VS Code AI terminal auto-approve (very important for npm workflows)
+    "chat.tools.terminal.autoApprove": {
+        "npm run build": true,
+        "npm run dev": true,
+        "npm run start": true,
+        "npm run status": true,
+        "npm run status:short": true,
+        "npm run fix": true,
+        "npm run loop": true,
+
+        "npx": true,
+        "git checkout": true,
+        "git pull": true,
+        "git push": true,
+
+        "/^npm install$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^npm install .*$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    },
+
+    // 🔥 Amazon Q aggressive execution config
+    "amazonQ.autoApprove": true,
+
+    "amazonQ.allowedCommands": [
+        "npm *",
+        "npx *",
+        "node *",
+        "git *",
+        "bash *",
+        "sh *",
+        "powershell *",
+        "pwsh *",
+        "cmd *",
+        "./*",
+        ".\\*"
+    ],
+
+    // 🔕 Reduce non-essential prompts
+    "amazonQ.suppressPrompts": {
+        "amazonQChatDisclaimer": true,
+        "amazonQChatPairProgramming": true,
+        "createCredentialsProfile": false,
+        "codeWhispererNewWelcomeMessage": false,
+        "codeWhispererConnectionExpired": false,
+        "amazonQWelcomePage": false,
+        "amazonQSessionConfigurationMessage": false,
+        "minIdeVersion": false,
+        "ssoCacheError": false,
+        "amazonQLspManifestMessage": false,
+        "amazonQWorkspaceLspManifestMessage": false,
+        "amazonQSelectDeveloperProfile": false
+    },
+
+    // 🖥️ Terminal setup (stable + predictable behavior)
+    "terminal.integrated.defaultProfile.windows": "PowerShell",
+    "terminal.integrated.inheritEnv": true,
+
+    "terminal.integrated.env.windows": {
+        "PATH": "${env:PATH}",
+        "USERPROFILE": "${env:USERPROFILE}",
+        "APPDATA": "${env:APPDATA}",
+        "LOCALAPPDATA": "${env:LOCALAPPDATA}",
+        "SystemRoot": "${env:SystemRoot}",
+        "ComSpec": "${env:ComSpec}"
+    },
+
+    "terminal.integrated.profiles.windows": {
+        "PowerShell": {
+            "source": "PowerShell",
+            "icon": "terminal-powershell",
+            "args": ["-NoLogo"]
+        },
+        "Command Prompt": {
+            "path": "C:\\Windows\\System32\\cmd.exe"
+        }
+    }
 }

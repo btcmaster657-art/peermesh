@@ -1,3 +1,5 @@
+import type { PrivateShare } from '@/lib/types'
+
 const AGENT_URL = 'http://localhost:7654'
 const PEER_URL  = 'http://localhost:7656'
 
@@ -27,13 +29,9 @@ export type DesktopState = {
   baseDeviceId?: string | null
   connectionSlots?: number
   privateShareActive?: boolean
-  privateShare?: {
-    base_device_id: string
-    code: string
-    enabled: boolean
-    expires_at: string | null
-    active: boolean
-  } | null
+  privateShare?: PrivateShare | null
+  privateShares?: PrivateShare[]
+  privateShareDeviceId?: string | null
   slots?: {
     configured: number
     active: number
@@ -59,6 +57,8 @@ export type DesktopState = {
     baseDeviceId?: string | null
     privateShareActive?: boolean
     privateShare?: DesktopState['privateShare']
+    privateShares?: DesktopState['privateShares']
+    privateShareDeviceId?: DesktopState['privateShareDeviceId']
     stats?: AgentHealth['stats'] | null
     slots?: DesktopState['slots'] | null
     connectionSlots?: number | null
@@ -105,6 +105,8 @@ export async function checkDesktop(): Promise<DesktopState> {
       baseDeviceId: d.baseDeviceId ?? null,
       privateShareActive: !!d.privateShareActive,
       privateShare: d.privateShare ?? null,
+      privateShares: Array.isArray(d.privateShares) ? d.privateShares : [],
+      privateShareDeviceId: d.privateShareDeviceId ?? null,
       stats: d.stats ?? null,
       slots: d.slots ?? null,
       connectionSlots: d.connectionSlots ?? null,
@@ -125,6 +127,8 @@ export async function checkDesktop(): Promise<DesktopState> {
         baseDeviceId: d.baseDeviceId ?? a.baseDeviceId,
         privateShareActive: !!(d.privateShareActive ?? a.privateShareActive),
         privateShare: d.privateShare ?? a.privateShare ?? null,
+        privateShares: Array.isArray(d.privateShares) ? d.privateShares : (a.privateShares ?? []),
+        privateShareDeviceId: d.privateShareDeviceId ?? a.privateShareDeviceId ?? null,
       }
     }
   }
@@ -159,6 +163,8 @@ export async function setDesktopConnectionSlots(slots: number): Promise<{ ok: bo
   if (!primary && !peer) {
     return { ok: false, error: 'Could not reach desktop or CLI helper' }
   }
+  // Wait briefly for the helper to apply the new slot count before reading state
+  await new Promise(r => setTimeout(r, 400))
   return { ok: true, state: await checkDesktop() }
 }
 

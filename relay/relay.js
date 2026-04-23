@@ -2,8 +2,8 @@ import { WebSocketServer, WebSocket } from 'ws'
 import { createServer } from 'http'
 import { randomUUID } from 'crypto'
 
-const PORT = parseInt(process.env.PORT ?? '8080')
-const API_BASE = process.env.API_BASE ?? 'https://peermesh-beta.vercel.app'
+const PORT        = parseInt(process.env.PORT ?? '8080')
+const API_BASE    = process.env.API_BASE ?? ''
 const RELAY_SECRET = process.env.RELAY_SECRET ?? ''
 
 const peers = new Map()
@@ -51,8 +51,8 @@ function setAffinity(requesterUserId, country, providerUserId) {
 // preferredUserId: try this provider first (peer affinity)
 // excludePeerIds: skip specific peer connections (e.g. the provider that just dropped)
 
-async function getProviderShareStatus(userId, baseDeviceId = null) {
-  const cacheKey = baseDeviceId ? `${userId}:${baseDeviceId}` : userId
+async function getProviderShareStatus(userId, deviceId = null, baseDeviceId = null) {
+  const cacheKey = deviceId ? `${userId}:${deviceId}` : (baseDeviceId ? `${userId}:${baseDeviceId}` : userId)
   const cached = providerShareStatusCache.get(cacheKey)
   if (cached && cached.expiresAt > Date.now()) return cached.value
   if (!userId || !API_BASE || !RELAY_SECRET) {
@@ -65,6 +65,7 @@ async function getProviderShareStatus(userId, baseDeviceId = null) {
 
   try {
     const qs = new URLSearchParams({ providerUserId: userId })
+    if (deviceId) qs.set('deviceId', deviceId)
     if (baseDeviceId) qs.set('baseDeviceId', baseDeviceId)
     const res = await fetch(`${API_BASE}/api/user/sharing?${qs}`, {
       headers: { 'x-relay-secret': RELAY_SECRET },
@@ -99,7 +100,7 @@ async function findProvider(country, requesterId, requestingUserId, {
     peer.peerId !== requesterId &&
     peer.userId !== requestingUserId &&
     !excludePeerIds.includes(peer.peerId) &&
-    (!privateBaseDeviceId || peer.baseDeviceId === privateBaseDeviceId) &&
+    (!privateBaseDeviceId || peer.deviceId === privateBaseDeviceId || peer.baseDeviceId === privateBaseDeviceId) &&
     // Block public connections from reaching private-only slots
     (!peer.privateOnly || !!privateBaseDeviceId) &&
     peer.supportsHttp !== false &&
@@ -108,7 +109,7 @@ async function findProvider(country, requesterId, requestingUserId, {
   if (preferredUserId) {
     for (const [, peer] of peers) {
       if (peer.userId === preferredUserId && isEligible(peer)) {
-        const status = await getProviderShareStatus(peer.userId, peer.baseDeviceId)
+        const status = await getProviderShareStatus(peer.userId, peer.deviceId, peer.baseDeviceId)
         if (!status.can_accept_sessions) {
           log('LIMIT', `SKIP preferred provider userId=${preferredUserId.slice(0,8)} daily limit reached`)
           continue
@@ -132,7 +133,7 @@ async function findProvider(country, requesterId, requestingUserId, {
   eligible.sort((a, b) => (b.trustScore ?? 50) - (a.trustScore ?? 50))
 
   for (const peer of eligible) {
-    const status = await getProviderShareStatus(peer.userId, peer.baseDeviceId)
+    const status = await getProviderShareStatus(peer.userId, peer.deviceId, peer.baseDeviceId)
     if (status.can_accept_sessions) return peer
     log('LIMIT', `SKIP provider peerId=${peer.peerId.slice(0,8)} userId=${peer.userId?.slice(0,8)} daily limit reached`)
   }
@@ -142,7 +143,11 @@ async function findProvider(country, requesterId, requestingUserId, {
 
 // ── Create a new relay session between an existing requester WS and a provider ─
 
-function createSession(requesterWs, provider, country, dbSessionId) {
+function createSession(requesterWs, provider, country, dbSessionId, {
+  notificationMode = 'initial',
+  reconnectAttempt = 0,
+  emitSessionCreated = notificationMode === 'initial',
+} = {}) {
   const sessionId = randomUUID()
   requesterWs.sessionId = sessionId
   provider.sessionId = sessionId
@@ -152,29 +157,37 @@ function createSession(requesterWs, provider, country, dbSessionId) {
     requesterId: requesterWs.peerId,
     providerId: provider.peerId,
     country,
+    status: 'active',
     requesterUserId: requesterWs.userId,
-    providerUserId: provider.userId,
+    providerUserId: null,
+    providerKind: null,
     startTime: Date.now(),
     bytesRequester: 0,
     bytesProvider: 0,
     dbSessionId: dbSessionId ?? null,
+    relayEndpoint: requesterWs.relayUrl ?? null,
     targetHost: null,
-    targetHostSynced: false,
-    providerMetadataSynced: false,
+    targetHosts: new Set(),   // all hostnames seen — primary is first non-CDN or just first
+    agentReady: false,
+    notificationMode,
+    reconnectAttempt,
     reconnectAttempts: 0,
     privateBaseDeviceId: requesterWs.privateBaseDeviceId ?? null,
     lastActivity: Date.now(),
   })
 
   send(provider, { type: 'session_request', sessionId })
-  send(requesterWs, { type: 'session_created', sessionId })
+  if (emitSessionCreated) {
+    send(requesterWs, { type: 'session_created', sessionId })
+  }
   log(requesterWs.peerId.slice(0,8), `SESSION_CREATED id=${sessionId.slice(0,8)} provider=${provider.peerId.slice(0,8)} country=${country}`)
+  syncSessionMetadata(sessions.get(sessionId), 'relay_assign')
 
   // If the provider doesn't respond with agent_ready within 10s, treat it as
   // unresponsive and attempt reconnect to a different provider.
   setTimeout(() => {
     const session = sessions.get(sessionId)
-    if (!session || session.providerUserId) return // already got agent_ready
+    if (!session || session.agentReady) return
     if (requesterWs.readyState !== WebSocket.OPEN) return // requester already gone
     log(requesterWs.peerId.slice(0,8), `SESSION_AGENT_READY_TIMEOUT sessionId=${sessionId.slice(0,8)} provider=${provider.peerId.slice(0,8)}`)
     // Evict the unresponsive provider slot and reconnect
@@ -189,12 +202,17 @@ function createSession(requesterWs, provider, country, dbSessionId) {
 
 function syncSessionMetadata(session, reason = 'update') {
   if (!API_BASE || !RELAY_SECRET || !session?.dbSessionId) return
+  // Skip if there's nothing meaningful to write
+  if (!session.providerUserId && !session.targetHost && !session.relayEndpoint && !session.status) return
 
   const payload = {
-    dbSessionId: session.dbSessionId,
+    dbSessionId:    session.dbSessionId,
+    status:         session.status ?? null,
     providerUserId: session.providerUserId ?? null,
-    providerKind: session.providerKind ?? null,
-    targetHost: session.targetHost ?? null,
+    providerKind:   session.providerKind ?? null,
+    relayEndpoint:  session.relayEndpoint ?? null,
+    targetHost:     session.targetHost ?? null,
+    targetHosts:    session.targetHosts ? [...session.targetHosts] : [],
   }
 
   fetch(`${API_BASE}/api/session/end`, {
@@ -211,6 +229,27 @@ function syncSessionMetadata(session, reason = 'update') {
       log('RELAY', `SESSION_METADATA_${reason.toUpperCase()} dbSessionId=${session.dbSessionId?.slice(0,8)} provider=${session.providerUserId?.slice(0,8) ?? 'none'} host=${session.targetHost ?? 'none'}`)
     })
     .catch((err) => logErr('RELAY', `SESSION_METADATA_${reason.toUpperCase()} failed dbSessionId=${session.dbSessionId?.slice(0,8)}`, err))
+}
+
+function recordSessionHost(session, hostname, reason = 'target_host') {
+  if (!session || !hostname) return
+  const normalizedHost = String(hostname).trim().toLowerCase()
+  if (!normalizedHost) return
+
+  if (!session.targetHosts) session.targetHosts = new Set()
+  const hadHost = session.targetHosts.has(normalizedHost)
+  const previousBest = pickBestHost(session.targetHost, session.targetHosts)
+  session.targetHosts.add(normalizedHost)
+  const nextBest = pickBestHost(previousBest, session.targetHosts)
+
+  if (nextBest !== session.targetHost) {
+    session.targetHost = nextBest
+    syncSessionMetadata(session, reason)
+    return
+  }
+
+  if (hadHost) return
+  syncSessionMetadata(session, reason)
 }
 
 // ── Auto-reconnect — called when provider drops while requester is still live ─
@@ -249,17 +288,10 @@ async function attemptReconnect(requesterWs, droppedSession) {
 
   log(requesterWs.peerId.slice(0,8), `RECONNECT found new provider=${nextProvider.peerId.slice(0,8)} userId=${nextProvider.userId?.slice(0,8)} attempt=${(reconnectAttempts ?? 0) + 1}`)
 
-  const newSessionId = createSession(requesterWs, nextProvider, country, dbSessionId)
-
-  // Tell requester a reconnect happened so extension/desktop can update proxySession.
-  // Include relayEndpoint so the requester can update its /proxy-session correctly —
-  // the requester is already on this relay (its WS never moved), so requesterWs.relayUrl is authoritative.
-  send(requesterWs, {
-    type: 'session_reconnected',
-    sessionId: newSessionId,
-    country,
-    relayEndpoint: requesterWs.relayUrl ?? '',
-    attempt: (reconnectAttempts ?? 0) + 1,
+  createSession(requesterWs, nextProvider, country, dbSessionId, {
+    notificationMode: 'reconnect',
+    reconnectAttempt: (reconnectAttempts ?? 0) + 1,
+    emitSessionCreated: false,
   })
 }
 
@@ -272,6 +304,38 @@ const server = createServer((req, res) => {
     return
   }
 
+  // /providers?country=RW&secret=... — returns live free providers for a country.
+  // Used by session/create to verify a relay has a matching provider before
+  // sending the requester there. Requires relay secret.
+  if (url.pathname === '/providers') {
+    const secret = req.headers['x-relay-secret'] ?? ''
+    if (RELAY_SECRET && secret !== RELAY_SECRET) {
+      res.writeHead(401)
+      res.end(JSON.stringify({ error: 'Unauthorized' }))
+      return
+    }
+    const country = url.searchParams.get('country')
+    const excludeUserId = url.searchParams.get('excludeUserId') ?? null
+    const result = []
+    for (const [, peer] of peers) {
+      if (peer.role !== 'provider') continue
+      if (peer.readyState !== WebSocket.OPEN) continue
+      if (country && peer.country !== country) continue
+      if (excludeUserId && peer.userId === excludeUserId) continue
+      result.push({
+        userId: peer.userId,
+        baseDeviceId: peer.baseDeviceId,
+        country: peer.country,
+        free: !peer.sessionId,
+        trustScore: peer.trustScore,
+        privateOnly: peer.privateOnly,
+      })
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ providers: result }))
+    return
+  }
+
   if (url.pathname === '/check-private') {
     const secret = req.headers['x-relay-secret'] ?? ''
     if (RELAY_SECRET && secret !== RELAY_SECRET) {
@@ -279,20 +343,24 @@ const server = createServer((req, res) => {
       res.end(JSON.stringify({ error: 'Unauthorized' }))
       return
     }
+    const deviceId = url.searchParams.get('deviceId')
     const baseDeviceId = url.searchParams.get('baseDeviceId')
     const providerUserId = url.searchParams.get('providerUserId')
-    if (!baseDeviceId || !providerUserId) {
+    if ((!deviceId && !baseDeviceId) || !providerUserId) {
       res.writeHead(400)
-      res.end(JSON.stringify({ error: 'baseDeviceId and providerUserId required' }))
+      res.end(JSON.stringify({ error: 'deviceId/baseDeviceId and providerUserId required' }))
       return
     }
     let online = false
     let country = null
     for (const [, peer] of peers) {
+      const deviceMatch = deviceId ? peer.deviceId === deviceId : true
+      const baseMatch = baseDeviceId ? peer.baseDeviceId === baseDeviceId : true
       if (
         peer.role === 'provider' &&
         peer.userId === providerUserId &&
-        peer.baseDeviceId === baseDeviceId &&
+        deviceMatch &&
+        baseMatch &&
         peer.readyState === WebSocket.OPEN
       ) {
         online = true
@@ -321,6 +389,63 @@ server.on('upgrade', (req, socket, head) => {
   }
 })
 
+// ── Raw HTTP CONNECT — used by PAC proxy mode (no desktop app) ───────────────
+// Chrome sends CONNECT hostname:443 directly to the relay when setProxyRelay
+// is active. We authenticate via the session ID passed as proxy username,
+// then pipe the socket directly to the provider via the existing tunnel mechanism.
+server.on('connect', (req, clientSocket, head) => {
+  const proxyAuth = req.headers['proxy-authorization'] ?? ''
+  const sessionId = proxyAuth.startsWith('Basic ')
+    ? Buffer.from(proxyAuth.slice(6), 'base64').toString().split(':')[0]
+    : null
+
+  const [hostname, portStr] = (req.url ?? '').split(':')
+  const port = parseInt(portStr) || 443
+
+  if (!sessionId) {
+    clientSocket.write('HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="PeerMesh"\r\n\r\n')
+    clientSocket.destroy()
+    return
+  }
+
+  const session = sessions.get(sessionId)
+  if (!session) {
+    clientSocket.write('HTTP/1.1 403 Invalid Session\r\n\r\n')
+    clientSocket.destroy()
+    return
+  }
+
+  const provider = peers.get(session.providerId)
+  if (!provider || provider.readyState !== WebSocket.OPEN) {
+    clientSocket.write('HTTP/1.1 503 Provider Unavailable\r\n\r\n')
+    clientSocket.destroy()
+    return
+  }
+
+  // Record hostname
+  if (hostname) {
+    recordSessionHost(session, hostname, 'target_host')
+  }
+
+  // Open a tunnel via the provider
+  const tunnelId = randomUUID()
+  proxyClients.set(tunnelId, { sessionId, socket: clientSocket, head, ready: false })
+
+  send(provider, { type: 'open_tunnel', tunnelId, sessionId, hostname, port })
+  session.lastActivity = Date.now()
+
+  // tunnel_ready handler will write 200 and start piping
+  // Cleanup on client disconnect
+  clientSocket.on('error', () => {
+    proxyClients.delete(tunnelId)
+    send(provider, { type: 'tunnel_close', tunnelId })
+  })
+  clientSocket.on('close', () => {
+    proxyClients.delete(tunnelId)
+    send(provider, { type: 'tunnel_close', tunnelId })
+  })
+})
+
 proxyWss.on('connection', (ws, req) => {
   const url = new URL(req.url, 'http://localhost')
   const sessionId = url.searchParams.get('session')
@@ -339,6 +464,7 @@ proxyWss.on('connection', (ws, req) => {
 
   const tunnelId = randomUUID()
   log('PROXY', `WS_OPEN session=${sessionId.slice(0,8)} tunnelId=${tunnelId.slice(0,8)} from ${clientIp}`)
+  ws.sessionId = sessionId
   proxyClients.set(tunnelId, ws)
 
   let tunnelOpen = false
@@ -353,10 +479,7 @@ proxyWss.on('connection', (ws, req) => {
         tunnelOpen = true
         send(provider, { type: 'open_tunnel', tunnelId, sessionId, hostname, port })
         const sess = sessions.get(sessionId)
-        if (sess && !sess.targetHost) {
-          sess.targetHost = hostname
-          syncSessionMetadata(sess, 'target_host')
-        }
+        if (sess) recordSessionHost(sess, hostname, 'target_host')
         return
       }
       return
@@ -417,7 +540,7 @@ wss.on('connection', (ws, req) => {
     }
   })
 
-  ws.on('close', (code, reason) => {
+  ws.on('close', (code) => {
     log(peerId.slice(0,8), `DISCONNECTED code=${code} role=${ws.role} userId=${ws.userId?.slice(0,8)}`)
     peers.delete(peerId)
     cleanupSession(ws)
@@ -464,12 +587,12 @@ async function handleMessage(ws, msg) {
       ws.supportsTunnel = msg.supportsTunnel ?? false
       ws.privateOnly = false
       // Fetch private share status BEFORE adding to pool to avoid race window
-      if (ws.userId && ws.baseDeviceId && API_BASE && RELAY_SECRET) {
+      if (ws.userId && (ws.deviceId || ws.baseDeviceId) && API_BASE && RELAY_SECRET) {
         try {
-          const data = await getProviderShareStatus(ws.userId, ws.baseDeviceId)
+          const data = await getProviderShareStatus(ws.userId, ws.deviceId ?? null, ws.baseDeviceId ?? null)
           if (data?.private_share?.enabled && data.private_share.active) {
             ws.privateOnly = true
-            log(ws.peerId.slice(0,8), `PRIVATE_ONLY set for userId=${ws.userId?.slice(0,8)} baseDeviceId=${ws.baseDeviceId?.slice(0,12)}`)
+            log(ws.peerId.slice(0,8), `PRIVATE_ONLY set for userId=${ws.userId?.slice(0,8)} deviceId=${ws.deviceId?.slice(0,12) ?? ws.baseDeviceId?.slice(0,12)}`)
           }
         } catch {}
       }
@@ -521,7 +644,7 @@ async function handleMessage(ws, msg) {
             if (!privateBaseDeviceId && peer.privateOnly) reasons.push('private_only_slot')
             if (peer.supportsHttp === false) reasons.push('no_http')
             if (requireTunnel && !peer.supportsTunnel) reasons.push('no_tunnel')
-            const shareStatus = await getProviderShareStatus(peer.userId, peer.baseDeviceId)
+            const shareStatus = await getProviderShareStatus(peer.userId, peer.deviceId ?? null, peer.baseDeviceId ?? null)
             if (!shareStatus.can_accept_sessions) reasons.push('daily_limit_reached')
             log(ws.peerId.slice(0,8), `  PROVIDER_REJECTED ${peer.peerId.slice(0,8)} | ${reasons.join(', ')}`)
           }
@@ -543,11 +666,7 @@ async function handleMessage(ws, msg) {
       if (!agentSession) break
       const requester = peers.get(agentSession.requesterId)
       if (requester) {
-        // If providerUserId is already set on the session, agent_ready was already
-        // processed once — this is a provider reconnect mid-session. Send
-        // session_reconnected so the extension updates agentSessionId + proxySession
-        // rather than ignoring a duplicate agent_session_ready.
-        if (agentSession.providerUserId) {
+        if (agentSession.agentReady) {
           send(requester, {
             type: 'session_reconnected',
             sessionId: msg.sessionId,
@@ -555,13 +674,23 @@ async function handleMessage(ws, msg) {
             relayEndpoint: requester.relayUrl ?? '',
             attempt: 1,
           })
+        } else if (agentSession.notificationMode === 'reconnect') {
+          send(requester, {
+            type: 'session_reconnected',
+            sessionId: msg.sessionId,
+            country: agentSession.country,
+            relayEndpoint: requester.relayUrl ?? '',
+            attempt: agentSession.reconnectAttempt ?? 1,
+          })
         } else {
           send(requester, { type: 'agent_session_ready', sessionId: msg.sessionId })
         }
         log(ws.peerId.slice(0,8), `AGENT_READY session=${msg.sessionId.slice(0,8)} → requester notified`)
       }
+      agentSession.agentReady = true
       agentSession.providerUserId = ws.userId
-      agentSession.providerKind = ws.providerKind ?? null
+      agentSession.providerKind    = ws.providerKind ?? agentSession.providerKind ?? null
+      agentSession.relayEndpoint   = requester?.relayUrl ?? agentSession.relayEndpoint ?? null
       syncSessionMetadata(agentSession, 'provider_assign')
       break
     }
@@ -574,10 +703,9 @@ async function handleMessage(ws, msg) {
       proxySession.lastActivity = Date.now()
       const reqBytes = JSON.stringify(msg.request ?? {}).length
       proxySession.bytesRequester = (proxySession.bytesRequester ?? 0) + reqBytes
-      if (msg.request?.url && !proxySession.targetHost) {
+      if (msg.request?.url) {
         try {
-          proxySession.targetHost = new URL(msg.request.url).hostname
-          syncSessionMetadata(proxySession, 'target_host')
+          recordSessionHost(proxySession, new URL(msg.request.url).hostname, 'target_host')
         } catch {}
       }
       log(ws.peerId.slice(0,8), `PROXY_REQUEST → provider=${provider.peerId.slice(0,8)} url=${msg.request?.url?.slice(0,60)}`)
@@ -599,15 +727,24 @@ async function handleMessage(ws, msg) {
 
     case 'tunnel_ready': {
       const proxyClient = proxyClients.get(msg.tunnelId)
-      if (proxyClient?.readyState === WebSocket.OPEN) {
-        proxyClient.send('HTTP/1.1 200 Connection Established\r\n\r\n')
+      if (!proxyClient) break
+      if (proxyClient.readyState !== undefined) {
+        // WS-based client (desktop proxy path)
+        if (proxyClient.readyState === WebSocket.OPEN) {
+          proxyClient.send('HTTP/1.1 200 Connection Established\r\n\r\n')
+        }
+      } else if (proxyClient.socket && !proxyClient.socket.destroyed) {
+        // Raw socket client (PAC proxy path)
+        proxyClient.socket.write('HTTP/1.1 200 Connection Established\r\n\r\n')
+        if (proxyClient.head?.length) proxyClient.socket.write(proxyClient.head)
+        proxyClient.ready = true
       }
       break
     }
 
     case 'tunnel_data': {
       const proxyClient = proxyClients.get(msg.tunnelId)
-      if (!proxyClient || proxyClient.readyState !== WebSocket.OPEN) return
+      if (!proxyClient) return
       const chunk = Buffer.from(msg.data, 'base64')
       const tunnelSession = ws.sessionId ? sessions.get(ws.sessionId) : null
       if (tunnelSession) {
@@ -615,13 +752,22 @@ async function handleMessage(ws, msg) {
         tunnelSession.bytesProvider = (tunnelSession.bytesProvider ?? 0) + chunk.length
         tunnelSession.bytesRequester = (tunnelSession.bytesRequester ?? 0) + chunk.length
       }
-      proxyClient.send(chunk)
+      if (proxyClient.readyState !== undefined) {
+        // WS-based client
+        if (proxyClient.readyState === WebSocket.OPEN) proxyClient.send(chunk)
+      } else if (proxyClient.socket && !proxyClient.socket.destroyed && proxyClient.ready) {
+        // Raw socket client
+        proxyClient.socket.write(chunk)
+      }
       break
     }
 
     case 'tunnel_close': {
       const proxyClient = proxyClients.get(msg.tunnelId)
-      if (proxyClient) { proxyClient.close(); proxyClients.delete(msg.tunnelId) }
+      if (proxyClient) {
+        closeProxyClient(proxyClient)
+        proxyClients.delete(msg.tunnelId)
+      }
       break
     }
 
@@ -642,22 +788,48 @@ function send(ws, data) {
   if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data))
 }
 
+function pickBestHost(targetHost, targetHosts) {
+  // CDN/tracking patterns that are not meaningful as the primary site
+  const CDN = /googlevideo\.com|ytimg\.com|gstatic\.com|googleapis\.com|doubleclick\.net|google-analytics\.com|googletagmanager\.com|cloudfront\.net|akamaized\.net|fastly\.net|cdn\.|static\.|assets\./i
+  const all = targetHosts ? [...targetHosts] : []
+  if (targetHost && !all.includes(targetHost)) all.unshift(targetHost)
+  if (all.length === 0) return null
+  // Prefer first non-CDN host
+  const primary = all.find(h => !CDN.test(h))
+  return primary ?? all[0]
+}
+
+function closeProxyClient(proxyClient) {
+  if (!proxyClient) return
+  if (typeof proxyClient.close === 'function') {
+    proxyClient.close()
+  } else if (proxyClient.socket && !proxyClient.socket.destroyed) {
+    proxyClient.socket.destroy()
+  }
+}
+
 function reportSessionEnd(session, sessionId) {
   const bytesUsed = session.bytesRequester ?? 0
   const dbSessionId = session.dbSessionId ?? null
   if (!API_BASE || !dbSessionId) return
-  const provider = peers.get(session.providerId)
+
+  const providerKind = session.providerKind ?? null
+  const targetHost = pickBestHost(session.targetHost, session.targetHosts)
+  const targetHosts = session.targetHosts ? [...session.targetHosts] : []
+
   fetch(`${API_BASE}/api/session/end`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-relay-secret': RELAY_SECRET },
     body: JSON.stringify({
-      sessionId: dbSessionId,
+      sessionId:       dbSessionId,
       bytesUsed,
-      providerUserId: session.providerUserId ?? null,
+      providerUserId:  session.providerUserId ?? null,
       requesterUserId: session.requesterUserId ?? null,
-      country: session.country,
-      targetHost: session.targetHost ?? null,
-      providerKind: provider?.providerKind ?? null,
+      country:         session.country,
+      targetHost,
+      targetHosts,
+      providerKind,
+      relayEndpoint:   session.relayEndpoint ?? null,
     }),
   })
     .then(async (r) => {
@@ -682,9 +854,13 @@ function cleanupSession(ws) {
   const otherId = ws.role === 'provider' ? session.requesterId : session.providerId
   const other = peers.get(otherId)
 
-  // Close proxy tunnel clients for this session
-  const proxyClient = proxyClients.get(sessionId)
-  if (proxyClient) { proxyClient.close(); proxyClients.delete(sessionId) }
+  // Close every proxy tunnel attached to this session. proxyClients is keyed by
+  // tunnelId, not sessionId, so scan the active tunnels and close matching ones.
+  for (const [tunnelId, proxyClient] of proxyClients) {
+    if (proxyClient.sessionId !== sessionId) continue
+    closeProxyClient(proxyClient)
+    proxyClients.delete(tunnelId)
+  }
 
   // Save affinity — remember which provider this requester used
   if (session.requesterUserId && session.providerUserId && session.country) {

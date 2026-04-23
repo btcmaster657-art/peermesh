@@ -22,6 +22,16 @@ export type Profile = {
   updated_at: string
 }
 
+export type PrivateShare = {
+  device_id: string
+  base_device_id: string
+  slot_index: number | null
+  code: string
+  enabled: boolean
+  expires_at: string | null
+  active: boolean
+}
+
 export type Session = {
   id: string
   user_id: string
@@ -29,6 +39,7 @@ export type Session = {
   provider_kind: string | null
   target_country: string
   target_host: string | null
+  target_hosts: string[]
   relay_endpoint: string | null
   status: 'pending' | 'active' | 'ended' | 'flagged'
   bytes_used: number

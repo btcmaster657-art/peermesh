@@ -1,6 +1,6 @@
 {
   "name": "@btcmaster1000/peermesh-provider",
-  "version": "1.0.45",
+  "version": "1.0.48",
   "description": "Share your connection with PeerMesh and earn free browsing credits",
   "type": "module",
   "bin": {
@@ -8,11 +8,14 @@
   },
   "files": [
     "index.js",
+    "postinstall.js",
+    "preuninstall.js",
     "README.md"
   ],
   "scripts": {
     "start": "node index.js",
-    "preuninstall": "node -e \"const{existsSync,rmSync}=require('fs'),{join}=require('path'),{homedir}=require('os');const f=join(homedir(),'.peermesh','config.json');if(existsSync(f))rmSync(f)\""
+    "postinstall": "node postinstall.js",
+    "preuninstall": "node preuninstall.js"
   },
   "dependencies": {
     "ws": "^8.18.0"

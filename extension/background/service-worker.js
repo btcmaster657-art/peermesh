@@ -1,6 +1,6 @@
 // background/service-worker.js - PeerMesh Extension Service Worker
+import { APP_URL } from '../config.js'
 
-const APP_URL = 'https://peermesh-beta.vercel.app'
 const EXTENSION_VERSION = chrome.runtime.getManifest().version
 const BLOCKED_HOSTS = [/\.onion$/i, /^smtp\./i, /^mail\./i, /torrent/i]
 const PRIVATE_HOSTS = [/^localhost$/i, /^127\./, /^10\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./]
@@ -41,6 +41,8 @@ let providerReconnectTimer = null
 let providerPeerId = null
 let providerStats = { bytesServed: 0, requestsHandled: 0, connectedAt: null, peerId: null }
 let providerPrivateShare = null
+let providerAuthFailureCount = 0
+const PROVIDER_AUTH_FAILURE_THRESHOLD = 3
 
 const pendingRequests = new Map()
 
@@ -61,7 +63,21 @@ function isAllowedHost(hostname) {
     !PRIVATE_HOSTS.some((pattern) => pattern.test(hostname))
 }
 
-// ── Logger ────────────────────────────────────────────────────────────────────
+function getStandalonePrivateShares(baseDeviceId, deviceId) {
+  if (!deviceId) return []
+  if (providerPrivateShare?.device_id === deviceId) return [providerPrivateShare]
+  return [{
+    device_id: deviceId,
+    base_device_id: baseDeviceId ?? deviceId.replace(/_slot_\d+$/, ''),
+    slot_index: 0,
+    code: '',
+    enabled: false,
+    expires_at: null,
+    active: false,
+  }]
+}
+
+// â”€â”€ Logger â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const MAX_LOGS = 200
 const _logs = []
@@ -139,7 +155,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return true
 })
 
-// ── Proxy fetch ───────────────────────────────────────────────────────────────
+// â”€â”€ Proxy fetch â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function proxyFetch(url, { method = 'GET', headers = {}, body = null } = {}) {
   return new Promise((resolve) => {
@@ -161,7 +177,7 @@ function proxyFetch(url, { method = 'GET', headers = {}, body = null } = {}) {
   })
 }
 
-// ── Extension heartbeat ───────────────────────────────────────────────────────
+// â”€â”€ Extension heartbeat â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function getShareAuthToken() {
   return desktopToken || supabaseToken || null
@@ -262,6 +278,8 @@ async function getStandaloneProviderStatus() {
   const { baseDeviceId, deviceId } = await getExtensionIdentity()
   const configured = !!(sharingUserId && sharingCountry && baseDeviceId)
   const active = providerRegistered ? 1 : 0
+  const privateShares = getStandalonePrivateShares(baseDeviceId, deviceId)
+  const privateShare = privateShares[0] ?? null
   return {
     available: !!baseDeviceId,
     source: 'extension',
@@ -274,6 +292,10 @@ async function getStandaloneProviderStatus() {
     baseDeviceId,
     deviceId,
     connectionSlots: 1,
+    privateShareActive: !!(privateShare?.enabled && privateShare?.active),
+    privateShare,
+    privateShares,
+    privateShareDeviceId: deviceId ?? null,
     slots: {
       configured: 1,
       active,
@@ -332,6 +354,28 @@ function stopExtensionHeartbeat(removeDevice = true) {
   })
 }
 
+async function tryRefreshExtensionToken() {
+  const stored = await chrome.storage.local.get(['user'])
+  const userId = stored.user?.id ?? sharingUserId ?? null
+  const currentToken = stored.user?.token ?? desktopToken ?? supabaseToken ?? null
+  if (!userId || !currentToken) return false
+  try {
+    const res = await fetch(`${APP_URL}/api/extension-auth?refresh=1&userId=${encodeURIComponent(userId)}`, {
+      headers: { Authorization: `Bearer ${currentToken}` },
+      signal: AbortSignal.timeout(5000),
+    })
+    if (!res.ok) return false
+    const data = await res.json()
+    if (data.token) {
+      supabaseToken = data.token
+      desktopToken = data.token
+      await chrome.storage.local.set({ supabaseToken: data.token, desktopToken: data.token })
+      log('info', `[AUTH] extension token refreshed userId=${userId.slice(0,8)}`)
+      return true
+    }
+  } catch {}
+  return false
+}
 async function sendExtensionHeartbeat() {
   if (sharingMode !== 'extension' || !providerShareEnabled) return
   await loadSharingContext()
@@ -345,9 +389,18 @@ async function sendExtensionHeartbeat() {
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
       body: JSON.stringify({ device_id: deviceId, country: sharingCountry }),
     })
+    if (response.ok) providerAuthFailureCount = 0
     if (response.status === 401 || response.status === 403) {
-      log('warn', `[HEARTBEAT] auth rejected status=${response.status} - stopping standalone provider`)
-      await stopStandaloneProvider({ clearMode: true, removeDevice: false })
+      providerAuthFailureCount += 1
+      log('warn', `[HEARTBEAT] auth rejected status=${response.status} count=${providerAuthFailureCount}`)
+      if (providerAuthFailureCount < PROVIDER_AUTH_FAILURE_THRESHOLD) return
+      const refreshed = await tryRefreshExtensionToken()
+      if (refreshed) {
+        providerAuthFailureCount = 0
+        log('info', '[HEARTBEAT] token refreshed - continuing')
+        return
+      }
+      log('warn', '[HEARTBEAT] token refresh failed - preserving standalone provider and retrying later')
       return
     }
     if (!response.ok) {
@@ -359,7 +412,7 @@ async function sendExtensionHeartbeat() {
   }
 }
 
-async function syncProviderPrivateShareState({ source = 'sync', stopOnToggle = false } = {}) {
+async function syncProviderPrivateShareState({ source = 'sync' } = {}) {
   await loadSharingContext()
   const token = getShareAuthToken()
   const { baseDeviceId } = await getExtensionIdentity()
@@ -372,12 +425,18 @@ async function syncProviderPrivateShareState({ source = 'sync', stopOnToggle = f
       headers: { 'Authorization': `Bearer ${token}` },
       signal: AbortSignal.timeout(5000),
     })
+    if (response.ok) providerAuthFailureCount = 0
     if (response.status === 401 || response.status === 403) {
-      log('warn', `[PRIVATE] state sync rejected status=${response.status}`)
-      if (providerShareEnabled && sharingMode === 'extension') {
-        await stopStandaloneProvider({ clearMode: true, removeDevice: false })
+      providerAuthFailureCount += 1
+      log('warn', `[PRIVATE] state sync rejected status=${response.status} count=${providerAuthFailureCount}`)
+      if (providerAuthFailureCount >= PROVIDER_AUTH_FAILURE_THRESHOLD) {
+        const refreshed = await tryRefreshExtensionToken()
+        if (refreshed) {
+          providerAuthFailureCount = 0
+          return providerPrivateShare
+        }
       }
-      return null
+      return providerPrivateShare
     }
     if (!response.ok) {
       log('warn', `[PRIVATE] state sync failed status=${response.status}`)
@@ -385,17 +444,10 @@ async function syncProviderPrivateShareState({ source = 'sync', stopOnToggle = f
     }
 
     const data = await response.json()
-    const previousEnabled = !!providerPrivateShare?.enabled
-    const hasPreviousState = providerPrivateShare !== null
     const nextPrivateShare = data.private_share ?? null
-    const nextEnabled = !!nextPrivateShare?.enabled
     providerPrivateShare = nextPrivateShare
     await chrome.storage.local.set({ providerPrivateShare })
-
-    if (stopOnToggle && hasPreviousState && previousEnabled !== nextEnabled && providerShareEnabled && sharingMode === 'extension') {
-      log('info', `[PRIVATE] sharing mode changed via ${source} - stopping standalone provider until manually restarted`)
-      await stopStandaloneProvider({ clearMode: false, removeDevice: true })
-    }
+    log('info', `[PRIVATE] state synced via ${source} enabled=${!!nextPrivateShare?.enabled} active=${!!nextPrivateShare?.active}`)
 
     return providerPrivateShare
   } catch (error) {
@@ -404,7 +456,7 @@ async function syncProviderPrivateShareState({ source = 'sync', stopOnToggle = f
   }
 }
 
-// ── Native messaging / desktop detection ─────────────────────────────────────
+// â”€â”€ Native messaging / desktop detection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async function sendNativeMessage(message) {
   return new Promise((resolve, reject) => {
@@ -435,6 +487,8 @@ async function getDesktopHelperStatusHttp() {
         baseDeviceId: data.baseDeviceId ?? null,
         privateShareActive: !!data.privateShareActive,
         privateShare: data.privateShare ?? null,
+        privateShares: Array.isArray(data.privateShares) ? data.privateShares : [],
+        privateShareDeviceId: data.privateShareDeviceId ?? null,
         connectionSlots: data.connectionSlots ?? null,
         slots: data.slots ?? null,
         stats: data.stats ?? null,
@@ -442,7 +496,7 @@ async function getDesktopHelperStatusHttp() {
     }
   } catch (e) { log('warn', 'desktop HTTP unreachable: ' + e.message) }
 
-  // Also check peer port — whichever process is running the relay
+  // Also check peer port â€” whichever process is running the relay
   let peerState = null
   try {
     const res2 = await fetch(`http://127.0.0.1:${PEER_PORT}/native/state`, { signal: AbortSignal.timeout(1000) })
@@ -461,6 +515,12 @@ async function getDesktopHelperStatusHttp() {
   const activeSlots = peerRunning ? (peerState?.slots ?? primary.slots ?? null) : primary.slots
   const activeConnectionSlots = peerRunning ? (peerState?.connectionSlots ?? primary.connectionSlots ?? null) : primary.connectionSlots
   const activePrivateShare = peerRunning ? (peerState?.privateShare ?? primary.privateShare ?? null) : (primary.privateShare ?? null)
+  const activePrivateShares = peerRunning
+    ? (Array.isArray(peerState?.privateShares) ? peerState.privateShares : (primary.privateShares ?? []))
+    : (primary.privateShares ?? [])
+  const activePrivateShareDeviceId = peerRunning
+    ? (peerState?.privateShareDeviceId ?? primary.privateShareDeviceId ?? null)
+    : (primary.privateShareDeviceId ?? null)
   const activePrivateShareActive = peerRunning ? !!(peerState?.privateShareActive ?? primary.privateShareActive) : !!primary.privateShareActive
   return {
     ...primary,
@@ -472,6 +532,8 @@ async function getDesktopHelperStatusHttp() {
     baseDeviceId: activeBaseDeviceId,
     privateShareActive: activePrivateShareActive,
     privateShare: activePrivateShare,
+    privateShares: activePrivateShares,
+    privateShareDeviceId: activePrivateShareDeviceId,
     slots: activeSlots,
     connectionSlots: activeConnectionSlots,
     stats,
@@ -495,6 +557,8 @@ async function getDesktopHelperStatus() {
       baseDeviceId: response.baseDeviceId ?? null,
       privateShareActive: !!response.privateShareActive,
       privateShare: response.privateShare ?? null,
+      privateShares: Array.isArray(response.privateShares) ? response.privateShares : [],
+      privateShareDeviceId: response.privateShareDeviceId ?? null,
       connectionSlots: response.connectionSlots ?? null,
       slots: response.slots ?? null,
       stats: response.stats ?? null,
@@ -530,6 +594,8 @@ async function startDesktopSharing({ token, userId, country, trust }) {
         baseDeviceId: data.baseDeviceId ?? null,
         privateShareActive: !!data.privateShareActive,
         privateShare: data.privateShare ?? null,
+        privateShares: Array.isArray(data.privateShares) ? data.privateShares : [],
+        privateShareDeviceId: data.privateShareDeviceId ?? null,
         connectionSlots: data.connectionSlots ?? null,
         slots: data.slots ?? null,
         stats: data.stats ?? null,
@@ -561,6 +627,8 @@ async function startDesktopSharing({ token, userId, country, trust }) {
       baseDeviceId: response.baseDeviceId ?? null,
       privateShareActive: !!response.privateShareActive,
       privateShare: response.privateShare ?? null,
+      privateShares: Array.isArray(response.privateShares) ? response.privateShares : [],
+      privateShareDeviceId: response.privateShareDeviceId ?? null,
       connectionSlots: response.connectionSlots ?? null,
       slots: response.slots ?? null,
       stats: response.stats ?? null,
@@ -605,6 +673,8 @@ async function stopDesktopSharing() {
         baseDeviceId: data.baseDeviceId ?? null,
         privateShareActive: !!data.privateShareActive,
         privateShare: data.privateShare ?? null,
+        privateShares: Array.isArray(data.privateShares) ? data.privateShares : [],
+        privateShareDeviceId: data.privateShareDeviceId ?? null,
         connectionSlots: data.connectionSlots ?? null,
         slots: data.slots ?? null,
         stats: data.stats ?? null,
@@ -623,6 +693,8 @@ async function stopDesktopSharing() {
       baseDeviceId: response.baseDeviceId ?? null,
       privateShareActive: !!response.privateShareActive,
       privateShare: response.privateShare ?? null,
+      privateShares: Array.isArray(response.privateShares) ? response.privateShares : [],
+      privateShareDeviceId: response.privateShareDeviceId ?? null,
       connectionSlots: response.connectionSlots ?? null,
       slots: response.slots ?? null,
       stats: response.stats ?? null,
@@ -635,7 +707,7 @@ async function stopDesktopSharing() {
   }
 }
 
-// ── Relay connection ──────────────────────────────────────────────────────────
+// â”€â”€ Relay connection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function scheduleProviderReconnect(reason) {
   if (sharingMode !== 'extension' || !providerShareEnabled) return
@@ -667,7 +739,7 @@ async function connectStandaloneProvider() {
   if (!baseDeviceId || !deviceId) throw new Error('Extension identity is missing')
 
   const relays = await getLiveRelays()
-  // Hash baseDeviceId to pick a relay deterministically — same logic as desktop/CLI
+  // Hash baseDeviceId to pick a relay deterministically â€” same logic as desktop/CLI
   // so the extension provider lands on the same relay consistently across restarts.
   // Persist lastRelay to storage so it survives service worker termination.
   const stored = await chrome.storage.local.get(['providerLastRelay'])
@@ -676,7 +748,7 @@ async function connectStandaloneProvider() {
   if (lastRelay && relays.includes(lastRelay)) {
     relay = lastRelay
   } else {
-    // Rendezvous/HRW consistent hashing — same algorithm as desktop/CLI.
+    // Rendezvous/HRW consistent hashing â€” same algorithm as desktop/CLI.
     // Adding/removing a relay only moves ~1/n providers, not all of them.
     let best = null, bestScore = -1
     for (const r of relays) {
@@ -777,7 +849,7 @@ async function connectStandaloneProvider() {
 
 async function startStandaloneProvider() {
   await loadSharingContext()
-  await syncProviderPrivateShareState({ source: 'start', stopOnToggle: false })
+  await syncProviderPrivateShareState({ source: 'start' })
   providerShareEnabled = true
   sharingMode = 'extension'
   providerStats = {
@@ -942,13 +1014,21 @@ async function getSharingStatus() {
   return { ...standaloneStatus, ownerMismatch: false }
 }
 
-async function connectToRelay(opts, attempt = 0) {
+async function connectToRelay(opts, attempt = 0, retries = 0) {
   const serverFallbackList = opts.relayFallbackList ?? []
   const liveFallbackList = await getLiveRelays()
   // Merge: server-ordered list first (health-aware), then any live relays not already included
   const fallbackList = [...new Set([...serverFallbackList, ...liveFallbackList])]
   if (attempt >= fallbackList.length) {
-    throw new Error('No peer available in ' + opts.country + ' — try again shortly')
+    // Exhausted all relays â€” if providers exist but were all busy, retry up to 3 times
+    // with a short backoff. This handles the race where both users connect simultaneously
+    // and each provider slot is briefly occupied by the other user's session.
+    if (retries < 3) {
+      log('warn', `[CONNECT] all relays exhausted, retry ${retries + 1}/3 in 3s`)
+      await new Promise(resolve => setTimeout(resolve, 3000))
+      return connectToRelay(opts, 0, retries + 1)
+    }
+    throw new Error('No peer available in ' + opts.country + ' â€” try again shortly')
   }
   const relay = fallbackList[attempt]
   try {
@@ -957,9 +1037,10 @@ async function connectToRelay(opts, attempt = 0) {
     if (attempt < fallbackList.length - 1) {
       log('warn', `[CONNECT] relay ${relay} failed (${error.message}), trying next fallback`)
       await new Promise(resolve => setTimeout(resolve, 500))
-      return connectToRelay(opts, attempt + 1)
+      return connectToRelay(opts, attempt + 1, retries)
     }
-    throw error
+    // Last relay also failed â€” fall through to retry logic above
+    return connectToRelay(opts, fallbackList.length, retries)
   }
 }
 
@@ -979,7 +1060,7 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
     }
 
     ws.onopen = () => {
-      log('info', `[CONNECT] WS open → sending request_session country=${country}`)
+      log('info', `[CONNECT] WS open â†’ sending request_session country=${country}`)
       ws.send(JSON.stringify({
         type: 'request_session',
         country,
@@ -1016,7 +1097,7 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ sessionId: agentSessionId, relayEndpoint, country }),
             })
-            log('info', '[CONNECT] proxy-session sent to desktop ✓')
+            log('info', '[CONNECT] proxy-session sent to desktop âœ“')
           } catch (e) {
             log('error', `[CONNECT] proxy-session failed: ${e.message}`)
           }
@@ -1027,10 +1108,10 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
         settle(resolve, undefined)
       }
 
-      // ── Auto-reconnect: relay found a new provider transparently ─────────
+      // â”€â”€ Auto-reconnect: relay found a new provider transparently â”€â”€â”€â”€â”€â”€â”€â”€â”€
       if (msg.type === 'session_reconnected') {
         agentSessionId = msg.sessionId
-        // Use the relayEndpoint from the message if provided — it's the relay the
+        // Use the relayEndpoint from the message if provided â€” it's the relay the
         // requester is already on, so the desktop proxy-session must point there.
         const reconnectRelay = msg.relayEndpoint || relayEndpoint
         if (currentSession) currentSession = { ...currentSession, sessionId: msg.sessionId, relayEndpoint: reconnectRelay }
@@ -1070,7 +1151,7 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
       }
 
       if (msg.type === 'session_ended') {
-        log('info', '[CONNECT] session_ended → clearing proxy')
+        log('info', '[CONNECT] session_ended â†’ clearing proxy')
         clearProxy()
         currentSession = null
         relayWs = null
@@ -1099,16 +1180,16 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
 
     setTimeout(() => {
       if (!settled) {
-        log('warn', `[CONNECT] timeout — no peer found in ${country} after 15s`)
+        log('warn', `[CONNECT] timeout â€” no peer found in ${country} after 15s`)
         ws.close(1000)
-        settle(reject, new Error('No peer available in ' + country + ' — try again shortly'))
+        settle(reject, new Error('No peer available in ' + country + ' â€” try again shortly'))
       }
     }, 15000)
   })
 }
 
-// ── Header spoofing (declarativeNetRequest dynamic rules) ───────────────────
-// Rule IDs — must be stable integers
+// â”€â”€ Header spoofing (declarativeNetRequest dynamic rules) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Rule IDs â€” must be stable integers
 const HDR_RULE_ACCEPT_LANG = 1
 const HDR_RULE_SEC_CH_UA_PLATFORM = 2
 const HDR_RULE_SEC_CH_UA_MOBILE = 3
@@ -1205,7 +1286,7 @@ async function clearHeaderRules() {
   }
 }
 
-// ── Proxy settings ────────────────────────────────────────────────────────────
+// â”€â”€ Proxy settings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function blockWebRTC() {
   chrome.privacy.network.webRTCIPHandlingPolicy.set(
@@ -1239,7 +1320,7 @@ function setProxyDesktop(sessionId, country) {
       if (chrome.runtime.lastError) {
         log('error', `[PROXY] fixed_servers error: ${chrome.runtime.lastError.message}`)
       } else {
-        log('info', '[PROXY] mode=fixed_servers 127.0.0.1:7655 ✓')
+        log('info', '[PROXY] mode=fixed_servers 127.0.0.1:7655 âœ“')
       }
     }
   )
@@ -1252,20 +1333,22 @@ function setProxyDesktop(sessionId, country) {
 function setProxyRelay(relayEndpoint, sessionId, country) {
   const relayUrl = relayEndpoint.replace('wss://', 'https://').replace('ws://', 'http://')
   const relayHost = new URL(relayUrl).hostname
+  // Port 8080 is the relay's actual HTTP port â€” it handles both WS upgrades
+  // and raw HTTP CONNECT requests for the PAC proxy path.
   const pacScript = `
     function FindProxyForURL(url, host) {
       if (host === 'localhost' || host === '127.0.0.1' || isPlainHostName(host)) return 'DIRECT';
-      return 'PROXY ${relayHost}:8081';
+      return 'PROXY ${relayHost}:8080';
     }
   `
   chrome.proxy.settings.set(
     { value: { mode: 'pac_script', pacScript: { data: pacScript } }, scope: 'regular' },
     () => {
       if (chrome.runtime.lastError) log('error', `[PROXY] PAC error: ${chrome.runtime.lastError.message}`)
-      else log('info', `[PROXY] PAC active → ${relayHost}:8081 ✓`)
+      else log('info', `[PROXY] PAC active â†’ ${relayHost}:8080 âœ“`)
     }
   )
-  chrome.storage.session.set({ proxySessionId: sessionId, proxyHost: relayHost, proxyPort: 8081 })
+  chrome.storage.session.set({ proxySessionId: sessionId, proxyHost: relayHost, proxyPort: 8080 })
   syncActionBadge()
   blockWebRTC()
   if (country) applyHeaderRules(country)
@@ -1310,13 +1393,13 @@ async function disconnect() {
   fetch(`http://127.0.0.1:${CONTROL_PORT}/proxy-session`, { method: 'DELETE' }).catch(() => {})
 }
 
-// ── Lifecycle ─────────────────────────────────────────────────────────────────
+// â”€â”€ Lifecycle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async function restoreSharingRuntime() {
   clearProxy()
   await chrome.storage.local.set({ session: null })
   await loadSharingContext()
-  await syncProviderPrivateShareState({ source: 'restore', stopOnToggle: false })
+  await syncProviderPrivateShareState({ source: 'restore' })
   const helper = await getSharingStatus()
   await persistSharingState(helper)
   if (sharingMode === 'extension') {
@@ -1364,7 +1447,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 
   await loadSharingContext()
   if (sharingMode === 'extension' || providerShareEnabled) {
-    await syncProviderPrivateShareState({ source: 'alarm', stopOnToggle: true })
+    await syncProviderPrivateShareState({ source: 'alarm' })
   }
   const helper = await getSharingStatus()
   await persistSharingState(helper)

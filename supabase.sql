@@ -9,10 +9,6 @@ do $$ begin
   drop trigger if exists profiles_updated_at on profiles;
 exception when others then null; end $$;
 
-do $$ begin
-  drop trigger if exists sessions_updated_at on sessions;
-exception when others then null; end $$;
-
 drop function if exists handle_new_user() cascade;
 drop function if exists handle_updated_at() cascade;
 drop function if exists update_trust_score(uuid, integer) cascade;
@@ -21,9 +17,12 @@ drop function if exists increment_bytes_shared(uuid, bigint) cascade;
 drop function if exists get_provider_share_status(uuid) cascade;
 drop function if exists reset_monthly_bandwidth() cascade;
 drop function if exists upsert_provider_heartbeat(uuid, text, text) cascade;
+drop function if exists upsert_provider_heartbeat(uuid, text, text, text) cascade;
 drop function if exists remove_provider_device(uuid, text) cascade;
 drop function if exists cleanup_stale_providers() cascade;
 drop function if exists cleanup_stale_sessions() cascade;
+drop function if exists finalize_session_accountability(uuid, uuid, text, bigint, text) cascade;
+drop function if exists set_preferred_provider(uuid, text, uuid) cascade;
 
 drop view if exists peer_availability cascade;
 
@@ -70,48 +69,33 @@ create table profiles (
   total_bytes_used bigint default 0,
   bandwidth_used_month bigint default 0,
   bandwidth_limit bigint default 5368709120, -- 5GB free tier
-  preferred_providers jsonb default '{}'::jsonb, -- { "NG": "provider-user-id", ... }
+  preferred_providers jsonb default '{}'::jsonb,
   has_accepted_provider_terms boolean default false,
-  daily_share_limit_mb integer default null, -- null = no limit
+  daily_share_limit_mb integer default null,
 
   created_at timestamptz default now(),
   updated_at timestamptz default now()
 );
 
--- Sessions table
+-- Sessions table — single source of truth for all session data.
+-- session_accountability has been removed; everything lives here.
 create table sessions (
-  id uuid primary key default gen_random_uuid(),
-  user_id uuid references profiles(id) on delete cascade not null,
-  provider_id uuid references profiles(id) on delete set null,
-  provider_kind text,
+  id             uuid primary key default gen_random_uuid(),
+  user_id        uuid references profiles(id) on delete cascade not null, -- requester
+  provider_id    uuid references profiles(id) on delete set null,          -- set on agent_ready
+  provider_kind  text,                                                      -- 'desktop'|'cli'|'extension'
   target_country text not null,
-  target_host text,
+  target_host    text,                                                      -- best representative hostname
+  target_hosts   text[] default '{}',                                      -- all hostnames seen in session
   relay_endpoint text,
-  status text default 'pending' check (status in ('pending','active','ended','flagged')),
-  bytes_used bigint default 0,
-  signed_receipt text, -- JWT accountability receipt
-  started_at timestamptz default now(),
-  ended_at timestamptz
+  status         text default 'pending' check (status in ('pending','active','ended','flagged')),
+  bytes_used     bigint default 0,
+  signed_receipt text,                                                      -- HMAC accountability receipt
+  started_at     timestamptz default now(),
+  ended_at       timestamptz
 );
 
--- Session accountability (immutable audit log)
-create table session_accountability (
-  id uuid primary key default gen_random_uuid(),
-  session_id uuid not null unique,
-  requester_id uuid references profiles(id) on delete set null,
-  provider_id uuid references profiles(id) on delete set null,
-  target_host text,
-  provider_country text,
-  bytes_used bigint default 0,
-  started_at timestamptz default now(),
-  ended_at timestamptz,
-  signed_receipt text not null,
-  created_at timestamptz default now()
-);
-
-create index on session_accountability (session_id);
-create index on session_accountability (requester_id);
-create index on session_accountability (provider_id);
+create index sessions_status_idx on sessions (status) where status = 'active';
 
 -- Abuse reports
 create table abuse_reports (
@@ -123,13 +107,13 @@ create table abuse_reports (
   created_at timestamptz default now()
 );
 
--- Extension auth tokens (one-time bypass tokens for extension sign-in)
+-- Extension auth tokens
 create table extension_auth_tokens (
   id uuid primary key default gen_random_uuid(),
   ext_id text not null unique,
   user_id uuid references profiles(id) on delete cascade not null,
   token text not null,
-  supabase_token text,                -- Supabase access_token for API calls
+  supabase_token text,
   used boolean default false,
   expires_at timestamptz not null default (now() + interval '5 minutes'),
   created_at timestamptz default now()
@@ -139,8 +123,9 @@ create table extension_auth_tokens (
 create table provider_devices (
   id uuid primary key default gen_random_uuid(),
   user_id uuid references profiles(id) on delete cascade not null,
-  device_id text not null,             -- stable per-install UUID
+  device_id text not null,
   country_code text not null,
+  relay_url text default null,         -- relay the device is currently connected to
   last_heartbeat timestamptz not null default now(),
   created_at timestamptz default now(),
   unique (user_id, device_id)
@@ -148,8 +133,9 @@ create table provider_devices (
 
 create index on provider_devices (last_heartbeat);
 create index on provider_devices (user_id);
+create index on provider_devices (country_code, last_heartbeat);
 
--- Private sharing codes (one code per base sharing device)
+-- Private sharing codes
 create table private_share_devices (
   id uuid primary key default gen_random_uuid(),
   user_id uuid references profiles(id) on delete cascade not null,
@@ -165,24 +151,23 @@ create table private_share_devices (
 create index on private_share_devices (user_id);
 create index on private_share_devices (share_code);
 
--- Device authorization codes (OAuth 2.0 Device Flow for desktop app)
+-- Device authorization codes (OAuth 2.0 Device Flow)
 create table device_codes (
   id uuid primary key default gen_random_uuid(),
-  device_code text not null unique,   -- long random code for polling
-  user_code text not null unique,     -- short human-readable code (e.g. PMSH-4829)
+  device_code text not null unique,
+  user_code text not null unique,
   user_id uuid references profiles(id) on delete cascade,
-  token text,                         -- desktop token issued after approval
-  status text default 'pending' check (status in ('pending','approved','expired','denied')),
+  token text,
+  status text default 'pending' check (status in ('pending','approved','expired','denied','revoked')),
   expires_at timestamptz not null default (now() + interval '10 minutes'),
   created_at timestamptz default now()
 );
 
--- Auto-delete used/expired tokens
 create index on extension_auth_tokens (ext_id) where used = false;
 create index on device_codes (device_code) where status = 'pending';
 create index on device_codes (user_code) where status = 'pending';
 
--- Countries (source of truth for country picker)
+-- Countries
 create table countries (
   code       text primary key,
   name       text not null,
@@ -197,7 +182,7 @@ create index on countries (active) where active = true;
 create index on countries (region);
 create index on countries (sort_order, name);
 
--- Auth tokens (forgot password + email confirmation)
+-- Auth tokens
 create table auth_tokens (
   id         uuid primary key default gen_random_uuid(),
   user_id    uuid references profiles(id) on delete cascade not null,
@@ -212,7 +197,7 @@ create table auth_tokens (
 create index on auth_tokens (email, type) where used = false;
 create index on auth_tokens (expires_at);
 
--- Peer availability view — based on live heartbeats, not stale boolean
+-- Peer availability view
 create view peer_availability as
   select
     pd.country_code as country,
@@ -223,22 +208,19 @@ create view peer_availability as
     and p.is_verified = true
   group by pd.country_code;
 
--- Trust score function
-create or replace function update_trust_score(
-  p_user_id uuid,
-  delta integer
-) returns void as $$
+-- ================================
+-- Functions
+-- ================================
+
+create or replace function update_trust_score(p_user_id uuid, delta integer)
+returns void as $$
   update profiles
-  set trust_score = greatest(0, least(100, trust_score + delta)),
-      updated_at = now()
+  set trust_score = greatest(0, least(100, trust_score + delta)), updated_at = now()
   where id = p_user_id;
 $$ language sql security definer;
 
--- Increment bandwidth usage
-create or replace function increment_bandwidth(
-  p_user_id uuid,
-  p_bytes bigint
-) returns void as $$
+create or replace function increment_bandwidth(p_user_id uuid, p_bytes bigint)
+returns void as $$
   update profiles
   set total_bytes_used = total_bytes_used + p_bytes,
       bandwidth_used_month = bandwidth_used_month + p_bytes,
@@ -246,14 +228,10 @@ create or replace function increment_bandwidth(
   where id = p_user_id;
 $$ language sql security definer;
 
--- Increment bytes shared (called when provider ends a session)
-create or replace function increment_bytes_shared(
-  p_user_id uuid,
-  p_bytes bigint
-) returns void as $$
+create or replace function increment_bytes_shared(p_user_id uuid, p_bytes bigint)
+returns void as $$
 begin
-  update profiles
-  set
+  update profiles set
     total_bytes_shared = total_bytes_shared + p_bytes,
     share_bytes_today = case
       when share_bytes_today_date = current_date then coalesce(share_bytes_today, 0) + p_bytes
@@ -265,111 +243,85 @@ begin
 end;
 $$ language plpgsql security definer;
 
-create or replace function get_provider_share_status(
-  p_user_id uuid
-) returns table (
+create or replace function get_provider_share_status(p_user_id uuid)
+returns table (
   user_id uuid,
   total_bytes_today bigint,
   daily_share_limit_mb integer,
   can_accept boolean
 ) as $$
   select
-    p.id as user_id,
-    case
-      when p.share_bytes_today_date = current_date then coalesce(p.share_bytes_today, 0)
-      else 0
-    end as total_bytes_today,
+    p.id,
+    case when p.share_bytes_today_date = current_date then coalesce(p.share_bytes_today, 0) else 0 end,
     p.daily_share_limit_mb,
     case
       when p.daily_share_limit_mb is null then true
-      else (
-        case
-          when p.share_bytes_today_date = current_date then coalesce(p.share_bytes_today, 0)
-          else 0
-        end
-      ) < (p.daily_share_limit_mb::bigint * 1024 * 1024)
-    end as can_accept
-  from profiles p
-  where p.id = p_user_id;
+      else (case when p.share_bytes_today_date = current_date then coalesce(p.share_bytes_today, 0) else 0 end)
+           < (p.daily_share_limit_mb::bigint * 1024 * 1024)
+    end
+  from profiles p where p.id = p_user_id;
 $$ language sql security definer;
 
--- Upsert provider heartbeat and sync is_sharing
 create or replace function upsert_provider_heartbeat(
-  p_user_id uuid,
+  p_user_id   uuid,
   p_device_id text,
-  p_country text
+  p_country   text,
+  p_relay_url text default null
 ) returns void as $$
 begin
-  insert into provider_devices (user_id, device_id, country_code, last_heartbeat)
-  values (p_user_id, p_device_id, p_country, now())
+  insert into provider_devices (user_id, device_id, country_code, last_heartbeat, relay_url)
+  values (p_user_id, p_device_id, p_country, now(), p_relay_url)
   on conflict (user_id, device_id)
-  do update set last_heartbeat = now(), country_code = p_country;
+  do update set
+    last_heartbeat = now(),
+    country_code   = p_country,
+    relay_url      = coalesce(p_relay_url, provider_devices.relay_url);
 
   update profiles set is_sharing = true, updated_at = now() where id = p_user_id;
 end;
 $$ language plpgsql security definer;
 
--- Remove a specific device and update is_sharing if no devices remain
-create or replace function remove_provider_device(
-  p_user_id uuid,
-  p_device_id text
-) returns void as $$
+create or replace function remove_provider_device(p_user_id uuid, p_device_id text)
+returns void as $$
 begin
   delete from provider_devices where user_id = p_user_id and device_id = p_device_id;
-
   update profiles
   set is_sharing = exists(
     select 1 from provider_devices
-    where user_id = p_user_id
-      and last_heartbeat > now() - interval '45 seconds'
-  ),
-  updated_at = now()
+    where user_id = p_user_id and last_heartbeat > now() - interval '45 seconds'
+  ), updated_at = now()
   where id = p_user_id;
 end;
 $$ language plpgsql security definer;
 
--- Purge stale devices (heartbeat older than 45s) and fix is_sharing
-create or replace function cleanup_stale_providers()
-returns void as $$
+create or replace function cleanup_stale_providers() returns void as $$
 begin
-  -- Find affected users before deleting
   update profiles
   set is_sharing = exists(
     select 1 from provider_devices pd
-    where pd.user_id = profiles.id
-      and pd.last_heartbeat > now() - interval '45 seconds'
-  ),
-  updated_at = now()
+    where pd.user_id = profiles.id and pd.last_heartbeat > now() - interval '45 seconds'
+  ), updated_at = now()
   where id in (
     select distinct user_id from provider_devices
     where last_heartbeat <= now() - interval '45 seconds'
   );
-
   delete from provider_devices where last_heartbeat <= now() - interval '45 seconds';
 end;
 $$ language plpgsql security definer;
 
--- Auto-end sessions stuck in active for more than 2 hours
-create or replace function cleanup_stale_sessions()
-returns void as $$
-  update sessions
-  set status = 'ended', ended_at = now()
-  where status = 'active'
-    and started_at < now() - interval '2 hours';
+create or replace function cleanup_stale_sessions() returns void as $$
+  update sessions set status = 'ended', ended_at = now()
+  where status in ('pending', 'active') and started_at < now() - interval '2 hours';
 $$ language sql security definer;
 
--- Reset monthly bandwidth (call via cron or scheduled function)
-create or replace function reset_monthly_bandwidth()
-returns void as $$
-  update profiles
-  set bandwidth_used_month = 0
-  where subscription_status = 'free';
+create or replace function reset_monthly_bandwidth() returns void as $$
+  update profiles set bandwidth_used_month = 0 where subscription_status = 'free';
 $$ language sql security definer;
 
 -- Update peer affinity — set preferred provider for a country
 create or replace function set_preferred_provider(
-  p_user_id uuid,
-  p_country text,
+  p_user_id          uuid,
+  p_country          text,
   p_provider_user_id uuid
 ) returns void as $$
   update profiles
@@ -378,43 +330,8 @@ create or replace function set_preferred_provider(
   where id = p_user_id;
 $$ language sql security definer;
 
--- Finalize accountability row on session end (upsert — safe to call multiple times)
-create or replace function finalize_session_accountability(
-  p_session_id     uuid,
-  p_provider_id    uuid,
-  p_provider_country text,
-  p_bytes_used     bigint,
-  p_target_host    text default null
-) returns void as $$
-begin
-  insert into session_accountability (
-    session_id, requester_id, provider_id, provider_country,
-    bytes_used, target_host, signed_receipt, started_at, ended_at
-  )
-  select
-    s.id,
-    s.user_id,
-    coalesce(p_provider_id, s.provider_id),
-    coalesce(p_provider_country, s.target_country),
-    greatest(coalesce(p_bytes_used, 0), coalesce(s.bytes_used, 0)),
-    coalesce(p_target_host, s.target_host),
-    coalesce(s.signed_receipt, ''),
-    s.started_at,
-    now()
-  from sessions s
-  where s.id = p_session_id
-  on conflict (session_id) do update set
-    provider_id      = coalesce(excluded.provider_id,      session_accountability.provider_id),
-    provider_country = coalesce(excluded.provider_country, session_accountability.provider_country),
-    target_host      = coalesce(excluded.target_host,      session_accountability.target_host),
-    bytes_used       = greatest(excluded.bytes_used,       session_accountability.bytes_used),
-    ended_at         = now();
-end;
-$$ language plpgsql security definer;
-
 -- Auto-create profile on signup
-create or replace function handle_new_user()
-returns trigger as $$
+create or replace function handle_new_user() returns trigger as $$
 begin
   insert into public.profiles (id, country_code, username)
   values (
@@ -431,9 +348,7 @@ create trigger on_auth_user_created
   after insert on auth.users
   for each row execute procedure handle_new_user();
 
--- Updated_at trigger
-create or replace function handle_updated_at()
-returns trigger as $$
+create or replace function handle_updated_at() returns trigger as $$
 begin
   new.updated_at = now();
   return new;
@@ -452,82 +367,52 @@ alter table profiles enable row level security;
 alter table sessions enable row level security;
 alter table abuse_reports enable row level security;
 
--- Profiles: users manage their own
-create policy "Users can view own profile"
-  on profiles for select using (auth.uid() = id);
+create policy "Users can view own profile"   on profiles for select using (auth.uid() = id);
+create policy "Users can update own profile" on profiles for update using (auth.uid() = id);
+create policy "Anyone can view peer counts"  on profiles for select using (true);
 
-create policy "Users can update own profile"
-  on profiles for update using (auth.uid() = id);
+create policy "Users can view own sessions"   on sessions for select using (auth.uid() = user_id);
+create policy "Users can create sessions"     on sessions for insert with check (auth.uid() = user_id);
+create policy "Users can update own sessions" on sessions for update using (auth.uid() = user_id);
 
--- Peer availability view is public (needed for country picker)
-create policy "Anyone can view peer counts"
-  on profiles for select
-  using (true);
-
--- Sessions: users manage their own
-create policy "Users can view own sessions"
-  on sessions for select using (auth.uid() = user_id);
-
-create policy "Users can create sessions"
-  on sessions for insert with check (auth.uid() = user_id);
-
-create policy "Users can update own sessions"
-  on sessions for update using (auth.uid() = user_id);
-
--- Abuse reports: authenticated users can file
 create policy "Authenticated users can report"
-  on abuse_reports for insert
-  with check (auth.uid() = reporter_id);
+  on abuse_reports for insert with check (auth.uid() = reporter_id);
 
--- Session accountability: service role only (no user RLS needed)
-alter table session_accountability enable row level security;
-create policy "Service role only"
-  on session_accountability for all
-  using (false);
-
--- Extension auth tokens: service role only
 alter table extension_auth_tokens enable row level security;
-create policy "Service role only ext tokens"
-  on extension_auth_tokens for all
-  using (false);
+create policy "Service role only ext tokens" on extension_auth_tokens for all using (false);
 
--- Provider devices: service role only
 alter table provider_devices enable row level security;
-create policy "Service role only provider devices"
-  on provider_devices for all
-  using (false);
+create policy "Service role only provider devices" on provider_devices for all using (false);
 
--- Device codes: service role only
 alter table device_codes enable row level security;
-create policy "Service role only device codes"
-  on device_codes for all
-  using (false);
+create policy "Service role only device codes" on device_codes for all using (false);
 
--- Countries: public read, no write from client
 alter table countries enable row level security;
-create policy "Anyone can read active countries"
-  on countries for select using (active = true);
+create policy "Anyone can read active countries" on countries for select using (active = true);
 
--- Auth tokens: service role only
 alter table auth_tokens enable row level security;
-create policy "Service role only auth tokens"
-  on auth_tokens for all
-  using (false);
+create policy "Service role only auth tokens" on auth_tokens for all using (false);
+
+alter table private_share_devices enable row level security;
+create policy "Service role only private share devices" on private_share_devices for all using (false);
 
 -- ================================
--- Migration: add has_accepted_provider_terms (run on existing DBs)
+-- Migrations (safe to run on existing DBs)
 -- ================================
+alter table provider_devices add column if not exists relay_url text default null;
 alter table profiles add column if not exists has_accepted_provider_terms boolean default false;
-
--- ================================
--- Migration: add daily_share_limit_mb (run on existing DBs)
--- ================================
 alter table profiles add column if not exists daily_share_limit_mb integer default null;
-
--- ================================
--- Migration: add DB-authoritative daily share tracking
--- ================================
 alter table profiles add column if not exists share_bytes_today bigint default 0;
 alter table profiles add column if not exists share_bytes_today_date date default current_date;
 alter table sessions add column if not exists provider_kind text;
 alter table sessions add column if not exists target_host text;
+alter table sessions add column if not exists signed_receipt text;
+alter table sessions add column if not exists target_hosts text[] default '{}';
+
+update sessions
+set target_hosts = array[target_host]
+where target_host is not null
+  and (target_hosts is null or target_hosts = '{}');
+
+create index if not exists sessions_status_idx on sessions (status) where status = 'active';
+create index if not exists provider_devices_country_hb_idx on provider_devices (country_code, last_heartbeat);

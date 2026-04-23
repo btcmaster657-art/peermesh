@@ -1,8 +1,7 @@
-// popup.js — PeerMesh Chrome Extension
+﻿// popup.js â€” PeerMesh Chrome Extension
+import { APP_URL as API } from '../config.js'
 
-const API = 'https://peermesh-beta.vercel.app'
-
-// Countries — loaded from DB with pagination, error handling and retry
+// Countries â€” loaded from DB with pagination, error handling and retry
 const COUNTRIES_PAGE_SIZE = 30
 let countriesData = []
 let countriesPage = 1
@@ -26,13 +25,7 @@ async function loadCountries(page = 1, search = '') {
     countriesTotalPages = data.pages ?? 1
     countriesPage = page
     // Auto-select IP-detected country on first load
-    if (page === 1 && !search && data.detectedCountry && !state.selectedCountry) {
-      const found = countriesData.find(c => c.code === data.detectedCountry)
-      if (found) {
-        state.selectedCountry = found.code
-        chrome.storage.local.set({ selectedCountry: found.code })
-      }
-    }
+    // auto-select removed â€” let user choose their own country
   } catch {
     countriesError = true
   } finally {
@@ -43,14 +36,14 @@ async function loadCountries(page = 1, search = '') {
 
 function getFlagForCountry(code) {
   const found = countriesData.find(c => c.code === code)
-  return found?.flag ?? '🌍'
+  return found?.flag ?? 'ðŸŒ'
 }
 
 function getHelperMismatchError(helper = state.helper) {
   const source = helper?.source === 'cli' ? 'CLI' : 'desktop app'
   return `This ${source} is signed in as a different user. Sign out of the ${source} first.`
 }
-const FREE_TIER_MESSAGE = 'FREE TIER — Enable sharing above to connect, or upgrade to premium to browse without sharing.'
+const FREE_TIER_MESSAGE = 'FREE TIER â€” Enable sharing above to connect, or upgrade to premium to browse without sharing.'
 const DAILY_LIMIT_MIN_MB = 1024
 
 let state = {
@@ -71,6 +64,8 @@ let state = {
   showDisclosure: false,
   privateCodeInput: '',
   privateShare: null,
+  privateShares: [],
+  selectedPrivateSlot: null,
   privateExpiryHours: '24',
   privateShareSaving: false,
   privateShareRestartRequired: false,
@@ -91,7 +86,109 @@ function ownedHelper(helper = state.helper, user = state.user) {
   return helperOwnerMismatch(helper, user) ? null : helper
 }
 
-// ── Session expiry ────────────────────────────────────────────────────────────
+function getUserSharingToken() {
+  return state.user?.token || state.supabaseToken || null
+}
+
+function createDisabledPrivateShare(deviceId, baseDeviceId, slotIndex) {
+  return {
+    device_id: deviceId,
+    base_device_id: baseDeviceId,
+    slot_index: slotIndex,
+    code: '',
+    enabled: false,
+    expires_at: null,
+    active: false,
+  }
+}
+
+function sortPrivateShares(rows) {
+  return [...rows].sort((a, b) => {
+    if ((a.base_device_id || '') !== (b.base_device_id || '')) return (a.base_device_id || '').localeCompare(b.base_device_id || '')
+    const aSlot = Number.isInteger(a.slot_index) ? a.slot_index : -1
+    const bSlot = Number.isInteger(b.slot_index) ? b.slot_index : -1
+    if (aSlot !== bSlot) return aSlot - bSlot
+    return (a.device_id || '').localeCompare(b.device_id || '')
+  })
+}
+
+function hasPrivateShareSlot(rows, baseDeviceId, slotIndex) {
+  return rows.some((row) => row?.base_device_id === baseDeviceId && (row.slot_index === slotIndex || (slotIndex === 0 && row.device_id === baseDeviceId)))
+}
+
+function mergePrivateShares(rows, baseDeviceId, helper = ownedHelper()) {
+  if (!baseDeviceId) return []
+
+  const merged = new Map()
+  const add = (row) => {
+    if (row?.device_id) merged.set(row.device_id, row)
+  }
+
+  ;(rows || []).forEach(add)
+  ;(helper?.privateShares || []).forEach((row) => {
+    if (!row || row.base_device_id !== baseDeviceId) return
+    add(row)
+  })
+  if (helper?.privateShare?.base_device_id === baseDeviceId) add(helper.privateShare)
+
+  const configuredSlots = Math.max(1, helper?.slots?.configured ?? helper?.connectionSlots ?? 1)
+  const currentRows = () => [...merged.values()]
+  for (let index = 0; index < configuredSlots; index++) {
+    if (!hasPrivateShareSlot(currentRows(), baseDeviceId, index)) {
+      const deviceId = `${baseDeviceId}_slot_${index}`
+      merged.set(deviceId, createDisabledPrivateShare(deviceId, baseDeviceId, index))
+    }
+  }
+
+  if (merged.size === 0) {
+    const deviceId = `${baseDeviceId}_slot_0`
+    merged.set(deviceId, createDisabledPrivateShare(deviceId, baseDeviceId, 0))
+  }
+
+  return sortPrivateShares([...merged.values()])
+}
+
+function selectPrivateShare(rows, deviceId, baseDeviceId) {
+  if (!rows.length) return null
+  if (deviceId) {
+    const exact = rows.find((row) => row.device_id === deviceId)
+    if (exact) return exact
+  }
+  if (baseDeviceId) {
+    const exactBase = rows.find((row) => row.device_id === baseDeviceId)
+    if (exactBase) return exactBase
+    const slotZero = rows.find((row) => row.base_device_id === baseDeviceId && (row.slot_index === 0 || row.device_id === `${baseDeviceId}_slot_0`))
+    if (slotZero) return slotZero
+  }
+  return rows[0] ?? null
+}
+
+function applyPrivateShareRows(rows, baseDeviceId, preferredDeviceId = null) {
+  if (!baseDeviceId) {
+    state.privateShare = null
+    state.privateShares = []
+    state.selectedPrivateSlot = null
+    return
+  }
+  state.privateShares = mergePrivateShares(rows, baseDeviceId)
+  state.privateShare = selectPrivateShare(state.privateShares, preferredDeviceId || state.selectedPrivateSlot, baseDeviceId)
+  state.selectedPrivateSlot = state.privateShare?.device_id ?? preferredDeviceId ?? null
+  state.privateExpiryHours = getPrivateShareExpiryPreset(state.privateShare?.expires_at ?? null)
+}
+
+function shouldPreserveAuthState() {
+  const helper = ownedHelper()
+  return !!(state.isSharing || (helper?.running || helper?.shareEnabled))
+}
+
+async function handleAuthFailure(status, { preserveWhileSharing = false } = {}) {
+  if (status !== 401 && status !== 403) return false
+  if (preserveWhileSharing && shouldPreserveAuthState()) return true
+  await handleExpiredSession()
+  return true
+}
+
+// â”€â”€ Session expiry â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async function handleExpiredSession() {
   await chrome.runtime.sendMessage({ type: 'STOP_SHARING' }).catch(() => {})
@@ -103,6 +200,9 @@ async function handleExpiredSession() {
   state.supabaseToken = null
   state.dailyLimitInput = ''
   state.dailyLimitSaving = false
+  state.privateShare = null
+  state.privateShares = []
+  state.selectedPrivateSlot = null
   await chrome.storage.local.clear()
   // Preserve extId so auth polling can resume
   const extId = state.extId
@@ -111,7 +211,7 @@ async function handleExpiredSession() {
   startAuthPolling()
 }
 
-// ── Init ──────────────────────────────────────────────────────────────────────
+// â”€â”€ Init â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async function init() {
   const stored = await chrome.storage.local.get(['user', 'session', 'isSharing', 'helper', 'selectedCountry', 'privateCodeInput', 'extId', 'supabaseToken', 'connectionType'])
@@ -137,19 +237,23 @@ async function init() {
       const res = await fetch(`${API}/api/extension-auth?verify=1&userId=${state.user.id}`, {
         headers: { 'Authorization': `Bearer ${state.user.token}` },
       })
-      if (res.status === 401 || res.status === 403) {
-        state.loading = false
-        render()
-        renderLogPanel()
-        await initLogPanel()
-        await handleExpiredSession()
+      if (await handleAuthFailure(res.status, { preserveWhileSharing: true })) {
+        if (state.user) {
+          state.loading = false
+          render()
+          renderLogPanel()
+          await initLogPanel()
+          await refreshRuntimeStatus()
+          await loadPrivateShareState(ownedHelper()?.baseDeviceId ?? null)
+          startPeerPolling()
+        }
         return
       }
-    } catch {} // offline — allow through with cached credentials
+    } catch {} // offline â€” allow through with cached credentials
     // Fetch hasAcceptedProviderTerms from DB
     try {
       const res = await fetch(`${API}/api/user/sharing`, {
-        headers: { 'Authorization': `Bearer ${state.supabaseToken || state.user.token}` },
+        headers: { 'Authorization': `Bearer ${getUserSharingToken()}` },
       })
       if (res.ok) {
         const data = await res.json()
@@ -179,7 +283,7 @@ async function init() {
   loadCountries(1, '')
 }
 
-// ── Auth polling ──────────────────────────────────────────────────────────────
+// â”€â”€ Auth polling â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 let authPollInterval = null
 let peerPollInterval = null
@@ -193,6 +297,9 @@ async function refreshRuntimeStatus() {
     state.helper = status.helper || null
     state.isSharing = !!(state.helper?.available && !helperOwnerMismatch(state.helper, state.user) && (state.helper?.running || state.helper?.shareEnabled))
     if (state.isSharing) state.privateShareRestartRequired = false
+    const baseDeviceId = ownedHelper(status.helper || null, state.user)?.baseDeviceId ?? null
+    if (baseDeviceId) applyPrivateShareRows(state.privateShares, baseDeviceId, state.selectedPrivateSlot)
+    else applyPrivateShareRows([], null)
     await chrome.storage.local.set({
       session: state.session,
       isSharing: state.isSharing,
@@ -212,17 +319,17 @@ function getPrivateShareExpiryPreset(expiresAt) {
 
 async function loadPrivateShareState(baseDeviceId) {
   if (!state.user || !baseDeviceId || helperOwnerMismatch()) {
-    state.privateShare = null
+    applyPrivateShareRows([], null)
     return
   }
   try {
     const res = await fetch(`${API}/api/user/sharing?baseDeviceId=${encodeURIComponent(baseDeviceId)}`, {
-      headers: { 'Authorization': `Bearer ${state.supabaseToken || state.user.token}` },
+      headers: { 'Authorization': `Bearer ${getUserSharingToken()}` },
     })
+    if (await handleAuthFailure(res.status, { preserveWhileSharing: true })) return
     if (!res.ok) return
     const data = await res.json()
-    state.privateShare = data.private_share ?? null
-    state.privateExpiryHours = getPrivateShareExpiryPreset(state.privateShare?.expires_at ?? null)
+    applyPrivateShareRows(data.private_shares ?? (data.private_share ? [data.private_share] : []), baseDeviceId, data.private_share?.device_id ?? null)
   } catch {}
 }
 
@@ -250,10 +357,11 @@ async function savePrivateShareState(input) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${state.supabaseToken || state.user.token}`,
+        'Authorization': `Bearer ${getUserSharingToken()}`,
       },
       body: JSON.stringify({
         privateSharing: {
+          deviceId: state.selectedPrivateSlot ?? baseDeviceId,
           baseDeviceId,
           enabled: input.enabled,
           refresh: input.refresh === true,
@@ -262,9 +370,10 @@ async function savePrivateShareState(input) {
       }),
     })
     const data = await res.json()
+    if (await handleAuthFailure(res.status, { preserveWhileSharing: true })) return
     if (!res.ok || data.error) throw new Error(data.error || 'Could not update private sharing')
-    state.privateShare = data.private_share ?? null
-    if (input.expiryHours !== undefined) state.privateExpiryHours = input.expiryHours
+    applyPrivateShareRows(data.private_shares ?? (data.private_share ? [data.private_share] : state.privateShares), baseDeviceId, data.private_share?.device_id ?? state.selectedPrivateSlot)
+    if (input.expiryHours !== undefined && state.privateShare) state.privateExpiryHours = input.expiryHours
     const enabledChanged = input.enabled !== undefined && previousEnabled !== !!state.privateShare?.enabled
     if (enabledChanged && state.isSharing) {
       state.shareToggling = true
@@ -315,12 +424,13 @@ function startPeerPolling() {
 
   // Poll fresh profile stats from DB every 10s (matches dashboard refresh rate)
   setInterval(async () => {
-    if (!state.user || !state.supabaseToken) return
+    const authToken = getUserSharingToken()
+    if (!state.user || !authToken) return
     try {
       const res = await fetch(`${API}/api/user/sharing`, {
-        headers: { 'Authorization': `Bearer ${state.supabaseToken}` },
+        headers: { 'Authorization': `Bearer ${authToken}` },
       })
-      if (res.status === 401 || res.status === 403) { await handleExpiredSession(); return }
+      if (await handleAuthFailure(res.status, { preserveWhileSharing: true })) return
       if (!res.ok) return
       const data = await res.json()
       state.user = {
@@ -371,7 +481,7 @@ function startAuthPolling() {
   }, 2000)
 }
 
-// ── Render ────────────────────────────────────────────────────────────────────
+// â”€â”€ Render â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function render() {
   const app = document.getElementById('app')
@@ -391,7 +501,7 @@ function render() {
 
 function renderAuth(app) {
   const offlineBanner = !state.isOnline
-    ? `<div style="display:flex;align-items:center;gap:8px;background:rgba(255,170,0,0.08);border:1px solid rgba(255,170,0,0.35);border-radius:8px;padding:8px 12px;margin-bottom:12px;font-family:'Courier New',monospace;font-size:10px;color:#ffaa00">⚠ NO INTERNET — sign-in unavailable</div>`
+    ? `<div style="display:flex;align-items:center;gap:8px;background:rgba(255,170,0,0.08);border:1px solid rgba(255,170,0,0.35);border-radius:8px;padding:8px 12px;margin-bottom:12px;font-family:'Courier New',monospace;font-size:10px;color:#ffaa00">âš  NO INTERNET â€” sign-in unavailable</div>`
     : ''
   app.innerHTML = `
     <div class="header">
@@ -434,19 +544,19 @@ function renderDashboard(app) {
     ? 'Local desktop helper belongs to another user. Sign out there first.'
     : standaloneHelper
     ? (isSharing
-      ? 'Extension standalone sharing active — single-slot web mode.'
-      : 'Extension standalone ready — one slot. Desktop or CLI adds full-browser tunnels and up to 32 slots.')
+      ? 'Extension standalone sharing active â€” single-slot web mode.'
+      : 'Extension standalone ready â€” one slot. Desktop or CLI adds full-browser tunnels and up to 32 slots.')
     : helperReady
-      ? (isSharing ? `${helperSource} sharing active — earning credits.` : `${helperSource} helper detected — ready to share.`)
+      ? (isSharing ? `${helperSource} sharing active â€” earning credits.` : `${helperSource} helper detected â€” ready to share.`)
       : 'Sharing is unavailable right now.'
 
   const offlineBanner = !state.isOnline
-    ? `<div style="display:flex;align-items:center;gap:8px;background:rgba(255,170,0,0.08);border:1px solid rgba(255,170,0,0.35);border-radius:8px;padding:8px 12px;margin:0 16px 8px;font-family:'Courier New',monospace;font-size:10px;color:#ffaa00">⚠ NO INTERNET — features unavailable</div>`
+    ? `<div style="display:flex;align-items:center;gap:8px;background:rgba(255,170,0,0.08);border:1px solid rgba(255,170,0,0.35);border-radius:8px;padding:8px 12px;margin:0 16px 8px;font-family:'Courier New',monospace;font-size:10px;color:#ffaa00">âš  NO INTERNET â€” features unavailable</div>`
     : ''
   const errorBanner = state.error
     ? `<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:6px;background:rgba(255,68,102,0.08);border:1px solid rgba(255,68,102,0.25);border-radius:8px;padding:8px 12px;margin:0 16px 8px;font-size:11px;color:#ff6060;line-height:1.5">
         <span>${state.error}</span>
-        <button id="dismissErrorBtn" style="background:none;border:none;color:#666680;cursor:pointer;font-size:13px;line-height:1;padding:0;flex-shrink:0">✕</button>
+        <button id="dismissErrorBtn" style="background:none;border:none;color:#666680;cursor:pointer;font-size:13px;line-height:1;padding:0;flex-shrink:0">âœ•</button>
        </div>`
     : ''
 
@@ -502,9 +612,9 @@ function renderDashboard(app) {
              </div>
              ${countriesTotalPages > 1 ? `
              <div style="display:flex;align-items:center;justify-content:space-between;margin-top:8px">
-               <button id="countriesPrevBtn" ${countriesPage <= 1 ? 'disabled' : ''} style="background:none;border:1px solid var(--border);color:${countriesPage <= 1 ? 'var(--muted)' : 'var(--text)'};border-radius:6px;padding:4px 10px;font-family:'Courier New',monospace;font-size:10px;cursor:${countriesPage <= 1 ? 'not-allowed' : 'pointer'}">← PREV</button>
+               <button id="countriesPrevBtn" ${countriesPage <= 1 ? 'disabled' : ''} style="background:none;border:1px solid var(--border);color:${countriesPage <= 1 ? 'var(--muted)' : 'var(--text)'};border-radius:6px;padding:4px 10px;font-family:'Courier New',monospace;font-size:10px;cursor:${countriesPage <= 1 ? 'not-allowed' : 'pointer'}">â† PREV</button>
                <span style="font-family:'Courier New',monospace;font-size:10px;color:var(--muted)">${countriesPage} / ${countriesTotalPages}</span>
-               <button id="countriesNextBtn" ${countriesPage >= countriesTotalPages ? 'disabled' : ''} style="background:none;border:1px solid var(--border);color:${countriesPage >= countriesTotalPages ? 'var(--muted)' : 'var(--text)'};border-radius:6px;padding:4px 10px;font-family:'Courier New',monospace;font-size:10px;cursor:${countriesPage >= countriesTotalPages ? 'not-allowed' : 'pointer'}">NEXT →</button>
+               <button id="countriesNextBtn" ${countriesPage >= countriesTotalPages ? 'disabled' : ''} style="background:none;border:1px solid var(--border);color:${countriesPage >= countriesTotalPages ? 'var(--muted)' : 'var(--text)'};border-radius:6px;padding:4px 10px;font-family:'Courier New',monospace;font-size:10px;cursor:${countriesPage >= countriesTotalPages ? 'not-allowed' : 'pointer'}">NEXT â†’</button>
              </div>` : ''}`
       }
     </div>
@@ -536,7 +646,7 @@ function renderDashboard(app) {
 
     ${freeTierBlocked && !session && (selectedCountry || state.privateCodeInput)
       ? `<div class="section" style="background:rgba(255,68,102,0.08);border-top:1px solid rgba(255,68,102,0.2);border-bottom:1px solid rgba(255,68,102,0.2);font-size:11px;color:#ff9090;line-height:1.5">
-           <span style="font-family:'Courier New',monospace;font-size:10px;letter-spacing:0.5px">FREE TIER — </span>${FREE_TIER_MESSAGE.replace('FREE TIER — ', '')}
+           <span style="font-family:'Courier New',monospace;font-size:10px;letter-spacing:0.5px">FREE TIER â€” </span>${FREE_TIER_MESSAGE.replace('FREE TIER â€” ', '')}
          </div>`
       : ''}
 
@@ -544,7 +654,7 @@ function renderDashboard(app) {
       <div class="share-row">
         <div class="share-info">
           <h4>Share my connection</h4>
-          <p>${isSharing ? 'Sharing active — earning credits' : helperLabel}</p>
+          <p>${isSharing ? 'Sharing active â€” earning credits' : helperLabel}</p>
           ${isSharing ? `<div style="margin-top:4px;display:inline-block;font-family:'Courier New',monospace;font-size:9px;padding:2px 7px;border-radius:4px;background:${state.privateShare?.active ? 'rgba(0,255,136,0.12)' : 'rgba(255,255,255,0.05)'};border:1px solid ${state.privateShare?.active ? 'rgba(0,255,136,0.35)' : '#1e1e2a'};color:${state.privateShare?.active ? '#00ff88' : '#666680'}">${state.privateShare?.active ? '\uD83D\uDD12 PRIVATE' : '\uD83C\uDF10 PUBLIC'}</div>` : ''}
           ${state.user?.dailyLimitMb != null ? `<p style="font-size:10px;color:var(--muted);margin-top:2px">${formatBytes((state.user.dailyLimitMb ?? 0) * 1024 * 1024)} daily limit</p>` : ''}
           <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">
@@ -593,8 +703,16 @@ function renderDashboard(app) {
     <div class="section">
       <div class="share-info" style="margin-bottom:10px">
         <h4>Private sharing</h4>
-        <p>${state.privateShare?.active ? 'Pinned to this device and all active slots.' : 'Optional device-scoped code for trusted requesters.'}</p>
+        <p>${state.privateShare?.active ? 'Pinned to selected slot.' : 'Per-slot code for trusted requesters.'}</p>
       </div>
+      ${state.privateShares.length > 1 ? `
+      <select id="privateSlotSelect" style="width:100%;margin-bottom:8px;padding:7px 8px;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:6px;font-family:'Courier New',monospace;font-size:10px">
+        ${state.privateShares.map((s, i) => {
+          const label = Number.isInteger(s.slot_index) ? `Slot ${s.slot_index + 1}` : `Slot ${i + 1}`
+          const badge = s.enabled ? (s.active ? ' [ACTIVE]' : ' [ON]') : ' [OFF]'
+          return `<option value="${s.device_id}" ${s.device_id === state.selectedPrivateSlot ? 'selected' : ''}>${label}${badge}</option>`
+        }).join('')}
+      </select>` : ''}
       <div style="display:grid;grid-template-columns:1fr auto;gap:8px;margin-bottom:8px">
         <div style="padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:8px;font-family:'Courier New',monospace;font-size:13px;letter-spacing:2px;color:${state.privateShare?.code ? 'var(--accent)' : 'var(--muted)'}">${state.privateShare?.code || 'CODE OFF'}</div>
         <button id="copyPrivateCodeBtn" style="padding:0 10px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-family:'Courier New',monospace;font-size:10px;cursor:${state.privateShare?.code ? 'pointer' : 'not-allowed'}" ${!state.privateShare?.code ? 'disabled' : ''}>COPY</button>
@@ -687,6 +805,12 @@ function renderDashboard(app) {
   document.getElementById('copyPrivateCodeBtn')?.addEventListener('click', () => {
     if (state.privateShare?.code) navigator.clipboard.writeText(state.privateShare.code).catch(() => {})
   })
+  document.getElementById('privateSlotSelect')?.addEventListener('change', (e) => {
+    state.selectedPrivateSlot = e.target.value
+    state.privateShare = selectPrivateShare(state.privateShares, e.target.value, ownedHelper()?.baseDeviceId ?? null)
+    state.privateExpiryHours = getPrivateShareExpiryPreset(state.privateShare?.expires_at ?? null)
+    render()
+  })
   document.getElementById('privateExpirySelect')?.addEventListener('change', (e) => {
     state.privateExpiryHours = e.target.value
   })
@@ -743,18 +867,18 @@ function renderDashboard(app) {
         <div style="font-family:'Courier New',monospace;font-size:10px;color:#00ff88;letter-spacing:1px;margin-bottom:10px">BEFORE YOU SHARE</div>
         <div style="font-size:14px;font-weight:600;margin-bottom:14px;line-height:1.3">What sharing your connection means</div>
         ${[
-          ['🌐', 'Your IP address will be used by other PeerMesh users to browse the web.'],
-          ['🔒', 'All sessions are logged with signed receipts.'],
-          ['🚫', 'Blocked: .onion sites, SMTP/mail, torrents, private IPs.'],
-          ['⚡', 'You can stop sharing at any time.'],
-          ['💸', 'Sharing earns you free browsing credits.'],
+          ['ðŸŒ', 'Your IP address will be used by other PeerMesh users to browse the web.'],
+          ['ðŸ”’', 'All sessions are logged with signed receipts.'],
+          ['ðŸš«', 'Blocked: .onion sites, SMTP/mail, torrents, private IPs.'],
+          ['âš¡', 'You can stop sharing at any time.'],
+          ['ðŸ’¸', 'Sharing earns you free browsing credits.'],
         ].map(([icon, text]) => `
           <div style="display:flex;gap:10px;margin-bottom:10px;font-size:12px;color:#666680;line-height:1.5">
             <span style="flex-shrink:0">${icon}</span><span>${text}</span>
           </div>`).join('')}
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:16px">
           <button id="pm-disclose-cancel" style="padding:10px;background:none;border:1px solid #1e1e2a;border-radius:8px;color:#666680;cursor:pointer;font-family:'Courier New',monospace;font-size:10px">CANCEL</button>
-          <button id="pm-disclose-accept" style="padding:10px;background:#00ff88;border:none;border-radius:8px;color:#000;cursor:pointer;font-family:'Courier New',monospace;font-size:10px;font-weight:700">I UNDERSTAND — SHARE</button>
+          <button id="pm-disclose-accept" style="padding:10px;background:#00ff88;border:none;border-radius:8px;color:#000;cursor:pointer;font-family:'Courier New',monospace;font-size:10px;font-weight:700">I UNDERSTAND â€” SHARE</button>
         </div>
       </div>`
     document.body.appendChild(overlay)
@@ -781,7 +905,7 @@ function renderDashboard(app) {
   }
 }
 
-// ── Actions ───────────────────────────────────────────────────────────────────
+// â”€â”€ Actions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async function connectSession() {
   const privateCode = (state.privateCodeInput || '').trim()
@@ -794,7 +918,7 @@ async function connectSession() {
   if ((!state.selectedCountry && !privateCode) || !state.user || state.connecting) return
 
   if (!state.isOnline) {
-    state.error = 'No internet connection — check your network and try again'
+    state.error = 'No internet connection â€” check your network and try again'
     render()
     return
   }
@@ -820,7 +944,7 @@ async function connectSession() {
     })
 
     const data = await res.json()
-    if (res.status === 401) { state.connecting = false; await handleExpiredSession(); return }
+    if (await handleAuthFailure(res.status, { preserveWhileSharing: true })) { state.connecting = false; return }
     if (!res.ok || data.error) throw new Error(data.error ?? `Server error (${res.status})`)
 
     const response = await chrome.runtime.sendMessage({
@@ -841,7 +965,7 @@ async function connectSession() {
     state.connectionType = isPrivateConnect ? 'private' : 'public'
     await chrome.storage.local.set({ session: state.session, connectionType: state.connectionType })
   } catch (err) {
-    state.error = err.message === 'Failed to fetch' ? 'Network error — could not reach server' : err.message
+    state.error = err.message === 'Failed to fetch' ? 'Network error â€” could not reach server' : err.message
   } finally {
     state.connecting = false
     render()
@@ -882,7 +1006,7 @@ async function toggleSharing(on) {
     return
   }
 
-  // First-time share — show disclosure modal
+  // First-time share â€” show disclosure modal
   if (on && !state.hasAcceptedProviderTerms) {
     state.showDisclosure = true
     render()
@@ -893,7 +1017,7 @@ async function toggleSharing(on) {
   render()
 
   if (on && !state.isOnline) {
-    state.error = 'No internet connection — sharing requires an active network'
+    state.error = 'No internet connection â€” sharing requires an active network'
     state.shareToggling = false
     render()
     return
@@ -902,7 +1026,7 @@ async function toggleSharing(on) {
   if (on && !ownedHelper()?.available) {
     await refreshRuntimeStatus()
     if (!ownedHelper()?.available) {
-      state.error = 'Sharing is unavailable right now — retry in a few seconds'
+      state.error = 'Sharing is unavailable right now â€” retry in a few seconds'
       state.shareToggling = false
       render()
       return
@@ -917,7 +1041,7 @@ async function toggleSharing(on) {
     type: on ? 'START_SHARING' : 'STOP_SHARING',
     country: state.user?.country_code || state.user?.country,
     userId: state.user?.id,
-    token: state.supabaseToken || state.user?.token,
+    token: state.user?.token,
     supabaseToken: state.supabaseToken,
     desktopToken: state.user?.token,
     trust: state.user?.trustScore || state.user?.trust_score || 50,
@@ -928,7 +1052,7 @@ async function toggleSharing(on) {
     state.helper = response?.helper || state.helper
     state.shareToggling = false
     state.error = response?.error === 'Failed to fetch'
-      ? 'Network error — could not reach the sharing service'
+      ? 'Network error â€” could not reach the sharing service'
       : (response?.error || 'Sharing could not be started')
     render()
     return
@@ -986,6 +1110,7 @@ async function updateConnectionSlots(slots) {
     state.helper = response.helper || state.helper
     await chrome.storage.local.set({ helper: state.helper })
     await refreshRuntimeStatus()
+    await loadPrivateShareState(ownedHelper()?.baseDeviceId ?? null)
   } catch (err) {
     state.error = err.message || 'Could not update connection slots'
   } finally {
@@ -1021,7 +1146,7 @@ async function saveDailyLimit(limitMb) {
       body: JSON.stringify({ dailyLimitMb: limitMb }),
     })
     const data = await res.json().catch(() => ({}))
-    if (res.status === 401 || res.status === 403) { await handleExpiredSession(); return }
+    if (await handleAuthFailure(res.status, { preserveWhileSharing: true })) return
     if (!res.ok || data.error) throw new Error(data.error || 'Could not update daily limit')
 
     state.user = {
@@ -1044,12 +1169,26 @@ async function signOut() {
     await chrome.runtime.sendMessage({ type: 'STOP_SHARING' }).catch(() => {})
   }
   await disconnectSession()
+  // Revoke device_codes on server so desktop and CLI are also signed out
+  const revokeToken = getUserSharingToken()
+  if (state.user?.id && revokeToken) {
+    try {
+      await fetch(`${API}/api/extension-auth/revoke`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${revokeToken}` },
+        body: JSON.stringify({ userId: state.user.id }),
+      })
+    } catch {}
+  }
   state.user = null
   state.session = null
   state.isSharing = false
   state.helper = null
   state.dailyLimitInput = ''
   state.dailyLimitSaving = false
+  state.privateShare = null
+  state.privateShares = []
+  state.selectedPrivateSlot = null
   await chrome.storage.local.clear()
   // Preserve extId so auth polling can resume
   await chrome.storage.local.set({ extId: state.extId })
@@ -1057,7 +1196,7 @@ async function signOut() {
   startAuthPolling()
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function formatBytes(bytes) {
   if (bytes < 1024) return `${bytes}B`
@@ -1066,7 +1205,7 @@ function formatBytes(bytes) {
   return `${(bytes / 1024 / 1024 / 1024).toFixed(2)}GB`
 }
 
-// ── Debug log panel ───────────────────────────────────────────────────────────
+// â”€â”€ Debug log panel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const logEntries = []
 
@@ -1089,7 +1228,7 @@ async function initLogPanel() {
   } catch {}
 }
 
-// ── Message listener ──────────────────────────────────────────────────────────
+// â”€â”€ Message listener â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.type === 'LOG') appendLog(msg.entry)
@@ -1100,7 +1239,7 @@ chrome.runtime.onMessage.addListener((msg) => {
     render()
   }
 
-  // Relay found a new provider transparently — update sessionId, no UI disruption
+  // Relay found a new provider transparently â€” update sessionId, no UI disruption
   if (msg.type === 'SESSION_RECONNECTED') {
     if (state.session) {
       state.session = { ...state.session, id: msg.sessionId }
@@ -1117,7 +1256,7 @@ chrome.runtime.onMessage.addListener((msg) => {
   // Provider dropped and relay gave up finding a replacement
   if (msg.type === 'SESSION_ENDED') {
     state.session = null
-    state.error = 'Connection lost — your peer disconnected. Select a country to reconnect.'
+    state.error = 'Connection lost â€” your peer disconnected. Select a country to reconnect.'
     chrome.storage.local.set({ session: null })
     render()
   }
@@ -1130,7 +1269,7 @@ function renderLogPanel() {
   panel.id = 'pm-log-panel'
   panel.innerHTML = `
     <div id="pm-log-toggle" style="padding:6px 16px;font-size:10px;color:#444;cursor:pointer;font-family:'Courier New',monospace;display:flex;justify-content:space-between;border-top:1px solid #1a1a2a">
-      <span>DEBUG LOGS</span><span id="pm-log-arrow">▼</span>
+      <span>DEBUG LOGS</span><span id="pm-log-arrow">â–¼</span>
     </div>
     <div id="pm-log-body" style="display:none;max-height:160px;overflow-y:auto;padding:4px 16px 8px;font-size:10px;font-family:'Courier New',monospace;background:#050508"></div>
     <div style="padding:2px 16px 8px;display:flex;gap:6px">
@@ -1150,7 +1289,7 @@ function renderLogPanel() {
   document.getElementById('pm-log-toggle').onclick = () => {
     open = !open
     document.getElementById('pm-log-body').style.display = open ? 'block' : 'none'
-    document.getElementById('pm-log-arrow').textContent = open ? '▲' : '▼'
+    document.getElementById('pm-log-arrow').textContent = open ? 'â–²' : 'â–¼'
     if (open) document.getElementById('pm-log-body').scrollTop = document.getElementById('pm-log-body').scrollHeight
   }
   document.getElementById('pm-log-copy').onclick = () => {

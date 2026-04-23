@@ -1,4 +1,4 @@
-const { app, Tray, Menu, BrowserWindow, nativeImage, ipcMain, shell, Notification } = require('electron')
+﻿const { app, Tray, Menu, BrowserWindow, nativeImage, ipcMain, shell, Notification } = require('electron')
 const { WebSocket } = require('ws')
 const path = require('path')
 const http = require('http')
@@ -7,11 +7,11 @@ const fs = require('fs')
 const os = require('os')
 const { spawn, spawnSync } = require('child_process')
 
-// â”€â”€ Logger â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ Logger Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 const LOG_FILE = path.join(os.homedir(), 'Desktop', 'peermesh-debug.log')
 
-// Structured logger â€” always writes to file, always to console
+// Structured logger Ã¢â‚¬â€ always writes to file, always to console
 // Format: [ISO_TIMESTAMP] [DESKTOP] [LEVEL] [CATEGORY] message | ctx={}
 const _IS_NATIVE_HOST = process.argv.some(arg => arg.startsWith('chrome-extension://')) || process.argv.some(arg => arg.startsWith('--parent-window='))
 
@@ -47,8 +47,8 @@ const logState = (label) => {
   })
 }
 
-const logRequest  = (method, url, body) => _write('INFO',  'HTTP-OUT', `â†’ ${method} ${url}`, body ? { body } : undefined)
-const logResponse = (method, url, status, body) => _write('INFO',  'HTTP-IN',  `â† ${status} ${method} ${url}`, body ? { body } : undefined)
+const logRequest  = (method, url, body) => _write('INFO',  'HTTP-OUT', `Ã¢â€ â€™ ${method} ${url}`, body ? { body } : undefined)
+const logResponse = (method, url, status, body) => _write('INFO',  'HTTP-IN',  `Ã¢â€ Â ${status} ${method} ${url}`, body ? { body } : undefined)
 const logRelay    = (direction, type, ctx) => _write('DEBUG', 'RELAY',    `${direction} ${type}`, ctx)
 const logTunnel   = (event, tunnelId, ctx) => _write('DEBUG', 'TUNNEL',   `${event} tunnel=${tunnelId?.slice(0,8)}`, ctx)
 const logIpc      = (channel, ctx) => _write('DEBUG', 'IPC',      channel, ctx)
@@ -60,7 +60,17 @@ process.on('uncaughtException', (err) => {
   if (err.code === 'EADDRINUSE') return
 })
 
-const API_BASE = 'https://peermesh-beta.vercel.app'
+const _ENV = (process.env.PEERMESH_ENV ?? 'production').toLowerCase()
+const _IS_LOCAL = _ENV === 'local'
+const _IS_DEV   = _ENV === 'dev'
+const _IS_PROD  = _ENV === 'production'
+const _API_BASE_KEY = _IS_LOCAL ? 'API_BASE_LOCAL' : _IS_DEV ? 'API_BASE_DEV' : 'API_BASE'
+if (!process.env[_API_BASE_KEY]) {
+  const { dialog } = require('electron')
+  dialog.showErrorBox('PeerMesh config error', `${_API_BASE_KEY} is not set (PEERMESH_ENV=${_ENV})`)
+  process.exit(1)
+}
+const API_BASE = process.env[_API_BASE_KEY]
 let _liveRelays = null
 let _liveRelaysFetchedAt = 0
 const RELAY_CONFIG_TTL = 5 * 60 * 1000
@@ -108,7 +118,7 @@ const AUTH_CLEAR_FAILURE_THRESHOLD = 3
 
 function notifyPeer(p, body) {
   if (!peerPort) return
-  log.info('PEER', `notifyPeer â†’ ${p}`, { port: peerPort })
+  log.info('PEER', `notifyPeer Ã¢â€ â€™ ${p}`, { port: peerPort })
   const init = { method: 'POST', signal: AbortSignal.timeout(1500) }
   if (body) { init.headers = { 'Content-Type': 'application/json' }; init.body = JSON.stringify(body) }
   fetch(`http://127.0.0.1:${peerPort}${p}`, init)
@@ -136,6 +146,8 @@ let config = {
   dailyShareLimitMb: null,
   privateShareActive: false,
   privateShare: null,
+  privateShareDeviceId: null,
+  privateShares: [],
 }
 let stats = { bytesServed: 0, requestsHandled: 0, connectedAt: null }
 const activeTunnels = new Map()
@@ -231,6 +243,8 @@ async function clearDesktopAuth(reason, { rotateIdentity = false, revoke = true 
     dailyShareLimitMb: null,
     privateShareActive: false,
     privateShare: null,
+    privateShareDeviceId: null,
+    privateShares: [],
   }
   if (rotateIdentity) rotateDesktopIdentity({ rotateBaseDeviceId: true })
   else ensureSlotStates()
@@ -340,22 +354,98 @@ function enforceLocalLimit() {
   stopRelay()
 }
 
+function normalizePrivateShareRows(rows) {
+  if (!Array.isArray(rows)) return []
+  return rows.filter(row => row && typeof row === 'object')
+}
+
+function createDisabledPrivateShareRow(deviceId, slotIndex = null) {
+  const resolvedBaseDeviceId = config.baseDeviceId || deviceId.replace(/_slot_\d+$/, '')
+  return {
+    device_id: deviceId,
+    base_device_id: resolvedBaseDeviceId,
+    slot_index: slotIndex,
+    code: '',
+    enabled: false,
+    expires_at: null,
+    active: false,
+  }
+}
+
+function hydratePrivateShareRows(rows) {
+  const normalizedRows = normalizePrivateShareRows(rows)
+  const byDeviceId = new Map()
+  for (const row of normalizedRows) {
+    const deviceId = typeof row.device_id === 'string' && row.device_id.trim()
+      ? row.device_id.trim()
+      : null
+    if (!deviceId) continue
+    byDeviceId.set(deviceId, {
+      ...row,
+      device_id: deviceId,
+      base_device_id: row.base_device_id || config.baseDeviceId || deviceId.replace(/_slot_\d+$/, ''),
+      slot_index: Number.isInteger(row.slot_index) ? row.slot_index : null,
+      code: typeof row.code === 'string' ? row.code : '',
+      enabled: !!row.enabled,
+      expires_at: row.expires_at ?? null,
+      active: !!row.active,
+    })
+  }
+
+  const hydratedRows = ensureSlotStates().map(slot => {
+    return byDeviceId.get(slot.deviceId) ?? createDisabledPrivateShareRow(slot.deviceId, slot.index)
+  })
+
+  for (const row of byDeviceId.values()) {
+    if (!hydratedRows.some(candidate => candidate.device_id === row.device_id)) hydratedRows.push(row)
+  }
+
+  return hydratedRows
+}
+
+function getDefaultPrivateShareDeviceId() {
+  if (typeof config.privateShareDeviceId === 'string' && config.privateShareDeviceId.trim()) {
+    return config.privateShareDeviceId.trim()
+  }
+  const rows = hydratePrivateShareRows(config.privateShares)
+  return rows[0]?.device_id ?? config.privateShare?.device_id ?? config.baseDeviceId ?? null
+}
+
+function selectPrivateShareRow(rows, deviceId = null) {
+  const normalizedRows = hydratePrivateShareRows(rows)
+  if (normalizedRows.length === 0) return null
+  if (deviceId) {
+    const exact = normalizedRows.find(row => row.device_id === deviceId)
+    if (exact) return exact
+  }
+  const preferredDeviceId = getDefaultPrivateShareDeviceId()
+  if (preferredDeviceId) {
+    const preferred = normalizedRows.find(row => row.device_id === preferredDeviceId)
+    if (preferred) return preferred
+  }
+  return normalizedRows[0]
+}
+
 function applySharingProfileData(data, { source = 'remote' } = {}) {
   const previousPrivateShareEnabled = !!config.privateShare?.enabled
   const previousPrivateShareActive = !!config.privateShareActive
   const previousPrivateShareCode = config.privateShare?.code ?? null
 
   const nextPrivateShare = data.private_share ?? null
-  const nextPrivateShareEnabled = !!nextPrivateShare?.enabled
-  const nextPrivateShareActive = !!(nextPrivateShare?.enabled && nextPrivateShare?.active)
-  const nextPrivateShareCode = nextPrivateShare?.code ?? null
+  const nextPrivateShares = hydratePrivateShareRows(data.private_shares ?? (nextPrivateShare ? [nextPrivateShare] : []))
+  const selectedPrivateShare = selectPrivateShareRow(nextPrivateShares, data.private_share?.device_id ?? config.privateShareDeviceId ?? nextPrivateShare?.device_id ?? null)
+  const nextPrivateShareEnabled = !!selectedPrivateShare?.enabled
+  const nextPrivateShareActive = !!(selectedPrivateShare?.enabled && selectedPrivateShare?.active)
+  const nextPrivateShareCode = selectedPrivateShare?.code ?? null
 
   config.hasAcceptedProviderTerms = data.has_accepted_provider_terms ?? config.hasAcceptedProviderTerms
   config.todaySharedBytes = data.total_bytes_today ?? 0
   config.todaySharedBytesDate = new Date().toISOString().slice(0, 10)
   config.dailyShareLimitMb = data.daily_share_limit_mb ?? null
-  config.privateShare = nextPrivateShare
-  config.privateShareActive = nextPrivateShareActive
+  config.privateShares = nextPrivateShares
+  config.privateShare = selectedPrivateShare ?? nextPrivateShare
+  config.privateShareDeviceId = config.privateShare?.device_id ?? config.privateShare?.base_device_id ?? config.privateShareDeviceId ?? null
+  config.privateShareActive = !!(config.privateShare?.enabled && config.privateShare?.active)
   limitHit = data.daily_limit_bytes == null
     ? false
     : ((config.todaySharedBytes ?? 0) + getAggregateStats().bytesServed) >= data.daily_limit_bytes
@@ -401,7 +491,7 @@ async function pollTodayBytes() {
     })
     logResponse('GET', `${API_BASE}/api/user/sharing`, res.status)
     if (res.status === 401 || res.status === 403) {
-      await clearDesktopAuth(`poll_today_bytes_${res.status}`)
+      await confirmDesktopAuthStillValid('poll_today_bytes', res.status, { preserveWhileSharing: true })
       return null
     }
     if (!res.ok) return null
@@ -432,7 +522,7 @@ function closeTunnel(slot, tunnelId, notifyRelay = false) {
 function closeAllTunnels(slot, notifyRelay = false) {
   const count = slot.activeTunnels.size
   for (const tunnelId of [...slot.activeTunnels.keys()]) closeTunnel(slot, tunnelId, notifyRelay)
-  if (count > 0) log.info('TUNNEL', `closeAllTunnels â€” closed ${count} tunnels`)
+  if (count > 0) log.info('TUNNEL', `closeAllTunnels Ã¢â‚¬â€ closed ${count} tunnels`)
 }
 
 function closeAllSlotTunnels(notifyRelay = false) {
@@ -489,7 +579,8 @@ async function refreshSharingConfig() {
   if (res.status === 401 || res.status === 403) {
     _sharingConfigConsecutiveFailures++
     if (_sharingConfigConsecutiveFailures >= AUTH_CLEAR_FAILURE_THRESHOLD) {
-      await clearDesktopAuth(`refresh_sharing_config_${res.status}`)
+      const stillValid = await confirmDesktopAuthStillValid('refresh_sharing_config', res.status, { preserveWhileSharing: true })
+      if (stillValid) _sharingConfigConsecutiveFailures = 0
     } else {
       log.warn('API', 'transient auth error - not clearing yet', { status: res.status, count: _sharingConfigConsecutiveFailures })
     }
@@ -575,7 +666,7 @@ function startSharingConfigSync() {
   scheduleTick()
 }
 
-// â”€â”€ Config â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ Config Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 function loadConfig() {
   try { fs.mkdirSync(USER_DATA_DIR, { recursive: true }) } catch {}
@@ -613,6 +704,11 @@ function loadConfig() {
   }
   config.privateShareActive = !!config.privateShareActive
   config.privateShare = config.privateShare ?? null
+  config.privateShareDeviceId = config.privateShareDeviceId ?? config.privateShare?.device_id ?? null
+  config.privateShares = hydratePrivateShareRows(config.privateShares)
+  config.privateShare = selectPrivateShareRow(config.privateShares, config.privateShareDeviceId) ?? config.privateShare ?? null
+  config.privateShareDeviceId = config.privateShare?.device_id ?? config.privateShareDeviceId ?? null
+  config.privateShareActive = !!(config.privateShare?.enabled && config.privateShare?.active)
   ensureSlotStates()
   saveConfig()
 }
@@ -641,6 +737,38 @@ async function verifyStoredDesktopAuth() {
     log.warn('AUTH', 'stored desktop token verify skipped', { err: e.message })
     return true
   }
+}
+
+async function tryRefreshDesktopToken() {
+  if (!config.userId) return false
+  try {
+    const res = await fetch(`${API_BASE}/api/extension-auth?refresh=1&userId=${encodeURIComponent(config.userId)}`, {
+      signal: AbortSignal.timeout(5000),
+    })
+    if (res.status === 403) {
+      const body = await res.json().catch(() => ({}))
+      if (body.revoked === true) {
+        log.warn('AUTH', 'desktop device revoked - clearing auth', { userId: config.userId })
+        await clearDesktopAuth('device_revoked')
+      }
+      return false
+    }
+    if (!res.ok) return false
+    const data = await res.json()
+    if (data.token) { config.token = data.token; saveConfig(); log.info('AUTH', 'desktop token refreshed', { userId: config.userId }); return true }
+  } catch {}
+  return false
+}
+
+async function confirmDesktopAuthStillValid(context, status) {
+  if (!config.userId) return false
+  // Desktop is a persistent sharing agent - never sign out on 401/network errors.
+  // Only clearDesktopAuth when server returns { revoked: true } via tryRefreshDesktopToken.
+  const refreshed = await tryRefreshDesktopToken()
+  if (refreshed) { log.info('AUTH', 'desktop token refreshed', { context }); return true }
+  // Refresh failed but not revoked - keep auth alive (network blip, server down, etc.)
+  log.warn('AUTH', 'token refresh failed - keeping auth alive', { context, status, userId: config.userId })
+  return true
 }
 
 async function initializeDesktopRuntime(reason) {
@@ -687,14 +815,18 @@ function shutdownDesktopRuntime(reason = 'quit') {
 
 function getPublicState() {
   syncAggregateState()
+  const privateShares = hydratePrivateShareRows(config.privateShares)
+  const privateShare = selectPrivateShareRow(privateShares, config.privateShareDeviceId) ?? config.privateShare ?? null
   return {
     running,
     shareEnabled: !!config.shareEnabled,
     config: { ...config, token: config.token ? '***' : '' },
     baseDeviceId: config.baseDeviceId || null,
     connectionSlots: clampSlots(config.connectionSlots ?? 1),
-    privateShareActive: !!(config.privateShareActive),
-    privateShare: config.privateShare ?? null,
+    privateShareActive: !!(privateShare?.enabled && privateShare?.active),
+    privateShare: privateShare,
+    privateShareDeviceId: privateShare?.device_id ?? config.privateShareDeviceId ?? null,
+    privateShares: privateShares,
     slots: {
       configured: clampSlots(config.connectionSlots ?? 1),
       active: activeSlotCount(),
@@ -731,18 +863,28 @@ function getPrivateShareExpiryPreset(expiresAt) {
 async function getPrivateShareState(forceRefresh = true) {
   if (!config.token || !config.baseDeviceId) return null
   if (forceRefresh) await pollTodayBytes()
-  return config.privateShare ?? null
+  const privateShares = hydratePrivateShareRows(config.privateShares)
+  const privateShare = selectPrivateShareRow(privateShares, config.privateShareDeviceId) ?? config.privateShare ?? null
+  return {
+    privateShare,
+    privateShares,
+    privateShareDeviceId: privateShare?.device_id ?? config.privateShareDeviceId ?? null,
+    expiryPreset: getPrivateShareExpiryPreset(privateShare?.expires_at ?? null),
+  }
 }
 
-async function updatePrivateShareState({ enabled, refresh = false, expiryHours } = {}) {
+async function updatePrivateShareState({ enabled, refresh = false, expiryHours, deviceId } = {}) {
   if (!config.token || !config.baseDeviceId) throw new Error('Sign in required')
   const expiryValue = expiryHours === undefined
     ? undefined
     : (expiryHours === 'none' || expiryHours === null ? null : parseInt(expiryHours, 10))
+  const targetDeviceId = deviceId || getDefaultPrivateShareDeviceId()
+  if (!targetDeviceId) throw new Error('No private sharing slot is available')
 
   const previousEnabled = !!config.privateShare?.enabled
   logRequest('POST', `${API_BASE}/api/user/sharing`, {
     privateSharing: {
+      deviceId: targetDeviceId,
       baseDeviceId: config.baseDeviceId,
       enabled,
       refresh: refresh === true,
@@ -754,6 +896,7 @@ async function updatePrivateShareState({ enabled, refresh = false, expiryHours }
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
     body: JSON.stringify({
       privateSharing: {
+        deviceId: targetDeviceId,
         baseDeviceId: config.baseDeviceId,
         enabled,
         refresh: refresh === true,
@@ -765,12 +908,14 @@ async function updatePrivateShareState({ enabled, refresh = false, expiryHours }
   logResponse('POST', `${API_BASE}/api/user/sharing`, res.status)
   const data = await res.json().catch(() => ({}))
   if (res.status === 401 || res.status === 403) {
-    await clearDesktopAuth(`private_share_${res.status}`)
-    throw new Error('Session expired - please sign in again')
+    const stillValid = await confirmDesktopAuthStillValid('private_share', res.status, { preserveWhileSharing: true })
+    throw new Error(stillValid ? 'Could not update private sharing - please try again' : 'Session expired - please sign in again')
   }
   if (!res.ok || data.error) throw new Error(data.error || 'Could not update private sharing')
 
-  config.privateShare = data.private_share ?? null
+  config.privateShares = hydratePrivateShareRows(data.private_shares ?? (data.private_share ? [data.private_share] : []))
+  config.privateShare = selectPrivateShareRow(config.privateShares, targetDeviceId) ?? data.private_share ?? null
+  config.privateShareDeviceId = config.privateShare?.device_id ?? targetDeviceId
   config.privateShareActive = !!(config.privateShare?.enabled && config.privateShare?.active)
   saveConfig()
 
@@ -789,6 +934,8 @@ async function updatePrivateShareState({ enabled, refresh = false, expiryHours }
   updateTray()
   return {
     privateShare: config.privateShare,
+    privateShares: hydratePrivateShareRows(config.privateShares),
+    privateShareDeviceId: config.privateShareDeviceId ?? null,
     expiryPreset: getPrivateShareExpiryPreset(config.privateShare?.expires_at ?? null),
   }
 }
@@ -868,7 +1015,7 @@ function launchMainApp() {
   const args = app.isPackaged ? ['--background'] : [app.getAppPath(), '--background']
   const child = spawn(process.execPath, args, { detached: true, stdio: 'ignore' })
   child.unref()
-  log.info('PROCESS', 'launchMainApp â€” spawned background process')
+  log.info('PROCESS', 'launchMainApp Ã¢â‚¬â€ spawned background process')
 }
 
 async function waitForControlServer(timeoutMs = 15000) {
@@ -940,7 +1087,7 @@ function runNativeHostMode() {
   process.stdin.on('end', () => process.exit(0))
 }
 
-// â”€â”€ Abuse filter â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ Abuse filter Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 const BLOCKED = [/\.onion$/i, /^smtp\./i, /^mail\./i, /torrent/i]
 const PRIVATE = [
@@ -952,7 +1099,7 @@ function isAllowed(hostname) {
   return !BLOCKED.some(p => p.test(hostname)) && !PRIVATE.some(p => p.test(hostname))
 }
 
-// â”€â”€ Fetch handler â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ Fetch handler Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 function addBytes(slot, bytes) {
   slot.sessionBytes += bytes
@@ -1017,7 +1164,7 @@ async function handleFetch(slot, request) {
   }
 }
 
-// â”€â”€ Relay â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ Relay Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 function stopHeartbeat(slot) {
   if (slot?.heartbeatTimer) { clearInterval(slot.heartbeatTimer); slot.heartbeatTimer = null }
@@ -1039,12 +1186,12 @@ function sendHeartbeat(slot) {
   fetch(`${API_BASE}/api/user/sharing`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
-    body: JSON.stringify({ device_id: slot.deviceId, user_id: config.userId }),
+    body: JSON.stringify({ device_id: slot.deviceId, user_id: config.userId, relay_url: slot.lastRelay ?? null }),
   })
     .then(async (r) => {
       logResponse('PUT', `${API_BASE}/api/user/sharing`, r.status)
       if (r.status === 401 || r.status === 403) {
-        await clearDesktopAuth(`heartbeat_${r.status}`)
+        await confirmDesktopAuthStillValid('heartbeat', r.status, { preserveWhileSharing: true })
         return
       }
       if (!r.ok) {
@@ -1056,7 +1203,7 @@ function sendHeartbeat(slot) {
 }
 
 function getProviderRelay(relays) {
-  // All slots must connect to the same relay — relay state is process-local.
+  // All slots must connect to the same relay â€” relay state is process-local.
   // Use lastRelay if it's still live (sticky after first registration).
   // On first connect, use consistent hashing so adding/removing a relay only
   // moves ~1/n providers instead of reshuffling everyone.
@@ -1064,7 +1211,7 @@ function getProviderRelay(relays) {
   if (anchor && relays.includes(anchor)) return anchor
   const id = config.baseDeviceId || ''
   // For each relay compute hash(baseDeviceId + relayUrl), pick the highest score.
-  // This is rendezvous/HRW hashing — stable under list growth/shrinkage.
+  // This is rendezvous/HRW hashing â€” stable under list growth/shrinkage.
   let best = null, bestScore = -1
   for (const relay of relays) {
     let h = 0
@@ -1268,7 +1415,7 @@ function openTunnelWs(hostname, port, onOpen) {
 
 const localProxyServer = http.createServer((req, res) => {
   if (!proxySession?.sessionId) {
-    log.warn('LOCAL-PROXY', 'HTTP rejected â€” no session', { url: req.url })
+    log.warn('LOCAL-PROXY', 'HTTP rejected Ã¢â‚¬â€ no session', { url: req.url })
     res.writeHead(503); res.end('No PeerMesh session'); return
   }
   const parsed = new URL(req.url.startsWith('http') ? req.url : `http://${req.headers.host}${req.url}`)
@@ -1345,7 +1492,7 @@ localProxyServer.on('connect', (req, clientSocket, head) => {
   log.info('LOCAL-PROXY', `CONNECT request`, { target: `${hostname}:${port}`, sessionId: proxySession?.sessionId?.slice(0,8) || 'NONE' })
 
   if (!proxySession?.sessionId) {
-    log.warn('LOCAL-PROXY', 'CONNECT rejected â€” no proxySession', { target: `${hostname}:${port}` })
+    log.warn('LOCAL-PROXY', 'CONNECT rejected Ã¢â‚¬â€ no proxySession', { target: `${hostname}:${port}` })
     clientSocket.write('HTTP/1.1 503 No PeerMesh Session\r\n\r\n')
     clientSocket.destroy(); return
   }
@@ -1359,7 +1506,7 @@ localProxyServer.on('connect', (req, clientSocket, head) => {
     const text = Buffer.isBuffer(data) ? data.toString() : data
     if (!clientSocket._connectSent && text.startsWith('HTTP/1.1 200')) {
       clientSocket._connectSent = true
-      log.info('LOCAL-PROXY', 'tunnel ready â€” 200 sent to Chrome', { target: `${hostname}:${port}` })
+      log.info('LOCAL-PROXY', 'tunnel ready Ã¢â‚¬â€ 200 sent to Chrome', { target: `${hostname}:${port}` })
       clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n')
       if (head?.length) tunnelWs.send(head)
       clientSocket.on('data', (chunk) => { if (tunnelWs.readyState === WebSocket.OPEN) tunnelWs.send(chunk) })
@@ -1389,7 +1536,7 @@ localProxyServer.on('connect', (req, clientSocket, head) => {
   }, 15000)
 })
 
-// â”€â”€ Control server â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ Control server Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 const controlServer = http.createServer((req, res) => {
   const origin = req.headers.origin || ''
@@ -1421,7 +1568,7 @@ const controlServer = http.createServer((req, res) => {
     req.on('end', async () => {
       try {
         const data = JSON.parse(body || '{}')
-        log.info('CONTROL', '/native/auth â€” verifying token', { userId: data.userId })
+        log.info('CONTROL', '/native/auth Ã¢â‚¬â€ verifying token', { userId: data.userId })
         if (config.userId && data.userId && config.userId !== data.userId) {
           log.warn('CONTROL', '/native/auth -- userId mismatch, rejecting', { existing: config.userId, incoming: data.userId })
           res.writeHead(403, { 'Content-Type': 'application/json' })
@@ -1438,7 +1585,7 @@ const controlServer = http.createServer((req, res) => {
         config = { ...config, token: data.token ?? config.token, userId: data.userId ?? config.userId, country: data.country ?? config.country, trust: data.trust ?? config.trust }
         await pollTodayBytes()
         saveConfig(); updateTray()
-        log.info('CONTROL', '/native/auth â€” config updated', { userId: config.userId, country: config.country })
+        log.info('CONTROL', '/native/auth Ã¢â‚¬â€ config updated', { userId: config.userId, country: config.country })
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ available: true, configured: !!(config.token && config.userId), country: config.country, userId: config.userId, where: 'desktop', ...getPublicState() }))
       } catch (e) { log.error('CONTROL', '/native/auth error', { err: e.message }); res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: e.message })) }
@@ -1529,7 +1676,7 @@ const controlServer = http.createServer((req, res) => {
     return
   }
   if (req.method === 'POST' && url.pathname === '/native/show') {
-    log.info('CONTROL', '/native/show â€” opening window')
+    log.info('CONTROL', '/native/show Ã¢â‚¬â€ opening window')
     showWindow()
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ available: true, configured: !!(config.token && config.userId), country: config.country, userId: config.userId, where: 'desktop', ...getPublicState() }))
@@ -1550,7 +1697,7 @@ const controlServer = http.createServer((req, res) => {
     return
   }
   if (req.method === 'POST' && url.pathname === '/quit') {
-    log.info('CONTROL', '/quit called â€” requesting app quit')
+    log.info('CONTROL', '/quit called Ã¢â‚¬â€ requesting app quit')
     res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: true }))
     setTimeout(() => requestAppQuit('control-quit'), 250)
     return
@@ -1585,7 +1732,7 @@ const controlServer = http.createServer((req, res) => {
   res.writeHead(404); res.end()
 })
 
-// â”€â”€ Tray â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ Tray Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 function createTrayIcon() {
   const icon = nativeImage.createFromPath(TRAY_ICON_PATH)
@@ -1743,7 +1890,7 @@ function requestAppQuit(reason = 'quit', { forceExitMs = 2000 } = {}) {
   app.quit()
 }
 
-// â”€â”€ IPC â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ IPC Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 ipcMain.handle('get-ext-id', () => { logIpc('get-ext-id'); return config.extId })
 
@@ -1755,11 +1902,11 @@ ipcMain.handle('check-website-auth', async () => {
     const data = await res.json()
     logResponse('GET', `${API_BASE}/api/extension-auth`, res.status)
     if (res.status === 403) return { error: data.error || 'Account not verified' }
-    if (res.status === 401) return { error: 'Session expired â€” please sign in again' }
+    if (res.status === 401) return { error: 'Session expired Ã¢â‚¬â€ please sign in again' }
     if (res.status === 404) return { error: 'User not found' }
     if (!data.user) return { pending: true }
     if (!data.user.token || !data.user.id) return { error: 'Invalid auth response' }
-    log.info('IPC', 'check-website-auth â€” user found', { userId: data.user.id })
+    log.info('IPC', 'check-website-auth Ã¢â‚¬â€ user found', { userId: data.user.id })
     return { user: data.user }
   } catch (e) { log.error('IPC', 'check-website-auth error', { err: e.message }); return { error: 'Could not reach server' } }
 })
@@ -1864,12 +2011,14 @@ ipcMain.handle('set-daily-share-limit', async (_, limitMb) => {
 })
 
 ipcMain.handle('get-private-share', async () => {
-  const privateShare = await getPrivateShareState(true)
+  const result = await getPrivateShareState(true)
   return {
     success: true,
     baseDeviceId: config.baseDeviceId || null,
-    privateShare,
-    expiryPreset: getPrivateShareExpiryPreset(privateShare?.expires_at ?? null),
+    privateShare: result?.privateShare ?? null,
+    privateShares: result?.privateShares ?? hydratePrivateShareRows(config.privateShares),
+    privateShareDeviceId: result?.privateShareDeviceId ?? config.privateShareDeviceId ?? null,
+    expiryPreset: result?.expiryPreset ?? getPrivateShareExpiryPreset(config.privateShare?.expires_at ?? null),
   }
 })
 
@@ -1880,6 +2029,8 @@ ipcMain.handle('update-private-share', async (_, payload = {}) => {
       success: true,
       baseDeviceId: config.baseDeviceId || null,
       privateShare: result.privateShare,
+      privateShares: result.privateShares,
+      privateShareDeviceId: result.privateShareDeviceId ?? null,
       expiryPreset: result.expiryPreset,
       state: getPublicState(),
     }
@@ -1911,7 +2062,7 @@ ipcMain.handle('sign-in', async (_, { token, userId, country, trust }) => {
 })
 
 ipcMain.handle('toggle-sharing', async () => {
-  if (_sharingToggleBusy) { log.warn('IPC', 'toggle-sharing ignored â€” busy'); return { running, shareEnabled: !!config.shareEnabled } }
+  if (_sharingToggleBusy) { log.warn('IPC', 'toggle-sharing ignored Ã¢â‚¬â€ busy'); return { running, shareEnabled: !!config.shareEnabled } }
   _sharingToggleBusy = true
   // Live-check CLI state to avoid acting on stale peerSharing (up to 3s old)
   if (peerPort) {
@@ -1937,7 +2088,7 @@ ipcMain.handle('toggle-sharing', async () => {
     peerPort = null
     updateTray()
   } else if (config.token) {
-    log.info('IPC', 'toggle-sharing ON â€” starting sharing')
+    log.info('IPC', 'toggle-sharing ON Ã¢â‚¬â€ starting sharing')
     config.shareEnabled = true; saveConfig(); updateTray(); connectRelay()
   }
   _sharingToggleBusy = false
@@ -1947,7 +2098,20 @@ ipcMain.handle('toggle-sharing', async () => {
 
 ipcMain.handle('sign-out', async () => {
   logIpc('sign-out', { userId: config.userId })
-  await clearDesktopAuth('ipc_sign_out')
+  // Revoke device_codes on the server so CLI and other clients are also signed out
+  if (config.userId && config.token) {
+    try {
+      await fetch(`${API_BASE}/api/extension-auth/revoke`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
+        body: JSON.stringify({ userId: config.userId }),
+        signal: AbortSignal.timeout(4000),
+      })
+    } catch (e) {
+      log.warn('AUTH', 'sign-out revoke failed', { err: e.message })
+    }
+  }
+  await clearDesktopAuth('ipc_sign_out', { revoke: true })
   log.info('IPC', 'signed out')
   return { success: true }
 })
@@ -1972,7 +2136,7 @@ ipcMain.handle('accept-provider-terms', async (_, { checkOnly } = {}) => {
   return { success: true }
 })
 
-// â”€â”€ App lifecycle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ App lifecycle Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 async function bootstrapNativeHostMode() {
   await app.whenReady()
@@ -1983,7 +2147,7 @@ async function bootstrapNativeHostMode() {
 
 async function bootstrapDesktopApp() {
   await app.whenReady()
-  app.on('second-instance', () => { log.info('PROCESS', 'second-instance event â€” showing window'); showWindow() })
+  app.on('second-instance', () => { log.info('PROCESS', 'second-instance event Ã¢â‚¬â€ showing window'); showWindow() })
 
   log.info('PROCESS', '=== APP START ===', { version: DESKTOP_VERSION, background: IS_BACKGROUND_LAUNCH, argv: process.argv.slice(1).join(' '), userDataDir: USER_DATA_DIR })
   app.on('window-all-closed', (e) => {
@@ -2001,7 +2165,7 @@ async function bootstrapDesktopApp() {
 
   const tester = net.createServer()
   tester.once('error', () => {
-    log.warn('PORT', `port ${CONTROL_PORT} in use â€” CLI owns it, desktop binding to PEER_PORT ${PEER_PORT}`)
+    log.warn('PORT', `port ${CONTROL_PORT} in use Ã¢â‚¬â€ CLI owns it, desktop binding to PEER_PORT ${PEER_PORT}`)
     logRequest('POST', `http://127.0.0.1:${CONTROL_PORT}/native/peer/register`, { port: PEER_PORT, where: 'desktop' })
     fetch(`http://127.0.0.1:${CONTROL_PORT}/native/peer/register`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -2049,8 +2213,8 @@ async function bootstrapDesktopApp() {
         return
       }
       if (req.method === 'POST' && url.pathname === '/native/share/stop') {
-        log.info('PEER-SERVER', '/native/share/stop â€” desktop peer received stop signal (not forwarding back to CLI)')
-        // Do NOT forward to CLI â€” they sent this to us; forwarding would cause a loop
+        log.info('PEER-SERVER', '/native/share/stop Ã¢â‚¬â€ desktop peer received stop signal (not forwarding back to CLI)')
+        // Do NOT forward to CLI Ã¢â‚¬â€ they sent this to us; forwarding would cause a loop
         peerSharing = false
         config.shareEnabled = false
         saveConfig()
@@ -2079,7 +2243,7 @@ async function bootstrapDesktopApp() {
       updateTray()
 
       function reclaimPrimary() {
-        log.info('PORT', 'CLI gone â€” reclaiming port ' + CONTROL_PORT)
+        log.info('PORT', 'CLI gone Ã¢â‚¬â€ reclaiming port ' + CONTROL_PORT)
         logState('pre-reclaim')
         peerSharing = false; peerPort = null; config.shareEnabled = false; saveConfig(); updateTray()
         peerServer.close(() => {
@@ -2102,11 +2266,11 @@ async function bootstrapDesktopApp() {
               if (peerSharing !== prev) { log.info('PORT', 'cliWatcher peerSharing changed', { from: prev, to: peerSharing }); updateTray() }
             }
           } else {
-            log.warn('PORT', 'cliWatcher non-ok response â€” reclaiming', { status: r.status })
+            log.warn('PORT', 'cliWatcher non-ok response Ã¢â‚¬â€ reclaiming', { status: r.status })
             clearInterval(cliWatcher); reclaimPrimary()
           }
         } catch (e) {
-          log.info('PORT', 'cliWatcher â€” CLI gone (unreachable)', { err: e.message })
+          log.info('PORT', 'cliWatcher Ã¢â‚¬â€ CLI gone (unreachable)', { err: e.message })
           clearInterval(cliWatcher); reclaimPrimary()
         }
       }, 3000)
@@ -2150,7 +2314,7 @@ async function bootstrapDesktopApp() {
                   signal: AbortSignal.timeout(1500),
                 }).catch(() => {})
               }
-              if (cliAlreadySharing) log.info('PORT', 'CLI is sharing â€” desktop standing by')
+              if (cliAlreadySharing) log.info('PORT', 'CLI is sharing Ã¢â‚¬â€ desktop standing by')
 
               _cliWatchTimer = setInterval(async () => {
                 try {
@@ -2163,11 +2327,11 @@ async function bootstrapDesktopApp() {
                       if (peerSharing !== prev) { log.info('PORT', '_cliWatchTimer peerSharing changed', { from: prev, to: peerSharing }); updateTray() }
                     }
                   } else {
-                    log.warn('PORT', '_cliWatchTimer non-ok â€” clearing peer state', { status: r.status })
+                    log.warn('PORT', '_cliWatchTimer non-ok Ã¢â‚¬â€ clearing peer state', { status: r.status })
                     clearInterval(_cliWatchTimer); _cliWatchTimer = null; peerSharing = false; peerPort = null; updateTray()
                   }
                 } catch (e) {
-                  log.info('PORT', '_cliWatchTimer â€” CLI gone (unreachable)', { err: e.message })
+                  log.info('PORT', '_cliWatchTimer Ã¢â‚¬â€ CLI gone (unreachable)', { err: e.message })
                   clearInterval(_cliWatchTimer); _cliWatchTimer = null; peerSharing = false; peerPort = null; updateTray()
                 }
               }, 3000)

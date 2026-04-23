@@ -344,27 +344,27 @@
   <div id="auth-screen" class="screen active">
     <div style="flex:1;display:flex;flex-direction:column;justify-content:center;overflow-y:auto">
       <h2 id="welcome-heading">WELCOME TO PEERMESH</h2>
-      <p>Opening your browser to sign in...<br>Enter the code below when prompted.</p>
+      <p>Click the button below to sign in with your browser.</p>
       <div id="offline-banner" class="offline-banner">⚠ NO INTERNET — sign-in unavailable</div>
       <div id="auth-error" class="error" style="display:none"><button class="error-dismiss" onclick="this.parentElement.style.display='none'">✕</button><span id="auth-error-text"></span></div>
 
       <!-- Device code display -->
       <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px;margin:16px 0;text-align:center;min-height:90px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px">
-        <div id="code-waiting" style="display:flex;align-items:center;gap:8px;color:var(--muted);font-size:11px;font-family:'Courier New',monospace">
+        <div id="code-waiting" style="display:none;align-items:center;gap:8px;color:var(--muted);font-size:11px;font-family:'Courier New',monospace">
           <span id="code-spinner" style="display:inline-block;width:10px;height:10px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin 0.8s linear infinite"></span>
           GETTING CODE...
         </div>
         <div id="device-code-display" style="display:none;font-family:'Courier New',monospace;font-size:28px;letter-spacing:8px;color:var(--accent);font-weight:700"></div>
         <div id="code-hint" style="display:none;font-size:10px;color:var(--muted)">Enter this code on the website</div>
         <button id="btn-copy-code" style="display:none;background:transparent;border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 10px;font-family:'Courier New',monospace;font-size:10px;cursor:pointer">COPY CODE</button>
+        <div id="code-placeholder" style="display:block;font-family:'Courier New',monospace;font-size:28px;letter-spacing:8px;color:var(--muted);font-weight:700">- - - - -</div>
       </div>
 
-      <button class="btn btn-primary" id="btn-open-browser" disabled>SIGN IN WITH BROWSER</button>
+      <button class="btn btn-primary" id="btn-open-browser">SIGN IN WITH BROWSER</button>
     </div>
     <div class="mt-auto center" style="padding-bottom:8px">
       <div id="auth-status" style="font-size:10px;color:var(--muted);display:flex;align-items:center;justify-content:center;gap:6px">
-        <span id="status-spinner" style="display:inline-block;width:8px;height:8px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin 0.8s linear infinite"></span>
-        WAITING FOR SIGN IN...
+        Click the button above to sign in
       </div>
     </div>
   </div>

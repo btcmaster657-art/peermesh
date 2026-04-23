@@ -58,10 +58,40 @@ type PrivateShareRow = {
   expires_at: string | null
 }
 
+function toBaseDeviceId(deviceKey: string): string {
+  const match = /^(.*)_slot_\d+$/.exec(deviceKey)
+  return match?.[1] ?? deviceKey
+}
+
+function getSlotIndex(deviceKey: string, baseDeviceId = toBaseDeviceId(deviceKey)): number | null {
+  const prefix = `${baseDeviceId}_slot_`
+  if (!deviceKey.startsWith(prefix)) return null
+  const parsed = Number.parseInt(deviceKey.slice(prefix.length), 10)
+  return Number.isInteger(parsed) ? parsed : null
+}
+
+function sortPrivateShareRows(rows: PrivateShareRow[]): PrivateShareRow[] {
+  return [...rows].sort((a, b) => {
+    const aBase = toBaseDeviceId(a.base_device_id)
+    const bBase = toBaseDeviceId(b.base_device_id)
+    if (aBase !== bBase) return aBase.localeCompare(bBase)
+
+    const aSlot = getSlotIndex(a.base_device_id, aBase)
+    const bSlot = getSlotIndex(b.base_device_id, bBase)
+    if (aSlot == null && bSlot == null) return a.base_device_id.localeCompare(b.base_device_id)
+    if (aSlot == null) return -1
+    if (bSlot == null) return 1
+    return aSlot - bSlot
+  })
+}
+
 function serializePrivateShare(row: PrivateShareRow | null) {
   if (!row) return null
+  const baseDeviceId = toBaseDeviceId(row.base_device_id)
   return {
-    base_device_id: row.base_device_id,
+    device_id: row.base_device_id,
+    base_device_id: baseDeviceId,
+    slot_index: getSlotIndex(row.base_device_id, baseDeviceId),
     code: row.share_code,
     enabled: row.enabled,
     expires_at: row.expires_at,
@@ -69,16 +99,52 @@ function serializePrivateShare(row: PrivateShareRow | null) {
   }
 }
 
-async function loadPrivateShareDevice(userId: string, baseDeviceId: string): Promise<PrivateShareRow | null> {
+function selectPrivateShareRow(
+  rows: PrivateShareRow[],
+  deviceId?: string | null,
+  baseDeviceId?: string | null,
+): PrivateShareRow | null {
+  if (rows.length === 0) return null
+  if (deviceId) {
+    const exact = rows.find(row => row.base_device_id === deviceId)
+    if (exact) return exact
+  }
+  if (baseDeviceId) {
+    const exactBase = rows.find(row => row.base_device_id === baseDeviceId)
+    if (exactBase) return exactBase
+    const slotZero = rows.find(row => getSlotIndex(row.base_device_id, baseDeviceId) === 0)
+    if (slotZero) return slotZero
+  }
+  return rows[0] ?? null
+}
+
+function isMatchingPrivateShareKey(deviceKey: string, baseDeviceId: string): boolean {
+  return deviceKey === baseDeviceId || deviceKey.startsWith(`${baseDeviceId}_slot_`)
+}
+
+async function loadPrivateShareDevice(
+  userId: string,
+  deviceId?: string | null,
+  baseDeviceId?: string | null,
+): Promise<PrivateShareRow | null> {
+  const resolvedBaseDeviceId = baseDeviceId || (deviceId ? toBaseDeviceId(deviceId) : null)
+  if (!resolvedBaseDeviceId && !deviceId) return null
+
+  const rows = resolvedBaseDeviceId
+    ? await loadPrivateShareDevices(userId, resolvedBaseDeviceId)
+    : []
+
+  return selectPrivateShareRow(rows, deviceId, resolvedBaseDeviceId)
+}
+
+async function loadPrivateShareDevices(userId: string, baseDeviceId: string): Promise<PrivateShareRow[]> {
   const { data, error } = await adminClient
     .from('private_share_devices')
     .select('base_device_id, share_code, enabled, expires_at')
     .eq('user_id', userId)
-    .eq('base_device_id', baseDeviceId)
-    .maybeSingle()
 
   if (error) throw error
-  return data ?? null
+  return sortPrivateShareRows((data ?? []).filter(row => isMatchingPrivateShareKey(row.base_device_id, baseDeviceId)))
 }
 
 async function issuePrivateShareCode(userId: string): Promise<string> {
@@ -95,6 +161,59 @@ async function issuePrivateShareCode(userId: string): Promise<string> {
   }
 
   throw new Error(`Could not issue a unique private share code for ${userId}`)
+}
+
+async function cleanupStalePrivateShareSlots(
+  userId: string,
+  baseDeviceId: string,
+  maxSlots?: number,
+): Promise<{ deletedCount: number }> {
+  try {
+    // Get current slot configuration from provider_devices if maxSlots not provided
+    let configuredSlots = maxSlots
+    if (configuredSlots === undefined) {
+      const { data: devices } = await adminClient
+        .from('provider_devices')
+        .select('connection_slots')
+        .eq('user_id', userId)
+        .eq('device_id', baseDeviceId)
+        .maybeSingle()
+      configuredSlots = devices?.connection_slots ?? 1
+    }
+
+    // Load all private share slots for this base device
+    const allSlots = await loadPrivateShareDevices(userId, baseDeviceId)
+
+    // Identify stale slots: those with slot_index >= configuredSlots
+    const staleSlots = allSlots.filter(row => {
+      const slotIndex = getSlotIndex(row.base_device_id, baseDeviceId)
+      return slotIndex !== null && slotIndex >= configuredSlots
+    })
+
+    // Delete stale slots from DB
+    if (staleSlots.length > 0) {
+      const staleDeviceIds = staleSlots.map(row => row.base_device_id)
+      const { error } = await adminClient
+        .from('private_share_devices')
+        .delete()
+        .eq('user_id', userId)
+        .in('base_device_id', staleDeviceIds)
+      
+      if (error) {
+        console.error('cleanupStalePrivateShareSlots delete error:', error)
+        return { deletedCount: 0 }
+      }
+      
+      console.log(`cleanupStalePrivateShareSlots: deleted ${staleSlots.length} stale slots for user ${userId}, base ${baseDeviceId}`)
+      return { deletedCount: staleSlots.length }
+    }
+    
+    return { deletedCount: 0 }
+  } catch (error) {
+    // Log but don't fail the request if cleanup fails
+    console.error('cleanupStalePrivateShareSlots error:', error)
+    return { deletedCount: 0 }
+  }
 }
 
 async function resolveUserId(req: Request, bodyUserId?: string): Promise<string | null> {
@@ -119,6 +238,7 @@ async function resolveUserId(req: Request, bodyUserId?: string): Promise<string 
 export async function GET(req: Request) {
   const url = new URL(req.url)
   const relayProviderUserId = url.searchParams.get('providerUserId')
+  const deviceId = url.searchParams.get('deviceId')?.trim() || null
   const baseDeviceId = url.searchParams.get('baseDeviceId')?.trim() || null
 
   if (isRelayRequest(req) && relayProviderUserId) {
@@ -132,12 +252,17 @@ export async function GET(req: Request) {
 
     // Also fetch private share state for this base device if requested
     let private_share = null
-    if (baseDeviceId) {
-      const ps = await loadPrivateShareDevice(relayProviderUserId, baseDeviceId)
-      private_share = serializePrivateShare(ps)
+    let private_shares = null
+    const resolvedBaseDeviceId = baseDeviceId || (deviceId ? toBaseDeviceId(deviceId) : null)
+    if (deviceId || resolvedBaseDeviceId) {
+      const rows = resolvedBaseDeviceId
+        ? await loadPrivateShareDevices(relayProviderUserId, resolvedBaseDeviceId)
+        : []
+      private_share = serializePrivateShare(selectPrivateShareRow(rows, deviceId, resolvedBaseDeviceId))
+      private_shares = rows.map(serializePrivateShare)
     }
 
-    return NextResponse.json({ ...getProviderShareStatus(data), private_share })
+    return NextResponse.json({ ...getProviderShareStatus(data), private_share, private_shares })
   }
 
   const userId = await resolveUserId(req)
@@ -150,7 +275,12 @@ export async function GET(req: Request) {
     .single()
 
   if (error || !data) return NextResponse.json({ error: 'Not found' }, { status: 404 })
-  const privateShare = baseDeviceId ? await loadPrivateShareDevice(userId, baseDeviceId) : null
+  const resolvedBaseDeviceId = baseDeviceId || (deviceId ? toBaseDeviceId(deviceId) : null)
+  const privateShareRows = resolvedBaseDeviceId
+    ? await loadPrivateShareDevices(userId, resolvedBaseDeviceId)
+    : []
+  const privateShare = serializePrivateShare(selectPrivateShareRow(privateShareRows, deviceId, resolvedBaseDeviceId))
+  const privateShares = privateShareRows.map(serializePrivateShare)
   return NextResponse.json({
     total_bytes_shared: data.total_bytes_shared,
     total_bytes_used: data.total_bytes_used,
@@ -161,7 +291,8 @@ export async function GET(req: Request) {
     is_premium: data.is_premium,
     daily_share_limit_mb: data.daily_share_limit_mb,
     has_accepted_provider_terms: data.has_accepted_provider_terms,
-    private_share: serializePrivateShare(privateShare),
+    private_share: privateShare,
+    private_shares: privateShares,
     ...getProviderShareStatus(data),
   })
 }
@@ -190,9 +321,22 @@ export async function POST(req: Request) {
     const userId = await resolveUserId(req)
     if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-    const baseDeviceId = String(body.privateSharing.baseDeviceId ?? '').trim()
-    if (!baseDeviceId) {
-      return NextResponse.json({ error: 'baseDeviceId is required' }, { status: 400 })
+    const requestedDeviceId = String(body.privateSharing.deviceId ?? '').trim()
+    const requestedBaseDeviceId = String(body.privateSharing.baseDeviceId ?? '').trim()
+    const baseDeviceId = requestedBaseDeviceId || (requestedDeviceId ? toBaseDeviceId(requestedDeviceId) : '')
+    if (!baseDeviceId && !requestedDeviceId) {
+      return NextResponse.json({ error: 'deviceId or baseDeviceId is required' }, { status: 400 })
+    }
+
+    const existingShares = baseDeviceId ? await loadPrivateShareDevices(userId, baseDeviceId) : []
+    const fallbackDeviceId = requestedBaseDeviceId
+      ? (requestedBaseDeviceId.includes('_slot_')
+          ? requestedBaseDeviceId
+          : (existingShares[0]?.base_device_id ?? `${requestedBaseDeviceId}_slot_0`))
+      : ''
+    const deviceId = requestedDeviceId || fallbackDeviceId
+    if (!deviceId || !baseDeviceId) {
+      return NextResponse.json({ error: 'deviceId or baseDeviceId is required' }, { status: 400 })
     }
 
     if (body.privateSharing.enabled !== undefined && typeof body.privateSharing.enabled !== 'boolean') {
@@ -205,14 +349,14 @@ export async function POST(req: Request) {
     }
 
     const refresh = body.privateSharing.refresh === true
-    const existing = await loadPrivateShareDevice(userId, baseDeviceId)
+    const existing = selectPrivateShareRow(existingShares, deviceId, baseDeviceId)
     const enabled = body.privateSharing.enabled ?? existing?.enabled ?? false
     const expiresAt = expiryHours !== undefined
       ? buildPrivateShareExpiry(expiryHours)
       : (existing?.expires_at ?? null)
 
     if (!enabled && !refresh && expiryHours === undefined && !existing) {
-      return NextResponse.json({ ok: true, private_share: null })
+      return NextResponse.json({ ok: true, private_share: null, private_shares: [] })
     }
 
     let code = existing?.share_code ?? null
@@ -220,16 +364,24 @@ export async function POST(req: Request) {
 
     const payload = {
       user_id: userId,
-      base_device_id: baseDeviceId,
+      base_device_id: deviceId,
       share_code: code,
       enabled,
       expires_at: expiresAt,
       updated_at: new Date().toISOString(),
     }
 
-    const { data, error } = await adminClient
-      .from('private_share_devices')
-      .upsert(payload, { onConflict: 'user_id,base_device_id' })
+    const writeQuery = existing && existing.base_device_id !== deviceId
+      ? adminClient
+          .from('private_share_devices')
+          .update(payload)
+          .eq('user_id', userId)
+          .eq('base_device_id', existing.base_device_id)
+      : adminClient
+          .from('private_share_devices')
+          .upsert(payload, { onConflict: 'user_id,base_device_id' })
+
+    const { data, error } = await writeQuery
       .select('base_device_id, share_code, enabled, expires_at')
       .single()
 
@@ -237,7 +389,11 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: error?.message ?? 'Could not update private sharing' }, { status: 500 })
     }
 
-    return NextResponse.json({ ok: true, private_share: serializePrivateShare(data) })
+    // Clean up stale slots that no longer match the current slot configuration
+    await cleanupStalePrivateShareSlots(userId, baseDeviceId)
+
+    const privateShares = (await loadPrivateShareDevices(userId, baseDeviceId)).map(serializePrivateShare)
+    return NextResponse.json({ ok: true, private_share: serializePrivateShare(data), private_shares: privateShares })
   }
 
   // Web dashboard or desktop: { isSharing: boolean } or { dailyLimitMb: number | null }
@@ -253,6 +409,27 @@ export async function POST(req: Request) {
     }
     await adminClient.from('profiles').update({ daily_share_limit_mb: limitMb ?? null }).eq('id', userId)
     return NextResponse.json({ ok: true, daily_share_limit_mb: limitMb ?? null })
+  }
+
+  // Setting connection slots — clean up stale private share slots with debouncing
+  if ('connectionSlots' in body && typeof body.connectionSlots === 'number') {
+    const baseDeviceId = body.baseDeviceId ? String(body.baseDeviceId).trim() : null
+    if (baseDeviceId) {
+      // Debounce: only cleanup if slots actually changed
+      const { data: currentDevice } = await adminClient
+        .from('provider_devices')
+        .select('connection_slots')
+        .eq('user_id', userId)
+        .eq('device_id', baseDeviceId)
+        .maybeSingle()
+      
+      const currentSlots = currentDevice?.connection_slots ?? 1
+      if (currentSlots !== body.connectionSlots) {
+        const result = await cleanupStalePrivateShareSlots(userId, baseDeviceId, body.connectionSlots)
+        console.log(`Slot cleanup for ${userId}/${baseDeviceId}: ${result.deletedCount} stale slots removed`)
+      }
+    }
+    return NextResponse.json({ ok: true })
   }
 
   if (typeof body.isSharing !== 'boolean') {
@@ -311,6 +488,7 @@ export async function PUT(req: Request) {
     p_user_id: userId,
     p_device_id: device_id,
     p_country: country,
+    p_relay_url: (body.relay_url && typeof body.relay_url === 'string') ? body.relay_url : null,
   })
 
   // Opportunistically clean up stale devices from other users

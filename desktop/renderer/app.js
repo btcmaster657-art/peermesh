@@ -12,6 +12,8 @@ let togglingShare = false // 'idle' | 'starting' | 'stopping'
 let _shareState = 'idle'
 function setShareState(s) { _shareState = s; togglingShare = s !== 'idle' }
 let privateShare = null
+let privateShares = []
+let privateShareDeviceId = null
 let privateShareSaving = false
 let privateShareExpiry = '24'
 let dailyLimitSaving = false
@@ -30,6 +32,7 @@ function setVersion(version) {
   if (tag) tag.textContent = `v${version}`
 }
 
+// Set version immediately on load
 setVersion(api.version)
 
 function setToggleVisual(element, { on = false, loading = false, disabled = false } = {}) {
@@ -83,21 +86,14 @@ function formatDailyLimit(limitMb) {
 }
 
 function getFlagForCountry(code) {
-  const flags = {
-    NG: '🇳🇬',
-    GB: '🇬🇧',
-    US: '🇺🇸',
-    KE: '🇰🇪',
-    ZA: '🇿🇦',
-    DE: '🇩🇪',
-    CA: '🇨🇦',
-    AU: '🇦🇺',
-    BR: '🇧🇷',
-    JP: '🇯🇵',
-    RW: '🇷🇼',
-    GH: '🇬🇭',
-  }
-  return flags[code] ?? '🌍'
+  if (!code || typeof code !== 'string' || code.length !== 2) return '🌍'
+  const upper = code.toUpperCase()
+  const codePointA = 127462 - 65
+  const flag = String.fromCodePoint(
+    codePointA + upper.charCodeAt(0),
+    codePointA + upper.charCodeAt(1)
+  )
+  return flag
 }
 
 function showScreen(id) {
@@ -116,18 +112,55 @@ function getPrivateShareExpiryPreset(expiresAt) {
   return 'none'
 }
 
+function getPrivateShareRows(state = window.__lastPeerMeshState || null) {
+  if (Array.isArray(privateShares) && privateShares.length > 0) return privateShares
+  if (Array.isArray(state?.privateShares) && state.privateShares.length > 0) return state.privateShares
+  if (privateShare) return [privateShare]
+  return []
+}
+
+function getPrivateShareLabel(row, fallbackIndex = 0) {
+  if (!row) return `Slot ${fallbackIndex + 1}`
+  if (Number.isInteger(row.slot_index) && row.slot_index >= 0) return `Slot ${row.slot_index + 1}`
+  if (row.device_id) return row.device_id.slice(0, 8)
+  return `Slot ${fallbackIndex + 1}`
+}
+
 function renderPrivateShare() {
   const codeEl = document.getElementById('private-share-code')
   const copyBtn = document.getElementById('copy-private-share')
   const refreshBtn = document.getElementById('refresh-private-share')
   const toggleBtn = document.getElementById('toggle-private-share')
   const expiryEl = document.getElementById('private-share-expiry')
+  const deviceSelect = document.getElementById('private-share-device')
   const statusEl = document.getElementById('private-share-status')
   const state = window.__lastPeerMeshState || null
   const signedIn = !!state?.config?.userId
+  const rows = getPrivateShareRows(state)
+
+  // Only reset selection when there is genuinely no selection yet — not on every render
+  if (!privateShareDeviceId) {
+    privateShareDeviceId = rows[0]?.device_id ?? privateShare?.device_id ?? null
+  } else if (rows.length > 0 && !rows.some(row => row.device_id === privateShareDeviceId)) {
+    // Selected slot no longer exists (e.g. slot count reduced) — fall back gracefully
+    privateShareDeviceId = rows[0]?.device_id ?? null
+  }
+  privateShare = rows.find(row => row.device_id === privateShareDeviceId) ?? rows[0] ?? privateShare
 
   if (codeEl) codeEl.textContent = privateShare?.code ?? '---------'
   if (expiryEl) expiryEl.value = privateShareExpiry
+  if (deviceSelect) {
+    deviceSelect.innerHTML = rows.length > 0
+      ? rows.map((row, index) => {
+          const label = getPrivateShareLabel(row, index)
+          const selected = row.device_id === privateShareDeviceId ? 'selected' : ''
+          const status = row.enabled ? (row.active ? 'ACTIVE' : 'ENABLED') : 'DISABLED'
+          return `<option value="${row.device_id}" ${selected}>${label} - ${status}</option>`
+        }).join('')
+      : '<option value="">No slots available</option>'
+    deviceSelect.disabled = !signedIn || privateShareSaving || rows.length === 0
+    deviceSelect.value = privateShareDeviceId ?? ''
+  }
 
   if (copyBtn) copyBtn.disabled = !signedIn || !privateShare?.code || privateShareSaving
   if (refreshBtn) refreshBtn.disabled = !signedIn || privateShareSaving
@@ -154,8 +187,7 @@ function renderPrivateShare() {
   const expires = privateShare?.expires_at
     ? ` Expires ${new Date(privateShare.expires_at).toLocaleString()}.`
     : ' No expiry.'
-
-  statusEl.textContent = `This desktop is ${mode}.${expires}`
+  statusEl.textContent = `${getPrivateShareLabel(privateShare)} is ${mode}.${expires}`
 }
 
 async function loadPrivateShare(force = false) {
@@ -164,7 +196,13 @@ async function loadPrivateShare(force = false) {
   lastPrivateShareLoadAt = now
   const result = await invoke('getPrivateShare')
   if (!result?.success) return
-  privateShare = result.privateShare ?? null
+  privateShares = result.privateShares ?? privateShares
+  privateShare = result.privateShare ?? privateShares[0] ?? null
+  if (result.privateShareDeviceId) {
+    privateShareDeviceId = result.privateShareDeviceId
+  } else if (!privateShareDeviceId || !privateShares.some(row => row.device_id === privateShareDeviceId)) {
+    privateShareDeviceId = privateShare?.device_id ?? privateShares[0]?.device_id ?? null
+  }
   privateShareExpiry = result.expiryPreset ?? getPrivateShareExpiryPreset(privateShare?.expires_at ?? null)
   renderPrivateShare()
 }
@@ -175,9 +213,14 @@ async function savePrivateShare(payload) {
   clearMainError()
   renderPrivateShare()
   try {
-    const result = await invoke('updatePrivateShare', payload)
+    const result = await invoke('updatePrivateShare', {
+      ...payload,
+      deviceId: payload?.deviceId ?? privateShareDeviceId ?? privateShare?.device_id ?? privateShares[0]?.device_id ?? null,
+    })
     if (!result?.success) throw new Error(result?.error || 'Could not update private sharing')
-    privateShare = result.privateShare ?? null
+    privateShares = result.privateShares ?? privateShares
+    privateShare = result.privateShare ?? privateShare
+    privateShareDeviceId = result.privateShareDeviceId ?? privateShare?.device_id ?? privateShareDeviceId
     privateShareExpiry = result.expiryPreset ?? getPrivateShareExpiryPreset(privateShare?.expires_at ?? null)
     await pollState()
   } catch (error) {
@@ -326,6 +369,7 @@ function resetAuthUI() {
   const codeEl = document.getElementById('device-code-display')
   const codeHint = document.getElementById('code-hint')
   const codeWaiting = document.getElementById('code-waiting')
+  const codePlaceholder = document.getElementById('code-placeholder')
   const errEl = document.getElementById('auth-error')
   const btn = document.getElementById('btn-open-browser')
   const copyBtn = document.getElementById('btn-copy-code')
@@ -336,21 +380,17 @@ function resetAuthUI() {
     codeEl.textContent = ''
   }
   if (codeHint) codeHint.style.display = 'none'
-  if (codeWaiting) {
-    codeWaiting.style.display = 'flex'
-    codeWaiting.innerHTML = '<span id="code-spinner" style="display:inline-block;width:10px;height:10px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin 0.8s linear infinite"></span> GETTING CODE...'
-  }
+  if (codeWaiting) codeWaiting.style.display = 'none'
+  if (codePlaceholder) codePlaceholder.style.display = 'block'
   if (copyBtn) {
     copyBtn.style.display = 'none'
     copyBtn.onclick = null
   }
   if (errEl) errEl.style.display = 'none'
-  if (statusEl) {
-    statusEl.innerHTML = '<span style="display:inline-block;width:8px;height:8px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin 0.8s linear infinite"></span> WAITING FOR SIGN IN...'
-  }
+  if (statusEl) statusEl.textContent = 'Click the button above to sign in'
   if (btn) {
-    btn.disabled = !navigator.onLine
-    btn.textContent = navigator.onLine ? 'SIGN IN WITH BROWSER' : 'NO INTERNET'
+    btn.disabled = false
+    btn.textContent = 'SIGN IN WITH BROWSER'
   }
 }
 
@@ -376,6 +416,7 @@ async function startDeviceFlow() {
   _deviceFlowStartedAt = Date.now()
   const codeHint = document.getElementById('code-hint')
   const codeWaiting = document.getElementById('code-waiting')
+  const codePlaceholder = document.getElementById('code-placeholder')
   const errEl = document.getElementById('auth-error')
   const btn = document.getElementById('btn-open-browser')
   const copyBtn = document.getElementById('btn-copy-code')
@@ -387,6 +428,7 @@ async function startDeviceFlow() {
     codeEl.textContent = ''
   }
   if (codeHint) codeHint.style.display = 'none'
+  if (codePlaceholder) codePlaceholder.style.display = 'none'
   if (codeWaiting) codeWaiting.style.display = 'flex'
   if (btn) {
     btn.disabled = true
@@ -449,7 +491,11 @@ async function startDeviceFlow() {
     btn.textContent = 'OPEN BROWSER AGAIN'
   }
 
-  await invoke('openAuth', `${verificationUri}?activate=1&code=${encodeURIComponent(userCode)}`)
+  // Only open browser automatically on the very first code request (user clicked the button).
+  // Subsequent calls (e.g. from sign-out) must not auto-open a browser window.
+  if (btn && btn.dataset.autoOpen !== 'false') {
+    await invoke('openAuth', `${verificationUri}?activate=1&code=${encodeURIComponent(userCode)}`)
+  }
 
   stopDevicePoll()
   deviceFlowActive = true
@@ -598,6 +644,9 @@ async function doToggleSharing(isSharing) {
 
 function updateUI(state) {
   window.__lastPeerMeshState = state
+  privateShares = Array.isArray(state?.privateShares) ? state.privateShares : privateShares
+  if (state?.privateShareDeviceId) privateShareDeviceId = state.privateShareDeviceId
+  if (state?.privateShare?.device_id) privateShareDeviceId = state.privateShare.device_id
   const running = !!state?.running
   const config = state?.config ?? {}
   const stats = state?.stats ?? { requestsHandled: 0, bytesServed: 0 }
@@ -608,7 +657,6 @@ function updateUI(state) {
     renderStartupPreferences(state)
     renderDailyLimit(state)
     showScreen('auth-screen')
-    if (typeof api.requestDeviceCode === 'function') startDeviceFlow()
     return
   }
 
@@ -777,6 +825,21 @@ async function updateStartupPreference(key, enabled) {
 document.getElementById('btn-open-browser').addEventListener('click', () => {
   stopDevicePoll()
   deviceFlowActive = false
+  const btn = document.getElementById('btn-open-browser')
+  if (btn) {
+    btn.dataset.autoOpen = 'true'
+    btn.disabled = true
+    btn.textContent = 'GETTING CODE...'
+  }
+  const codeWaiting = document.getElementById('code-waiting')
+  if (codeWaiting) {
+    codeWaiting.style.display = 'flex'
+    codeWaiting.innerHTML = '<span style="display:inline-block;width:10px;height:10px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin 0.8s linear infinite"></span> GETTING CODE...'
+  }
+  const statusEl = document.getElementById('auth-status')
+  if (statusEl) {
+    statusEl.innerHTML = '<span style="display:inline-block;width:8px;height:8px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin 0.8s linear infinite"></span> WAITING FOR SIGN IN...'
+  }
   startDeviceFlow()
 })
 
@@ -831,7 +894,17 @@ document.getElementById('btn-signout').addEventListener('click', async () => {
   renderPrivateShare()
   await pollState()
   if (btn) { btn.disabled = false; btn.textContent = 'Sign out' }
-  if (typeof api.requestDeviceCode === 'function') startDeviceFlow()
+  // Show auth screen but do NOT auto-open browser — user must click sign in
+  const openBtn = document.getElementById('btn-open-browser')
+  if (openBtn) openBtn.dataset.autoOpen = 'false'
+})
+
+document.getElementById('private-share-device').addEventListener('change', (event) => {
+  privateShareDeviceId = event.target.value || null
+  const rows = getPrivateShareRows(window.__lastPeerMeshState || null)
+  privateShare = rows.find(row => row.device_id === privateShareDeviceId) ?? rows[0] ?? null
+  privateShareExpiry = getPrivateShareExpiryPreset(privateShare?.expires_at ?? null)
+  renderPrivateShare()
 })
 
 document.getElementById('copy-private-share').addEventListener('click', async () => {
@@ -951,22 +1024,23 @@ renderPrivateShare()
 renderStartupPreferences(null)
 renderDailyLimit(null)
 
+const openBtn = document.getElementById('btn-open-browser')
+if (openBtn) openBtn.dataset.autoOpen = 'false'
+
 pollState().then((state) => {
   if (!state?.config?.userId) {
-    resetAuthUI()
-    if (typeof api.requestDeviceCode === 'function') startDeviceFlow()
+    // Show auth screen passively — do NOT auto-start device flow
+    const codeWaiting = document.getElementById('code-waiting')
+    if (codeWaiting) codeWaiting.style.display = 'none'
+    const codePlaceholder = document.getElementById('code-placeholder')
+    if (codePlaceholder) codePlaceholder.style.display = 'block'
+    const statusEl = document.getElementById('auth-status')
+    if (statusEl) statusEl.textContent = 'Click the button above to sign in'
   }
 })
 
-// Re-trigger device flow when window regains focus if stuck on auth with no code showing
+// Keep auth screen passive until the user clicks sign in.
 window.addEventListener('focus', () => {
   const authScreen = document.getElementById('auth-screen')
   if (!authScreen?.classList.contains('active')) return
-  const codeEl = document.getElementById('device-code-display')
-  const codeVisible = codeEl && codeEl.style.display !== 'none' && codeEl.textContent
-  if (!codeVisible && typeof api.requestDeviceCode === 'function') {
-    stopDevicePoll()
-    resetAuthUI()
-    startDeviceFlow()
-  }
 })

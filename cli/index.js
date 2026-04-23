@@ -1,23 +1,22 @@
-#!/usr/bin/env node
+﻿#!/usr/bin/env node
 
 import { WebSocket } from 'ws'
 import { connect } from 'net'
 import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync } from 'fs'
 import { homedir } from 'os'
-import { join } from 'path'
+import { join, dirname } from 'path'
+import { fileURLToPath } from 'url'
 import http from 'http'
 import { randomUUID } from 'crypto'
+import { API_BASE as _ENV_API_BASE, RELAY_ENDPOINTS as _ENV_RELAY_ENDPOINTS } from '../lib/env.js'
 
 if (process.platform === 'win32') {
   try { process.stdout.setEncoding('utf8') } catch {}
   try { process.stderr.setEncoding('utf8') } catch {}
 }
 
-const API_BASE = 'https://peermesh-beta.vercel.app'
-const RELAY_FALLBACK = [
-  'wss://peermesh-relay.fly.dev',
-  'wss://peermesh-2ma4.onrender.com',
-]
+const API_BASE = _ENV_API_BASE
+const RELAY_FALLBACK = _ENV_RELAY_ENDPOINTS
 let _liveRelays = null
 let _liveRelaysFetchedAt = 0
 const RELAY_CONFIG_TTL = 5 * 60 * 1000
@@ -37,7 +36,7 @@ async function getLiveRelays() {
 const CONFIG_DIR = join(homedir(), '.peermesh')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
 const SHARED_IDENTITY_FILE = join(CONFIG_DIR, 'machine-identity.json')
-const VERSION     = '1.0.45'
+const VERSION     = '1.0.46'
 const DEBUG_LOG = join(homedir(), 'Desktop', 'peermesh-debug.log')
 
 const CONTROL_PORT = 7654
@@ -54,6 +53,8 @@ const slotsIdx = args.indexOf('--slots') !== -1 ? args.indexOf('--slots') : args
 const slotsArg = slotsIdx !== -1 ? args[slotsIdx + 1] : undefined
 const privateExpiryIdx = args.indexOf('--private-expiry')
 const privateExpiryArg = privateExpiryIdx !== -1 ? args[privateExpiryIdx + 1] : undefined
+const privateSlotIdx = args.indexOf('--private-slot')
+const privateSlotArg = privateSlotIdx !== -1 ? args[privateSlotIdx + 1] : undefined
 const noLimit = args.includes('--no-limit')
 const privateOnFlag = args.includes('--private-on')
 const privateOffFlag = args.includes('--private-off')
@@ -63,6 +64,7 @@ const resetFlag = args.includes('--reset')
 const statusFlag = args.includes('--status')
 const serveFlag = args.includes('--serve')
 const debugFlag = args.includes('--debug')
+const docsFlag  = args.includes('--docs')
 
 function _write(level, category, message, ctx) {
   const ts = new Date().toISOString()
@@ -129,7 +131,7 @@ function banner() {
     .then(r => r.json())
     .then(d => {
       if (d.version && d.version !== VERSION) {
-        console.log(`  ! Update available: v${VERSION} → v${d.version}`)
+        console.log(`  ! Update available: v${VERSION} â†’ v${d.version}`)
         console.log(`  ! Run: npm install -g @btcmaster1000/peermesh-provider@latest`)
         console.log('')
       }
@@ -147,6 +149,14 @@ function parseSlotsFlag(value) {
   const parsed = parseInt(value, 10)
   if (!Number.isInteger(parsed) || parsed < 1 || parsed > SLOT_CAP) {
     throw new Error(`--slots must be an integer between 1 and ${SLOT_CAP}`)
+  }
+  return parsed
+}
+
+function parsePrivateSlotFlag(value) {
+  const parsed = parseInt(value, 10)
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > SLOT_CAP) {
+    throw new Error(`--private-slot must be an integer between 1 and ${SLOT_CAP}`)
   }
   return parsed
 }
@@ -210,6 +220,9 @@ function getOrCreateSharedBaseDeviceId(fallback) {
 config.baseDeviceId = getOrCreateSharedBaseDeviceId(config.baseDeviceId || config.deviceId || createSharedBaseDeviceId())
 if (!config.deviceId || config.deviceId !== config.baseDeviceId) config.deviceId = config.baseDeviceId
 if (!config.connectionSlots) config.connectionSlots = 1
+config.privateShare = config.privateShare ?? null
+config.privateShareDeviceId = config.privateShareDeviceId ?? config.privateShare?.device_id ?? null
+config.privateShares = Array.isArray(config.privateShares) ? config.privateShares.filter(row => row && typeof row === 'object') : []
 
 let slotStates = []
 let limitHit = false
@@ -248,6 +261,8 @@ async function clearCliCredentials(reason, { rotateIdentity = false } = {}) {
   config.todaySharedBytes = 0
   config.privateShareActive = false
   config.privateShare = null
+  config.privateShareDeviceId = null
+  config.privateShares = []
   if (rotateIdentity) rotateCliIdentity()
   saveConfig(config)
   clog.warn('AUTH', 'credentials cleared', {
@@ -255,6 +270,38 @@ async function clearCliCredentials(reason, { rotateIdentity = false } = {}) {
     rotateIdentity,
     baseDeviceId: config.baseDeviceId,
   })
+}
+
+async function tryRefreshCliToken() {
+  if (!config.userId) return false
+  try {
+    const res = await fetch(`${API_BASE}/api/extension-auth?refresh=1&userId=${encodeURIComponent(config.userId)}`, {
+      signal: AbortSignal.timeout(5000),
+    })
+    if (res.status === 403) {
+      const body = await res.json().catch(() => ({}))
+      if (body.revoked === true) {
+        clog.warn('AUTH', 'cli device revoked - clearing credentials', { userId: config.userId })
+        await clearCliCredentials('device_revoked')
+      }
+      return false
+    }
+    if (!res.ok) return false
+    const data = await res.json()
+    if (data.token) { config.token = data.token; saveConfig(config); clog.info('AUTH', 'cli token refreshed', { userId: config.userId }); return true }
+  } catch {}
+  return false
+}
+
+async function confirmCliAuthStillValid(context, status) {
+  if (!config.userId) return false
+  // CLI is a persistent sharing agent - never sign out on 401/network errors.
+  // Only clearCliCredentials when server returns { revoked: true } via tryRefreshCliToken.
+  const refreshed = await tryRefreshCliToken()
+  if (refreshed) { clog.info('AUTH', 'cli token refreshed', { context }); return true }
+  // Refresh failed but not revoked - keep auth alive (network blip, server down, etc.)
+  clog.warn('AUTH', 'token refresh failed - keeping auth alive', { context, status, userId: config.userId })
+  return true
 }
 
 function getConnectionSlots() {
@@ -322,6 +369,84 @@ function getSlotSummary() {
   }))
 }
 
+function normalizePrivateShareRows(rows) {
+  if (!Array.isArray(rows)) return []
+  return rows.filter(row => row && typeof row === 'object')
+}
+
+function createDisabledPrivateShareRow(deviceId, slotIndex = null) {
+  return {
+    device_id: deviceId,
+    base_device_id: getBaseDeviceId(),
+    slot_index: slotIndex,
+    code: '',
+    enabled: false,
+    expires_at: null,
+    active: false,
+  }
+}
+
+function hydratePrivateShareRows(rows) {
+  const normalizedRows = normalizePrivateShareRows(rows)
+  const byDeviceId = new Map()
+  for (const row of normalizedRows) {
+    const deviceId = typeof row.device_id === 'string' && row.device_id.trim()
+      ? row.device_id.trim()
+      : null
+    if (!deviceId) continue
+    byDeviceId.set(deviceId, {
+      ...row,
+      device_id: deviceId,
+      base_device_id: row.base_device_id || getBaseDeviceId(),
+      slot_index: Number.isInteger(row.slot_index) ? row.slot_index : null,
+      code: typeof row.code === 'string' ? row.code : '',
+      enabled: !!row.enabled,
+      expires_at: row.expires_at ?? null,
+      active: !!row.active,
+    })
+  }
+
+  const hydratedRows = ensureSlotStates().map(slot => {
+    return byDeviceId.get(slot.deviceId) ?? createDisabledPrivateShareRow(slot.deviceId, slot.index)
+  })
+
+  for (const row of byDeviceId.values()) {
+    if (!hydratedRows.some(candidate => candidate.device_id === row.device_id)) hydratedRows.push(row)
+  }
+
+  return hydratedRows
+}
+
+function getDefaultPrivateShareDeviceId() {
+  if (typeof config.privateShareDeviceId === 'string' && config.privateShareDeviceId.trim()) {
+    return config.privateShareDeviceId.trim()
+  }
+  const rows = hydratePrivateShareRows(config.privateShares)
+  return rows[0]?.device_id ?? config.privateShare?.device_id ?? `${getBaseDeviceId()}_slot_0`
+}
+
+function selectPrivateShareRow(rows, deviceId = null) {
+  const normalizedRows = hydratePrivateShareRows(rows)
+  if (normalizedRows.length === 0) return null
+  if (deviceId) {
+    const exact = normalizedRows.find(row => row.device_id === deviceId)
+    if (exact) return exact
+  }
+  const preferredDeviceId = getDefaultPrivateShareDeviceId()
+  if (preferredDeviceId) {
+    const preferred = normalizedRows.find(row => row.device_id === preferredDeviceId)
+    if (preferred) return preferred
+  }
+  return normalizedRows[0]
+}
+
+function getPrivateShareLabel(row, fallbackIndex = 0) {
+  if (!row) return `Slot ${fallbackIndex + 1}`
+  if (Number.isInteger(row.slot_index) && row.slot_index >= 0) return `Slot ${row.slot_index + 1}`
+  if (row.device_id) return row.device_id.slice(0, 8)
+  return `Slot ${fallbackIndex + 1}`
+}
+
 function clogState(label) {
   const aggregate = getAggregateStats()
   _write('DEBUG', 'STATE', `[${label}]`, {
@@ -337,6 +462,8 @@ function clogState(label) {
 }
 
 function getStatePayload() {
+  const privateShares = hydratePrivateShareRows(config.privateShares)
+  const privateShare = selectPrivateShareRow(privateShares, config.privateShareDeviceId) ?? config.privateShare ?? null
   return {
     available: true,
     running: isRunning(),
@@ -347,8 +474,10 @@ function getStatePayload() {
     where: 'cli',
     baseDeviceId: getBaseDeviceId(),
     connectionSlots: getConnectionSlots(),
-    privateShareActive: !!(config.privateShareActive),
-    privateShare: config.privateShare ?? null,
+    privateShareActive: !!(privateShare?.enabled && privateShare?.active),
+    privateShare: privateShare,
+    privateShares,
+    privateShareDeviceId: privateShare?.device_id ?? config.privateShareDeviceId ?? null,
     slots: {
       configured: getConnectionSlots(),
       active: activeSlotCount(),
@@ -415,7 +544,7 @@ function enforceLocalLimit(limitBytes) {
   limitHit = true
   clog.warn('LIMIT', 'daily limit reached', { totalToday, limitBytes })
   console.log('')
-  console.log(`  Daily limit of ${formatBytes(limitBytes)} reached — sharing paused until midnight.`)
+  console.log(`  Daily limit of ${formatBytes(limitBytes)} reached â€” sharing paused until midnight.`)
   console.log('')
   stopRelay()
   const msUntilMidnight = new Date(new Date().toDateString()).getTime() + 86400000 - Date.now()
@@ -424,7 +553,7 @@ function enforceLocalLimit(limitBytes) {
     limitHit = false
     config.todaySharedBytes = 0
     saveConfig(config)
-    clog.info('LIMIT', 'midnight reset — resuming sharing')
+    clog.info('LIMIT', 'midnight reset â€” resuming sharing')
     if (config.shareEnabled) connectRelay(_controlLimitBytes)
   }, msUntilMidnight)
 }
@@ -435,14 +564,18 @@ function applySharingProfileData(data, { source = 'remote' } = {}) {
   const previousPrivateShareCode = config.privateShare?.code ?? null
 
   const nextPrivateShare = data.private_share ?? null
-  const nextPrivateShareEnabled = !!nextPrivateShare?.enabled
-  const nextPrivateShareActive = !!(nextPrivateShare?.enabled && nextPrivateShare?.active)
-  const nextPrivateShareCode = nextPrivateShare?.code ?? null
+  const nextPrivateShares = hydratePrivateShareRows(data.private_shares ?? (nextPrivateShare ? [nextPrivateShare] : []))
+  const selectedPrivateShare = selectPrivateShareRow(nextPrivateShares, data.private_share?.device_id ?? config.privateShareDeviceId ?? nextPrivateShare?.device_id ?? null)
+  const nextPrivateShareEnabled = !!selectedPrivateShare?.enabled
+  const nextPrivateShareActive = !!(selectedPrivateShare?.enabled && selectedPrivateShare?.active)
+  const nextPrivateShareCode = selectedPrivateShare?.code ?? null
   if (data.daily_limit_bytes != null) _controlLimitBytes = data.daily_limit_bytes
   else if (data.daily_share_limit_mb != null) _controlLimitBytes = data.daily_share_limit_mb * 1024 * 1024
 
   config.todaySharedBytes = data.total_bytes_today ?? 0
-  config.privateShare = nextPrivateShare
+  config.privateShares = nextPrivateShares
+  config.privateShare = selectedPrivateShare ?? nextPrivateShare
+  config.privateShareDeviceId = config.privateShare?.device_id ?? config.privateShareDeviceId ?? null
   config.privateShareActive = nextPrivateShareActive
   if (data.has_accepted_provider_terms != null) config.hasAcceptedProviderTerms = !!data.has_accepted_provider_terms
   saveConfig(config)
@@ -518,7 +651,8 @@ async function pollTodayBytes() {
     if (res.status === 401 || res.status === 403) {
       _profileSyncConsecutiveFailures++
       if (_profileSyncConsecutiveFailures >= CLI_AUTH_CLEAR_THRESHOLD) {
-        await clearCliCredentials(`poll_today_bytes_${res.status}`)
+        const stillValid = await confirmCliAuthStillValid('poll_today_bytes', res.status, { preserveWhileSharing: true })
+        if (!stillValid) return
       } else {
         clog.warn('API', 'transient auth error in pollTodayBytes - not clearing yet', { status: res.status, count: _profileSyncConsecutiveFailures })
       }
@@ -552,15 +686,17 @@ function parsePrivateExpiryArg(value) {
   return String(parsed)
 }
 
-async function updatePrivateShareState({ enabled, refresh = false, expiryHours } = {}) {
+async function updatePrivateShareState({ enabled, refresh = false, expiryHours, deviceId } = {}) {
   if (!config.token || !config.userId) throw new Error('Sign in required')
   const expiryValue = expiryHours === undefined
     ? undefined
     : (expiryHours === 'none' ? null : parseInt(expiryHours, 10))
+  const targetDeviceId = deviceId || getDefaultPrivateShareDeviceId()
   const previousEnabled = !!config.privateShare?.enabled
 
   clogRequest('POST', `${API_BASE}/api/user/sharing`, {
     privateSharing: {
+      deviceId: targetDeviceId,
       baseDeviceId: getBaseDeviceId(),
       enabled,
       refresh: refresh === true,
@@ -573,6 +709,7 @@ async function updatePrivateShareState({ enabled, refresh = false, expiryHours }
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
     body: JSON.stringify({
       privateSharing: {
+        deviceId: targetDeviceId,
         baseDeviceId: getBaseDeviceId(),
         enabled,
         refresh: refresh === true,
@@ -583,14 +720,16 @@ async function updatePrivateShareState({ enabled, refresh = false, expiryHours }
   })
   clogResponse('POST', `${API_BASE}/api/user/sharing`, res.status)
   if (res.status === 401 || res.status === 403) {
-    await clearCliCredentials(`private_share_${res.status}`)
-    throw new Error('Session expired - please sign in again')
+    const stillValid = await confirmCliAuthStillValid('private_share', res.status, { preserveWhileSharing: true })
+    throw new Error(stillValid ? 'Could not update private sharing - please try again' : 'Session expired - please sign in again')
   }
   const data = await res.json().catch(() => ({}))
   if (!res.ok || data.error) throw new Error(data.error || 'Could not update private sharing')
 
-  config.privateShare = data.private_share ?? null
-  config.privateShareActive = !!(data.private_share?.enabled && data.private_share?.active)
+  config.privateShares = hydratePrivateShareRows(data.private_shares ?? (data.private_share ? [data.private_share] : []))
+  config.privateShare = selectPrivateShareRow(config.privateShares, targetDeviceId) ?? data.private_share ?? null
+  config.privateShareDeviceId = config.privateShare?.device_id ?? targetDeviceId
+  config.privateShareActive = !!(config.privateShare?.enabled && config.privateShare?.active)
   saveConfig(config)
 
   if (config.shareEnabled && isRunning() && previousEnabled !== !!config.privateShare?.enabled) {
@@ -610,15 +749,24 @@ async function updatePrivateShareState({ enabled, refresh = false, expiryHours }
   return config.privateShare
 }
 
-function printPrivateShareState(privateShare) {
+function printPrivateShareState(privateShare, rows = config.privateShares) {
   const code = privateShare?.code ?? '---------'
   const mode = privateShare?.enabled
     ? (privateShare?.active ? 'ACTIVE' : 'ENABLED (inactive/expired)')
     : 'DISABLED'
   const expires = privateShare?.expires_at ? new Date(privateShare.expires_at).toLocaleString() : 'none'
-  console.log(`  Private sharing: ${mode}`)
+  console.log(`  Private sharing: ${getPrivateShareLabel(privateShare)} - ${mode}`)
   console.log(`  Private code:    ${code}`)
   console.log(`  Private expiry:  ${expires}`)
+  const privateRows = hydratePrivateShareRows(rows)
+  if (privateRows.length > 1) {
+    console.log('  Slots:')
+    privateRows.forEach((row, index) => {
+      const rowMode = row.enabled ? (row.active ? 'ACTIVE' : 'ENABLED') : 'DISABLED'
+      const rowCode = row.code || '---------'
+      console.log(`    - ${getPrivateShareLabel(row, index)}: ${rowMode} (${rowCode})`)
+    })
+  }
 }
 
 function sendMsg(slot, data) {
@@ -647,15 +795,12 @@ function sendHeartbeat(slot) {
   fetch(`${API_BASE}/api/user/sharing`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
-    body: JSON.stringify({ device_id: slot.deviceId, user_id: config.userId }),
+    body: JSON.stringify({ device_id: slot.deviceId, user_id: config.userId, relay_url: slot.lastRelay ?? null }),
   })
     .then(async (res) => {
       clogResponse('PUT', `${API_BASE}/api/user/sharing`, res.status)
-      if (res.status === 401) {
-        clog.warn('HEARTBEAT', 'token expired — clearing credentials for re-auth', { slot: slot.index })
-        await clearCliCredentials('heartbeat_401')
-        stopRelay()
-        main()
+      if (res.status === 401 || res.status === 403) {
+        await confirmCliAuthStillValid('heartbeat', res.status, { preserveWhileSharing: true })
       } else if (res.ok) {
         return res.json().then(data => { if (data) clog.debug('HEARTBEAT', 'PUT ok', { slot: slot.index, data: JSON.stringify(data).slice(0, 80) }) })
       }
@@ -858,7 +1003,7 @@ function attachSlotSocketHandlers(slot, limitBytes, ws, relay) {
 }
 
 function getProviderRelay(relays) {
-  // All slots must connect to the same relay — relay state is process-local.
+  // All slots must connect to the same relay â€” relay state is process-local.
   // Use lastRelay if it's still live (sticky after first registration).
   // Rendezvous/HRW consistent hashing: adding/removing a relay only moves ~1/n
   // providers instead of reshuffling all of them (vs simple modulo).
@@ -899,7 +1044,7 @@ function connectSlot(slot, limitBytes) {
 
 function connectRelay(limitBytes) {
   if (!config.token || !config.userId) {
-    clog.warn('RELAY', 'connectRelay skipped — no token/userId')
+    clog.warn('RELAY', 'connectRelay skipped â€” no token/userId')
     return
   }
   _userStopped = false
@@ -937,6 +1082,10 @@ function applyConnectionSlots(nextSlots, { syncPeer = true } = {}) {
 
   config.connectionSlots = normalizedSlots
   ensureSlotStates()
+  config.privateShares = hydratePrivateShareRows(config.privateShares)
+  config.privateShare = selectPrivateShareRow(config.privateShares, config.privateShareDeviceId) ?? config.privateShare ?? null
+  config.privateShareDeviceId = config.privateShare?.device_id ?? config.privateShareDeviceId ?? `${getBaseDeviceId()}_slot_0`
+  config.privateShareActive = !!(config.privateShare?.enabled && config.privateShare?.active)
   saveConfig(config)
 
   if (shouldResume) {
@@ -946,7 +1095,7 @@ function applyConnectionSlots(nextSlots, { syncPeer = true } = {}) {
     connectRelay(_controlLimitBytes)
   }
 
-  // Only notify peer if we weren't called by the peer — prevents ping-pong loop
+  // Only notify peer if we weren't called by the peer â€” prevents ping-pong loop
   if (syncPeer && peerPort) {
     fetch(`http://127.0.0.1:${peerPort}/native/connection-slots`, {
       method: 'POST',
@@ -960,8 +1109,8 @@ function applyConnectionSlots(nextSlots, { syncPeer = true } = {}) {
 }
 
 function getSlotWarning(slots) {
-  if (slots > 16) return 'Very high resource usage — recommended for servers or dedicated machines only.'
-  if (slots > 8) return 'High resource usage — ensure a stable connection.'
+  if (slots > 16) return 'Very high resource usage â€” recommended for servers or dedicated machines only.'
+  if (slots > 8) return 'High resource usage â€” ensure a stable connection.'
   return null
 }
 
@@ -975,8 +1124,8 @@ function printStatus(limitBytes) {
     : `${formatBytes(totalToday)} today (no limit)`
   const privBadge = config.privateShareActive ? '\uD83D\uDD12 PRIVATE' : '\uD83C\uDF10 PUBLIC'
   console.log('')
-  console.log(`  Sharing active [${privBadge}] — ${active} / ${configured} slots active`)
-  console.log(`  ${aggregate.requestsHandled} requests — ${formatBytes(aggregate.bytesServed)} served`)
+  console.log(`  Sharing active [${privBadge}] â€” ${active} / ${configured} slots active`)
+  console.log(`  ${aggregate.requestsHandled} requests â€” ${formatBytes(aggregate.bytesServed)} served`)
   console.log(`  ${limitStr}`)
   if (config.privateShare?.code) console.log(`  Private code: ${config.privateShare.code}`)
   const warning = getSlotWarning(configured)
@@ -1129,13 +1278,13 @@ async function syncSlotsWithPeer(targetPort) {
     const peerSlots = state.connectionSlots ?? state.slots?.configured ?? null
     const peerRunning = !!state.running
     if (peerRunning && peerSlots && peerSlots !== getConnectionSlots()) {
-      // Peer is actively sharing — adopt their slot count
+      // Peer is actively sharing â€” adopt their slot count
       clog.info('SLOTS', 'adopting slot count from running peer', { peerSlots, ourSlots: getConnectionSlots() })
       config.connectionSlots = peerSlots
       ensureSlotStates()
       saveConfig(config)
     } else {
-      // Neither is sharing — we are the registrant so we win; push with _fromPeer=true so peer doesn't echo back
+      // Neither is sharing â€” we are the registrant so we win; push with _fromPeer=true so peer doesn't echo back
       fetch(`http://127.0.0.1:${targetPort}/native/connection-slots`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1166,7 +1315,7 @@ function startControlServer() {
         const res = await fetch(`http://127.0.0.1:${CONTROL_PORT}/native/state`, { signal: AbortSignal.timeout(1500) })
         if (res.ok) {
           const state = await res.json()
-          if (state.running) log('Desktop is sharing — CLI standing by')
+          if (state.running) log('Desktop is sharing â€” CLI standing by')
         }
       } catch {}
     })
@@ -1214,7 +1363,7 @@ async function authenticate() {
           reject(new Error('Sign-in was denied'))
         } else if (data.status === 'expired') {
           clearInterval(poll)
-          reject(new Error('Code expired — run again to get a new code'))
+          reject(new Error('Code expired â€” run again to get a new code'))
         }
       } catch {}
     }, interval * 1000)
@@ -1239,17 +1388,85 @@ function promptYesNo(prompt) {
   })
 }
 
+
+function printDocs() {
+  const G = '\x1b[32m', C = '\x1b[36m', R = '\x1b[0m', B = '\x1b[1m', D = '\x1b[90m'
+  const h = (t) => console.log(`\n${B}${C}  ${t}${R}`)
+  const row = (lbl, cmd) => { console.log(`  ${D}${lbl}${R}`); console.log(`  ${G}${cmd}${R}`) }
+  console.log(`\n${B}  PeerMesh Provider v${VERSION} — CLI Reference${R}`)
+  h('INSTALL')
+  row('Run once (no install)',           'npx @btcmaster1000/peermesh-provider')
+  row('Install globally',                'npm install -g @btcmaster1000/peermesh-provider')
+  row('Update to latest',                'npm install -g @btcmaster1000/peermesh-provider@latest')
+  h('BASIC')
+  row('Start sharing',                   'peermesh-provider')
+  row('Show status and exit',            'peermesh-provider --status')
+  row('Show this reference',             'peermesh-provider --docs')
+  row('Skip terms prompt (CI/scripts)',  'peermesh-provider --serve')
+  row('Verbose debug logs to console',   'peermesh-provider --debug')
+  row('Sign out and revoke device',      'peermesh-provider --reset')
+  h('CONNECTION SLOTS  (1–32, default 1)')
+  row('Run with 4 concurrent slots',     'peermesh-provider --slots 4')
+  row('Run with 16 slots',               'peermesh-provider --slots 16')
+  row('--slot is an alias for --slots',  'peermesh-provider --slot 4')
+  h('DAILY BANDWIDTH LIMIT')
+  row('Cap at 500 MB/day',               'peermesh-provider --limit 500')
+  row('Cap at 2 GB/day',                 'peermesh-provider --limit 2048')
+  row('Remove the daily cap',            'peermesh-provider --no-limit')
+  h('PRIVATE SHARING PER SLOT')
+  row('Show all slots + codes',          'peermesh-provider --private-status')
+  row('Enable slot 1 (default)',         'peermesh-provider --private-on')
+  row('Enable slot 2',                   'peermesh-provider --private-on --private-slot 2')
+  row('Enable slot 3',                   'peermesh-provider --private-on --private-slot 3')
+  row('Disable slot 1',                  'peermesh-provider --private-off')
+  row('Disable slot 2',                  'peermesh-provider --private-off --private-slot 2')
+  row('Rotate code on slot 1',           'peermesh-provider --private-refresh')
+  row('Rotate code on slot 2',           'peermesh-provider --private-refresh --private-slot 2')
+  row('Enable slot 1, expire in 1h',     'peermesh-provider --private-on --private-expiry 1')
+  row('Enable slot 2, expire in 24h',    'peermesh-provider --private-on --private-slot 2 --private-expiry 24')
+  row('Enable slot 1, expire in 7d',     'peermesh-provider --private-on --private-expiry 168')
+  row('Enable slot 1, no expiry',        'peermesh-provider --private-on --private-expiry none')
+  h('COMBINING FLAGS')
+  row('4 slots, 1 GB/day, debug',        'peermesh-provider --slots 4 --limit 1024 --debug')
+  row('8 slots, slot 2 private 24h',     'peermesh-provider --slots 8 --private-on --private-slot 2 --private-expiry 24 --serve')
+  row('Status check only',               'peermesh-provider --status')
+  h('RUN AT STARTUP')
+  row('Windows — PowerShell (as admin)', 'See: peermesh-provider --docs  (startup section)')
+  row('macOS — launchd',                 'See: peermesh-provider --docs  (startup section)')
+  row('Linux — systemd',                 'See: peermesh-provider --docs  (startup section)')
+  h('UNINSTALL')
+  row('Remove CLI',                      'npm uninstall -g @btcmaster1000/peermesh-provider')
+  row('Remove saved credentials',        'rm -rf ~/.peermesh')
+  console.log('')
+}
+
 async function main() {
   banner()
   console.log(`  Logging to ${DEBUG_LOG}`)
+
+  if (docsFlag) { printDocs(); process.exit(0) }
   console.log('')
 
   if (resetFlag) {
+    // Revoke device_codes on server so desktop/extension are also signed out
+    if (config.token && config.userId) {
+      try {
+        await fetch(`${API_BASE}/api/extension-auth/revoke`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
+          body: JSON.stringify({ userId: config.userId }),
+          signal: AbortSignal.timeout(4000),
+        })
+        clog.info('AUTH', 'cli --reset: device revoked on server', { userId: config.userId })
+      } catch (e) {
+        clog.warn('AUTH', 'cli --reset: revoke failed (offline?)', { err: e.message })
+      }
+    }
     const keep = { connectionSlots: config.connectionSlots ?? 1 }
     config = keep
     rotateCliIdentity()
     saveConfig(config)
-    log('Credentials cleared and local device identity rotated — please sign in again')
+    log('Credentials cleared and device revoked - please sign in again')
     console.log('')
   }
 
@@ -1265,6 +1482,27 @@ async function main() {
     config.connectionSlots = getConnectionSlots()
     saveConfig(config)
   }
+
+  if (privateSlotArg !== undefined) {
+    let privateSlotNumber
+    try {
+      privateSlotNumber = parsePrivateSlotFlag(privateSlotArg)
+    } catch (e) {
+      console.error(`  x ${e.message}`)
+      process.exit(1)
+    }
+    if (privateSlotNumber > getConnectionSlots()) {
+      console.error(`  x --private-slot ${privateSlotNumber} exceeds the configured slot count (${getConnectionSlots()})`)
+      process.exit(1)
+    }
+    config.privateShareDeviceId = `${getBaseDeviceId()}_slot_${privateSlotNumber - 1}`
+  } else if (!config.privateShareDeviceId) {
+    config.privateShareDeviceId = `${getBaseDeviceId()}_slot_0`
+  }
+  config.privateShares = hydratePrivateShareRows(config.privateShares)
+  config.privateShare = selectPrivateShareRow(config.privateShares, config.privateShareDeviceId) ?? config.privateShare ?? null
+  config.privateShareActive = !!(config.privateShare?.enabled && config.privateShare?.active)
+  saveConfig(config)
 
   clog.info('PROCESS', '=== CLI START ===', {
     version: VERSION,
@@ -1291,18 +1529,10 @@ async function main() {
     }
   } else {
     try {
-      clogRequest('GET', `${API_BASE}/api/extension-auth?verify=1&userId=${config.userId}`)
-      const res = await fetch(`${API_BASE}/api/extension-auth?verify=1&userId=${config.userId}`, {
-        headers: { Authorization: `Bearer ${config.token}` },
-        signal: AbortSignal.timeout(5000),
-      })
-      clogResponse('GET', `${API_BASE}/api/extension-auth?verify`, res.status)
-      if (!res.ok) {
-        await clearCliCredentials(`startup_verify_${res.status}`)
-        return main()
-      }
+      // Refresh token on startup - if device is revoked, tryRefreshCliToken clears credentials.
+      await tryRefreshCliToken()
     } catch {
-      log('Could not verify session (offline?) — continuing with saved credentials', 'warn')
+      log('Could not refresh token (offline?) - continuing with saved credentials', 'warn')
     }
     log(`Signed in as ${config.username ?? config.userId.slice(0, 8)}`)
   }
@@ -1316,7 +1546,7 @@ async function main() {
       const expiryHours = parsePrivateExpiryArg(privateExpiryArg)
       const targetEnabled = privateOnFlag ? true : privateOffFlag ? false : (privateRefreshFlag ? true : undefined)
       const updated = (privateOnFlag || privateOffFlag || privateRefreshFlag || expiryHours !== undefined)
-        ? await updatePrivateShareState({ enabled: targetEnabled, refresh: privateRefreshFlag, expiryHours })
+        ? await updatePrivateShareState({ enabled: targetEnabled, refresh: privateRefreshFlag, expiryHours, deviceId: config.privateShareDeviceId })
         : (profile?.private_share ?? config.privateShare ?? null)
       config.privateShare = updated ?? null
       config.privateShareActive = !!(updated?.enabled && updated?.active)
@@ -1345,7 +1575,7 @@ async function main() {
       })
       clogResponse('POST', `${API_BASE}/api/user/sharing`, res.status)
     } catch {
-      log('Could not save limit to server — using local value', 'warn')
+      log('Could not save limit to server â€” using local value', 'warn')
     }
   }
 
@@ -1355,16 +1585,25 @@ async function main() {
   const limitBytes = limitMb ? limitMb * 1024 * 1024 : null
   _controlLimitBytes = limitBytes
 
-  if (statusFlag) {
+    if (statusFlag) {
     const slots = getConnectionSlots()
+    const privateRows = hydratePrivateShareRows(config.privateShares)
     console.log('')
-    console.log(`  User:          ${config.username ?? '—'}`)
-    console.log(`  Country:       ${config.country ?? '—'}`)
+    console.log(`  User:          ${config.username ?? '-'}`)
+    console.log(`  Country:       ${config.country ?? '-'}`)
     console.log(`  Slots:         ${slots}`)
     console.log(`  Shared today:  ${formatBytes(config.todaySharedBytes ?? 0)}`)
-    console.log(`  Requests today:${String(config.todayRequestsHandled ?? 0).padStart(2)} `)
-    console.log(`  Daily limit:   ${limitMb ? `${limitMb}MB` : 'none'}`)
-    printPrivateShareState(config.privateShare)
+    console.log(`  Requests today:${String(config.todayRequestsHandled ?? 0).padStart(2)}`)
+    console.log(`  Daily limit:   ${limitMb ? `${limitMb} MB` : 'none'}`)
+    console.log('')
+    console.log('  Private sharing per slot:')
+    privateRows.forEach((row, i) => {
+      const label = getPrivateShareLabel(row, i)
+      const mode  = row.enabled ? (row.active ? 'ACTIVE' : 'ENABLED') : 'DISABLED'
+      const code  = row.code || '---------'
+      const exp   = row.expires_at ? new Date(row.expires_at).toLocaleString() : 'no expiry'
+      console.log(`    ${label}: ${mode}  code=${code}  expiry=${exp}`)
+    })
     console.log('')
     process.exit(0)
   }
@@ -1432,7 +1671,7 @@ async function main() {
         }
       }
     } catch {}
-    log('Desktop is sharing — CLI standing by (press Ctrl+C to stop both)')
+    log('Desktop is sharing â€” CLI standing by (press Ctrl+C to stop both)')
   } else {
     config.shareEnabled = true
     saveConfig(config)

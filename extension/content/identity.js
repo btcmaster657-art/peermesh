@@ -360,6 +360,13 @@
   })()
   Date.prototype.getTimezoneOffset = function () { return tzOffset }
 
+  // ── Navigator extras ─────────────────────────────────────────────────────────
+  defineGetter(Navigator.prototype, 'pdfViewerEnabled', () => true)
+  defineGetter(Navigator.prototype, 'cookieEnabled',    () => true)
+  defineGetter(Navigator.prototype, 'onLine',           () => true)
+  defineGetter(Navigator.prototype, 'webdriver',        () => false)
+  defineGetter(Navigator.prototype, 'javaEnabled',      () => () => false)
+
   // ── Intl / Locale ────────────────────────────────────────────────────────────
   const NativeNF = Intl.NumberFormat
   Intl.NumberFormat = function NumberFormat(locales, options) {
@@ -381,7 +388,7 @@
   defineGetter(Navigator.prototype, 'language',            () => profile.lang)
   defineGetter(Navigator.prototype, 'languages',           () => [profile.lang, profile.lang.split('-')[0]])
   defineGetter(Navigator.prototype, 'userAgent',           () => profile.userAgent)
-  defineGetter(Navigator.prototype, 'appVersion',          () => profile.userAgent.replace(/^Mozilla\//, ''))
+  defineGetter(Navigator.prototype, 'appVersion',          () => profile.userAgent.replace(/^Mozilla\/\S+\s/, ''))
   defineGetter(Navigator.prototype, 'platform',            () => profile.platform)
   defineGetter(Navigator.prototype, 'vendor',              () => 'Google Inc.')
   defineGetter(Navigator.prototype, 'hardwareConcurrency', () => profile.hardwareConcurrency)
