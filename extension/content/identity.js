@@ -398,7 +398,7 @@ function patchServiceWorker(defineGetter) {
   const registrations = new Map()
 
   function createFakeWorker(scriptURL) {
-    const worker = Object.create(serviceWorkerProto)
+    const worker = Object.create(null)
     defineGetter(worker, 'scriptURL', () => scriptURL)
     defineGetter(worker, 'state', () => 'activated')
     worker.postMessage = function postMessage() {}
@@ -424,7 +424,7 @@ function patchServiceWorker(defineGetter) {
     if (existingRegistration) return existingRegistration
 
     const activeWorker = createFakeWorker(resolvedScriptURL)
-    const registration = Object.create(registrationProto)
+    const registration = Object.create(null)
     defineGetter(registration, 'active', () => activeWorker)
     defineGetter(registration, 'installing', () => null)
     defineGetter(registration, 'waiting', () => null)
@@ -451,7 +451,7 @@ function patchServiceWorker(defineGetter) {
     return registration
   }
 
-  const serviceWorkerContainer = Object.create(containerProto)
+  const serviceWorkerContainer = Object.create(null)
   defineGetter(serviceWorkerContainer, 'controller', () => null)
   defineGetter(serviceWorkerContainer, 'ready', () => Promise.resolve(
     Array.from(registrations.values())[0] || createFakeRegistration(window.location.href, { scope: '/' })
