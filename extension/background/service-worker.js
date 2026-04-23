@@ -5,6 +5,11 @@ const EXTENSION_VERSION = chrome.runtime.getManifest().version
 const BLOCKED_HOSTS = [/\.onion$/i, /^smtp\./i, /^mail\./i, /torrent/i]
 const PRIVATE_HOSTS = [/^localhost$/i, /^127\./, /^10\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./]
 const FORBIDDEN_REQUEST_HEADERS = new Set(['host', 'content-length', 'connection', 'proxy-authorization', 'proxy-connection', 'transfer-encoding'])
+const SHARING_ACTOR = 'extension'
+
+function withSharingHeaders(headers = {}) {
+  return { ...headers, 'x-peermesh-actor': SHARING_ACTOR }
+}
 
 let _liveRelays = null
 let _liveRelaysFetchedAt = 0
@@ -348,7 +353,7 @@ function stopExtensionHeartbeat(removeDevice = true) {
     if (!deviceId) return
     fetch(`${APP_URL}/api/user/sharing`, {
       method: 'DELETE',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      headers: withSharingHeaders({ 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }),
       body: JSON.stringify({ device_id: deviceId }),
     }).catch(() => {})
   })
@@ -386,7 +391,7 @@ async function sendExtensionHeartbeat() {
   try {
     const response = await fetch(`${APP_URL}/api/user/sharing`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      headers: withSharingHeaders({ 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }),
       body: JSON.stringify({ device_id: deviceId, country: sharingCountry }),
     })
     if (response.ok) providerAuthFailureCount = 0
@@ -490,6 +495,7 @@ async function getDesktopHelperStatusHttp() {
         privateShares: Array.isArray(data.privateShares) ? data.privateShares : [],
         privateShareDeviceId: data.privateShareDeviceId ?? null,
         connectionSlots: data.connectionSlots ?? null,
+        connectionSlotsSync: data.connectionSlotsSync ?? null,
         slots: data.slots ?? null,
         stats: data.stats ?? null,
       }
@@ -514,6 +520,7 @@ async function getDesktopHelperStatusHttp() {
   const activeSource = peerRunning ? (peerState?.where ?? peerState?.source ?? primary.source ?? 'desktop') : (primary.source ?? 'desktop')
   const activeSlots = peerRunning ? (peerState?.slots ?? primary.slots ?? null) : primary.slots
   const activeConnectionSlots = peerRunning ? (peerState?.connectionSlots ?? primary.connectionSlots ?? null) : primary.connectionSlots
+  const activeConnectionSlotsSync = peerRunning ? (peerState?.connectionSlotsSync ?? primary.connectionSlotsSync ?? null) : (primary.connectionSlotsSync ?? null)
   const activePrivateShare = peerRunning ? (peerState?.privateShare ?? primary.privateShare ?? null) : (primary.privateShare ?? null)
   const activePrivateShares = peerRunning
     ? (Array.isArray(peerState?.privateShares) ? peerState.privateShares : (primary.privateShares ?? []))
@@ -536,6 +543,7 @@ async function getDesktopHelperStatusHttp() {
     privateShareDeviceId: activePrivateShareDeviceId,
     slots: activeSlots,
     connectionSlots: activeConnectionSlots,
+    connectionSlotsSync: activeConnectionSlotsSync,
     stats,
   }
 }
@@ -560,6 +568,7 @@ async function getDesktopHelperStatus() {
       privateShares: Array.isArray(response.privateShares) ? response.privateShares : [],
       privateShareDeviceId: response.privateShareDeviceId ?? null,
       connectionSlots: response.connectionSlots ?? null,
+      connectionSlotsSync: response.connectionSlotsSync ?? null,
       slots: response.slots ?? null,
       stats: response.stats ?? null,
     }
@@ -597,6 +606,7 @@ async function startDesktopSharing({ token, userId, country, trust }) {
         privateShares: Array.isArray(data.privateShares) ? data.privateShares : [],
         privateShareDeviceId: data.privateShareDeviceId ?? null,
         connectionSlots: data.connectionSlots ?? null,
+        connectionSlotsSync: data.connectionSlotsSync ?? null,
         slots: data.slots ?? null,
         stats: data.stats ?? null,
       }
@@ -630,6 +640,7 @@ async function startDesktopSharing({ token, userId, country, trust }) {
       privateShares: Array.isArray(response.privateShares) ? response.privateShares : [],
       privateShareDeviceId: response.privateShareDeviceId ?? null,
       connectionSlots: response.connectionSlots ?? null,
+      connectionSlotsSync: response.connectionSlotsSync ?? null,
       slots: response.slots ?? null,
       stats: response.stats ?? null,
     }
@@ -676,6 +687,7 @@ async function stopDesktopSharing() {
         privateShares: Array.isArray(data.privateShares) ? data.privateShares : [],
         privateShareDeviceId: data.privateShareDeviceId ?? null,
         connectionSlots: data.connectionSlots ?? null,
+        connectionSlotsSync: data.connectionSlotsSync ?? null,
         slots: data.slots ?? null,
         stats: data.stats ?? null,
       }
@@ -696,6 +708,7 @@ async function stopDesktopSharing() {
       privateShares: Array.isArray(response.privateShares) ? response.privateShares : [],
       privateShareDeviceId: response.privateShareDeviceId ?? null,
       connectionSlots: response.connectionSlots ?? null,
+      connectionSlotsSync: response.connectionSlotsSync ?? null,
       slots: response.slots ?? null,
       stats: response.stats ?? null,
     }

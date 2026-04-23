@@ -2,6 +2,7 @@ import type { PrivateShare } from '@/lib/types'
 
 const AGENT_URL = 'http://localhost:7654'
 const PEER_URL  = 'http://localhost:7656'
+type SurfaceActor = 'dashboard' | 'desktop' | 'cli' | 'extension'
 
 export type AgentHealth = {
   running: boolean
@@ -28,6 +29,10 @@ export type DesktopState = {
   source?: 'desktop' | 'cli'  // legacy compat
   baseDeviceId?: string | null
   connectionSlots?: number
+  connectionSlotsSync?: {
+    state_actor: string | null
+    state_changed_at: string | null
+  } | null
   privateShareActive?: boolean
   privateShare?: PrivateShare | null
   privateShares?: PrivateShare[]
@@ -56,6 +61,7 @@ export type DesktopState = {
     version: string | null
     baseDeviceId?: string | null
     privateShareActive?: boolean
+    connectionSlotsSync?: DesktopState['connectionSlotsSync']
     privateShare?: DesktopState['privateShare']
     privateShares?: DesktopState['privateShares']
     privateShareDeviceId?: DesktopState['privateShareDeviceId']
@@ -110,6 +116,7 @@ export async function checkDesktop(): Promise<DesktopState> {
       stats: d.stats ?? null,
       slots: d.slots ?? null,
       connectionSlots: d.connectionSlots ?? null,
+      connectionSlotsSync: d.connectionSlotsSync ?? null,
     }
     // If peer is the active sharer, promote its stats to the top-level
     if (b.running) {
@@ -124,6 +131,7 @@ export async function checkDesktop(): Promise<DesktopState> {
         stats: d.stats ?? a.stats,
         slots: d.slots ?? a.slots,
         connectionSlots: d.connectionSlots ?? a.connectionSlots,
+        connectionSlotsSync: d.connectionSlotsSync ?? a.connectionSlotsSync ?? null,
         baseDeviceId: d.baseDeviceId ?? a.baseDeviceId,
         privateShareActive: !!(d.privateShareActive ?? a.privateShareActive),
         privateShare: d.privateShare ?? a.privateShare ?? null,
@@ -140,12 +148,12 @@ export async function checkDesktop(): Promise<DesktopState> {
   return { ...a, running: isSharing, shareEnabled, peer: b }
 }
 
-async function postConnectionSlots(url: string, slots: number): Promise<boolean> {
+async function postConnectionSlots(url: string, slots: number, actor?: SurfaceActor): Promise<boolean> {
   try {
     const res = await fetch(`${url}/native/connection-slots`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ slots }),
+      body: JSON.stringify({ slots, actor }),
       signal: AbortSignal.timeout(2500),
     })
     return res.ok
@@ -154,11 +162,14 @@ async function postConnectionSlots(url: string, slots: number): Promise<boolean>
   }
 }
 
-export async function setDesktopConnectionSlots(slots: number): Promise<{ ok: boolean; state?: DesktopState; error?: string }> {
+export async function setDesktopConnectionSlots(
+  slots: number,
+  options: { actor?: SurfaceActor } = {},
+): Promise<{ ok: boolean; state?: DesktopState; error?: string }> {
   const nextSlots = Math.max(1, Math.min(32, Number.parseInt(String(slots), 10) || 1))
   const [primary, peer] = await Promise.all([
-    postConnectionSlots(AGENT_URL, nextSlots),
-    postConnectionSlots(PEER_URL, nextSlots),
+    postConnectionSlots(AGENT_URL, nextSlots, options.actor),
+    postConnectionSlots(PEER_URL, nextSlots, options.actor),
   ])
   if (!primary && !peer) {
     return { ok: false, error: 'Could not reach desktop or CLI helper' }

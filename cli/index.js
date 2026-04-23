@@ -59,6 +59,7 @@ const statusFlag = args.includes('--status')
 const serveFlag = args.includes('--serve')
 const debugFlag = args.includes('--debug')
 const docsFlag  = args.includes('--docs')
+const SHARING_ACTOR = 'cli'
 
 function _write(level, category, message, ctx) {
   const ts = new Date().toISOString()
@@ -82,6 +83,14 @@ const clogResponse = (method, url, status, ctx) => _write('INFO', 'HTTP-IN', `<-
 const clogRelay = (dir, type, ctx) => _write('DEBUG', 'RELAY', `${dir} ${type}`, ctx)
 const clogTunnel = (event, tunnelId, ctx) => _write('DEBUG', 'TUNNEL', `${event} tunnel=${tunnelId?.slice(0, 8)}`, ctx)
 const clogControl = (method, path, ctx) => _write('INFO', 'CONTROL', `${method} ${path}`, ctx)
+
+function withSharingHeaders(token, contentType = true, actor = SHARING_ACTOR) {
+  const headers = {}
+  if (contentType) headers['Content-Type'] = 'application/json'
+  if (token) headers.Authorization = `Bearer ${token}`
+  headers['x-peermesh-actor'] = actor || SHARING_ACTOR
+  return headers
+}
 
 function loadConfig() {
   try {
@@ -113,6 +122,28 @@ function formatBytes(bytes) {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)}MB`
   return `${(bytes / 1024 / 1024 / 1024).toFixed(2)}GB`
+}
+
+function getSyncTimestamp(value) {
+  if (!value) return 0
+  const parsed = new Date(value).getTime()
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+function preferLatestSync(current, candidate) {
+  if (!candidate) return current ?? null
+  if (!current) return candidate
+  const currentTs = getSyncTimestamp(current.state_changed_at)
+  const candidateTs = getSyncTimestamp(candidate.state_changed_at)
+  if (candidateTs > currentTs) return candidate
+  if (candidateTs < currentTs) return current
+  return current
+}
+
+function formatSyncStatus(sync) {
+  if (!sync?.state_changed_at) return 'n/a'
+  const actor = sync.state_actor ? String(sync.state_actor).toUpperCase() : 'SYSTEM'
+  return `${actor} @ ${new Date(sync.state_changed_at).toLocaleTimeString()}`
 }
 
 function banner() {
@@ -217,6 +248,8 @@ if (!config.connectionSlots) config.connectionSlots = 1
 config.privateShare = config.privateShare ?? null
 config.privateShareDeviceId = config.privateShareDeviceId ?? config.privateShare?.device_id ?? null
 config.privateShares = Array.isArray(config.privateShares) ? config.privateShares.filter(row => row && typeof row === 'object') : []
+config.profileSync = config.profileSync ?? null
+config.connectionSlotsSync = config.connectionSlotsSync ?? null
 
 let slotStates = []
 let limitHit = false
@@ -257,6 +290,8 @@ async function clearCliCredentials(reason, { rotateIdentity = false } = {}) {
   config.privateShare = null
   config.privateShareDeviceId = null
   config.privateShares = []
+  config.profileSync = null
+  config.connectionSlotsSync = null
   if (rotateIdentity) rotateCliIdentity()
   saveConfig(config)
   clog.warn('AUTH', 'credentials cleared', {
@@ -377,6 +412,8 @@ function createDisabledPrivateShareRow(deviceId, slotIndex = null) {
     enabled: false,
     expires_at: null,
     active: false,
+    state_actor: null,
+    state_changed_at: null,
   }
 }
 
@@ -388,7 +425,7 @@ function hydratePrivateShareRows(rows) {
       ? row.device_id.trim()
       : null
     if (!deviceId) continue
-    byDeviceId.set(deviceId, {
+    const normalizedRow = {
       ...row,
       device_id: deviceId,
       base_device_id: row.base_device_id || getBaseDeviceId(),
@@ -397,7 +434,10 @@ function hydratePrivateShareRows(rows) {
       enabled: !!row.enabled,
       expires_at: row.expires_at ?? null,
       active: !!row.active,
-    })
+      state_actor: row.state_actor ?? null,
+      state_changed_at: row.state_changed_at ?? null,
+    }
+    byDeviceId.set(deviceId, preferLatestSync(byDeviceId.get(deviceId), normalizedRow) ?? normalizedRow)
   }
 
   const hydratedRows = ensureSlotStates().map(slot => {
@@ -473,6 +513,8 @@ function getStatePayload() {
     where: 'cli',
     baseDeviceId: getBaseDeviceId(),
     connectionSlots: getConnectionSlots(),
+    connectionSlotsSync: config.connectionSlotsSync ?? null,
+    profileSync: config.profileSync ?? null,
     privateShareActive: !!(privateShare?.enabled && privateShare?.active),
     privateShare: privateShare,
     privateShares,
@@ -505,7 +547,7 @@ async function persistSharingState(isSharing) {
   try {
     const res = await fetch(`${API_BASE}/api/user/sharing`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
+      headers: withSharingHeaders(config.token),
       body: JSON.stringify({ isSharing }),
     })
     clogResponse('POST', `${API_BASE}/api/user/sharing`, res.status)
@@ -528,7 +570,7 @@ async function flushPendingBytes() {
       try {
         const res = await fetch(`${API_BASE}/api/user/sharing`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
+          headers: withSharingHeaders(config.token),
           body: JSON.stringify({ bytes: toFlush, deviceId }),
         })
         clogResponse('POST', `${API_BASE}/api/user/sharing`, res.status, { deviceId })
@@ -565,22 +607,38 @@ function applySharingProfileData(data, { source = 'remote' } = {}) {
   const previousPrivateShareEnabled = !!config.privateShare?.enabled
   const previousPrivateShareActive = !!config.privateShareActive
   const previousPrivateShareCode = config.privateShare?.code ?? null
+  const previousConnectionSlots = getConnectionSlots()
+  const previousProfileSync = config.profileSync ?? null
+  const previousConnectionSlotsSync = config.connectionSlotsSync ?? null
 
   const nextPrivateShare = data.private_share ?? null
-  const nextPrivateShares = hydratePrivateShareRows(data.private_shares ?? (nextPrivateShare ? [nextPrivateShare] : []))
+  const nextPrivateShares = hydratePrivateShareRows([
+    ...config.privateShares,
+    ...(data.private_shares ?? (nextPrivateShare ? [nextPrivateShare] : [])),
+  ])
   const selectedPrivateShare = selectPrivateShareRow(nextPrivateShares, data.private_share?.device_id ?? config.privateShareDeviceId ?? nextPrivateShare?.device_id ?? null)
   const nextPrivateShareEnabled = !!selectedPrivateShare?.enabled
   const nextPrivateShareActive = !!(selectedPrivateShare?.enabled && selectedPrivateShare?.active)
   const nextPrivateShareCode = selectedPrivateShare?.code ?? null
+  const resolvedProfileSync = preferLatestSync(previousProfileSync, data.profile_sync ?? null)
+  const shouldApplyProfileState = !previousProfileSync || resolvedProfileSync !== previousProfileSync || !data.profile_sync
+  const resolvedConnectionSlotsSync = preferLatestSync(previousConnectionSlotsSync, data.connection_slots_sync ?? null)
+  const shouldApplyConnectionSlots = !previousConnectionSlotsSync || resolvedConnectionSlotsSync !== previousConnectionSlotsSync || !data.connection_slots_sync
   if (data.daily_limit_bytes != null) _controlLimitBytes = data.daily_limit_bytes
   else if (data.daily_share_limit_mb != null) _controlLimitBytes = data.daily_share_limit_mb * 1024 * 1024
 
-  config.todaySharedBytes = data.total_bytes_today ?? 0
+  if (shouldApplyProfileState) config.todaySharedBytes = data.total_bytes_today ?? 0
+  config.profileSync = resolvedProfileSync
+  config.connectionSlotsSync = resolvedConnectionSlotsSync
   config.privateShares = nextPrivateShares
   config.privateShare = selectedPrivateShare ?? nextPrivateShare
   config.privateShareDeviceId = config.privateShare?.device_id ?? config.privateShareDeviceId ?? null
   config.privateShareActive = nextPrivateShareActive
   if (data.has_accepted_provider_terms != null) config.hasAcceptedProviderTerms = !!data.has_accepted_provider_terms
+  if (shouldApplyConnectionSlots && Number.isInteger(data.connection_slots)) {
+    config.connectionSlots = clampSlots(data.connection_slots)
+    ensureSlotStates()
+  }
   saveConfig(config)
 
   const privacyToggleChanged = previousPrivateShareEnabled !== nextPrivateShareEnabled
@@ -606,6 +664,20 @@ function applySharingProfileData(data, { source = 'remote' } = {}) {
       active: nextPrivateShareActive,
       codeChanged: previousPrivateShareCode !== nextPrivateShareCode,
     })
+  }
+
+  if (shouldApplyConnectionSlots && getConnectionSlots() !== previousConnectionSlots) {
+    clog.info('SLOTS', 'connection slot count synced from database', {
+      source,
+      from: previousConnectionSlots,
+      to: getConnectionSlots(),
+    })
+    if (config.shareEnabled && isRunning()) {
+      stopRelay()
+      config.shareEnabled = true
+      saveConfig(config)
+      connectRelay(_controlLimitBytes)
+    }
   }
 
   return data
@@ -709,7 +781,7 @@ async function updatePrivateShareState({ enabled, refresh = false, expiryHours, 
 
   const res = await fetch(`${API_BASE}/api/user/sharing`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
+    headers: withSharingHeaders(config.token),
     body: JSON.stringify({
       privateSharing: {
         deviceId: targetDeviceId,
@@ -729,7 +801,10 @@ async function updatePrivateShareState({ enabled, refresh = false, expiryHours, 
   const data = await res.json().catch(() => ({}))
   if (!res.ok || data.error) throw new Error(data.error || 'Could not update private sharing')
 
-  config.privateShares = hydratePrivateShareRows(data.private_shares ?? (data.private_share ? [data.private_share] : []))
+  config.privateShares = hydratePrivateShareRows([
+    ...config.privateShares,
+    ...(data.private_shares ?? (data.private_share ? [data.private_share] : [])),
+  ])
   config.privateShare = selectPrivateShareRow(config.privateShares, targetDeviceId) ?? data.private_share ?? null
   config.privateShareDeviceId = config.privateShare?.device_id ?? targetDeviceId
   config.privateShareActive = !!(config.privateShare?.enabled && config.privateShare?.active)
@@ -761,13 +836,14 @@ function printPrivateShareState(privateShare, rows = config.privateShares) {
   console.log(`  Private sharing: ${getPrivateShareLabel(privateShare)} - ${mode}`)
   console.log(`  Private code:    ${code}`)
   console.log(`  Private expiry:  ${expires}`)
+  console.log(`  Private sync:    ${formatSyncStatus(privateShare)}`)
   const privateRows = hydratePrivateShareRows(rows)
   if (privateRows.length > 1) {
     console.log('  Slots:')
     privateRows.forEach((row, index) => {
       const rowMode = row.enabled ? (row.active ? 'ACTIVE' : 'ENABLED') : 'DISABLED'
       const rowCode = row.code || '---------'
-      console.log(`    - ${getPrivateShareLabel(row, index)}: ${rowMode} (${rowCode})`)
+      console.log(`    - ${getPrivateShareLabel(row, index)}: ${rowMode} (${rowCode}) sync=${formatSyncStatus(row)}`)
     })
   }
 }
@@ -812,7 +888,7 @@ function sendHeartbeat(slot) {
   clogRequest('PUT', `${API_BASE}/api/user/sharing`, { device_id: slot.deviceId })
   fetch(`${API_BASE}/api/user/sharing`, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
+    headers: withSharingHeaders(config.token),
     body: JSON.stringify({
       device_id: slot.deviceId,
       user_id: config.userId,
@@ -840,7 +916,7 @@ function stopHeartbeat(slot) {
   clogRequest('DELETE', `${API_BASE}/api/user/sharing`, { device_id: slot.deviceId })
   fetch(`${API_BASE}/api/user/sharing`, {
     method: 'DELETE',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
+    headers: withSharingHeaders(config.token),
     body: JSON.stringify({ device_id: slot.deviceId }),
   })
     .then(res => clogResponse('DELETE', `${API_BASE}/api/user/sharing`, res.status))
@@ -1099,7 +1175,7 @@ function stopRelay() {
   if (config.token) persistSharingState(false)
 }
 
-function applyConnectionSlots(nextSlots, { syncPeer = true } = {}) {
+function applyConnectionSlots(nextSlots, { syncPeer = true, actor = SHARING_ACTOR } = {}) {
   const normalizedSlots = clampSlots(nextSlots)
   const shouldResume = !!config.shareEnabled
 
@@ -1115,7 +1191,7 @@ function applyConnectionSlots(nextSlots, { syncPeer = true } = {}) {
   if (config.token && config.userId) {
     fetch(`${API_BASE}/api/user/sharing`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
+      headers: withSharingHeaders(config.token, true, actor),
       body: JSON.stringify({ connectionSlots: normalizedSlots, baseDeviceId: getBaseDeviceId() }),
       signal: AbortSignal.timeout(3000),
     }).catch(() => {})
@@ -1133,7 +1209,7 @@ function applyConnectionSlots(nextSlots, { syncPeer = true } = {}) {
     fetch(`http://127.0.0.1:${peerPort}/native/connection-slots`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ slots: normalizedSlots, _fromPeer: true }),
+      body: JSON.stringify({ slots: normalizedSlots, _fromPeer: true, actor }),
       signal: AbortSignal.timeout(2000),
     }).catch(() => {})
   }
@@ -1247,7 +1323,7 @@ function buildHandler(port) {
           // _fromPeer=true means desktop sent this; don't echo back (breaks ping-pong loop)
           const fromPeer = !!data._fromPeer
           clog.info('SLOTS', `/native/connection-slots`, { slots: data.slots, fromPeer, peerPort })
-          const result = applyConnectionSlots(data.slots, { syncPeer: !fromPeer })
+          const result = applyConnectionSlots(data.slots, { syncPeer: !fromPeer, actor: data.actor || SHARING_ACTOR })
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify(result.state))
         } catch (e) {
@@ -1615,10 +1691,14 @@ async function main() {
       clogRequest('POST', `${API_BASE}/api/user/sharing`, { dailyLimitMb: newLimit })
       const res = await fetch(`${API_BASE}/api/user/sharing`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
+        headers: withSharingHeaders(config.token),
         body: JSON.stringify({ dailyLimitMb: newLimit }),
       })
       clogResponse('POST', `${API_BASE}/api/user/sharing`, res.status)
+      const data = await res.json().catch(() => ({}))
+      config.profileSync = preferLatestSync(config.profileSync, data.profile_sync ?? null)
+      if (data.daily_share_limit_mb !== undefined) config.dailyShareLimitMb = data.daily_share_limit_mb ?? null
+      saveConfig(config)
     } catch {
       log('Could not save limit to server — using local value', 'warn')
     }
@@ -1645,6 +1725,8 @@ async function main() {
     console.log(`  Shared today:  ${formatBytes(config.todaySharedBytes ?? 0)}`)
     console.log(`  Requests today:${String(config.todayRequestsHandled ?? 0).padStart(2)}`)
     console.log(`  Daily limit:   ${limitMb ? `${limitMb} MB` : 'none'}`)
+    console.log(`  Profile sync:  ${formatSyncStatus(liveState?.profileSync ?? config.profileSync ?? null)}`)
+    console.log(`  Slot sync:     ${formatSyncStatus(liveState?.connectionSlotsSync ?? config.connectionSlotsSync ?? null)}`)
     console.log('')
     console.log('  Slot state:')
     for (let index = 0; index < slots; index += 1) {
@@ -1658,7 +1740,7 @@ async function main() {
       const exp = share.expires_at ? new Date(share.expires_at).toLocaleString() : 'no expiry'
       const requests = slotStatus?.requestsHandled ?? 0
       const served = slotStatus?.bytesServed ?? 0
-      console.log(`    ${label}: ${relayState}  req=${requests}  served=${formatBytes(served)}  mode=${visibility}  code=${code}  expiry=${exp}`)
+      console.log(`    ${label}: ${relayState}  req=${requests}  served=${formatBytes(served)}  mode=${visibility}  code=${code}  expiry=${exp}  sync=${formatSyncStatus(share)}`)
     }
     console.log('')
     process.exit(0)
@@ -1693,7 +1775,7 @@ async function main() {
       try {
         await fetch(`${API_BASE}/api/user/sharing`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
+          headers: withSharingHeaders(config.token),
           body: JSON.stringify({ acceptProviderTerms: true }),
         })
       } catch {}

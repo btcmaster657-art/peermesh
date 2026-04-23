@@ -119,10 +119,13 @@ function getPrivateShareExpiryPreset(expiresAt) {
 }
 
 function getPrivateShareRows(state = window.__lastPeerMeshState || null) {
-  if (Array.isArray(privateShares) && privateShares.length > 0) return privateShares
-  if (Array.isArray(state?.privateShares) && state.privateShares.length > 0) return state.privateShares
-  if (privateShare) return [privateShare]
-  return []
+  const merged = mergePrivateShareRows(
+    Array.isArray(privateShares) ? privateShares : [],
+    Array.isArray(state?.privateShares) ? state.privateShares : [],
+    privateShare ? [privateShare] : [],
+    state?.privateShare ? [state.privateShare] : [],
+  )
+  return merged
 }
 
 function getPrivateShareLabel(row, fallbackIndex = 0) {
@@ -132,11 +135,54 @@ function getPrivateShareLabel(row, fallbackIndex = 0) {
   return `Slot ${fallbackIndex + 1}`
 }
 
+function getSyncTimestamp(value) {
+  if (!value) return 0
+  const parsed = new Date(value).getTime()
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+function preferLatestSync(current, candidate) {
+  if (!candidate) return current ?? null
+  if (!current) return candidate
+  const currentTs = getSyncTimestamp(current.state_changed_at)
+  const candidateTs = getSyncTimestamp(candidate.state_changed_at)
+  if (candidateTs > currentTs) return candidate
+  if (candidateTs < currentTs) return current
+  return current
+}
+
+function formatSyncLabel(sync) {
+  if (!sync?.state_changed_at) return null
+  const actor = sync.state_actor ? String(sync.state_actor).toUpperCase() : 'SYSTEM'
+  return `Synced from ${actor} at ${new Date(sync.state_changed_at).toLocaleTimeString()}`
+}
+
+function sortPrivateShares(rows = []) {
+  return [...rows].sort((a, b) => {
+    if ((a.base_device_id || '') !== (b.base_device_id || '')) return (a.base_device_id || '').localeCompare(b.base_device_id || '')
+    const aSlot = Number.isInteger(a.slot_index) ? a.slot_index : -1
+    const bSlot = Number.isInteger(b.slot_index) ? b.slot_index : -1
+    if (aSlot !== bSlot) return aSlot - bSlot
+    return (a.device_id || '').localeCompare(b.device_id || '')
+  })
+}
+
+function mergePrivateShareRows(...sources) {
+  const merged = new Map()
+  for (const source of sources) {
+    for (const row of source || []) {
+      if (!row?.device_id) continue
+      merged.set(row.device_id, preferLatestSync(merged.get(row.device_id), row) ?? row)
+    }
+  }
+  return sortPrivateShares([...merged.values()])
+}
+
 function mapSlotLimits(rows = []) {
   const mapped = {}
   for (const row of rows) {
     if (!row?.device_id) continue
-    mapped[row.device_id] = row
+    mapped[row.device_id] = preferLatestSync(mapped[row.device_id], row) ?? row
   }
   return mapped
 }
@@ -231,6 +277,7 @@ function renderPrivateShare() {
   })
 
   if (slotLimitStatusEl) {
+    const slotLimitSyncLabel = formatSyncLabel(privateShareDeviceId ? slotLimits[privateShareDeviceId] : null)
     if (!signedIn) {
       slotLimitStatusEl.textContent = 'Sign in to manage per-slot limits.'
     } else if (!privateShareDeviceId) {
@@ -238,9 +285,10 @@ function renderPrivateShare() {
     } else if (slotDailyLimitSaving) {
       slotLimitStatusEl.textContent = 'Updating slot limit...'
     } else {
-      slotLimitStatusEl.textContent = currentSlotLimit != null
+      const baseStatus = currentSlotLimit != null
         ? `${getPrivateShareLabel(privateShare)} capped at ${currentSlotLimit} MB/day.`
         : `No per-slot cap on ${getPrivateShareLabel(privateShare)}.`
+      slotLimitStatusEl.textContent = slotLimitSyncLabel ? `${baseStatus} ${slotLimitSyncLabel}` : baseStatus
     }
   }
 
@@ -260,7 +308,8 @@ function renderPrivateShare() {
   const expires = privateShare?.expires_at
     ? ` Expires ${new Date(privateShare.expires_at).toLocaleString()}.`
     : ' No expiry.'
-  statusEl.textContent = `${getPrivateShareLabel(privateShare)} is ${mode}.${expires}`
+  const syncLabel = formatSyncLabel(privateShare)
+  statusEl.textContent = `${getPrivateShareLabel(privateShare)} is ${mode}.${expires}${syncLabel ? ` ${syncLabel}` : ''}`
 }
 
 async function loadPrivateShare(force = false) {
@@ -269,9 +318,9 @@ async function loadPrivateShare(force = false) {
   lastPrivateShareLoadAt = now
   const result = await invoke('getPrivateShare')
   if (!result?.success) return
-  const nextShares = Array.isArray(result.privateShares) ? result.privateShares : privateShares
+  const nextShares = mergePrivateShareRows(privateShares, Array.isArray(result.privateShares) ? result.privateShares : [])
   privateShares = nextShares
-  slotLimits = mapSlotLimits(result.slotLimits ?? Object.values(slotLimits))
+  slotLimits = mapSlotLimits([...(result.slotLimits ?? []), ...Object.values(slotLimits)])
   const preferredDeviceId = privateShareSelectionLocked
     ? privateShareDeviceId
     : (result.privateShareDeviceId ?? privateShareDeviceId)
@@ -281,7 +330,10 @@ async function loadPrivateShare(force = false) {
     privateShareDeviceId = result.privateShare?.device_id ?? nextShares[0]?.device_id ?? null
     privateShareSelectionLocked = false
   }
-  privateShare = nextShares.find(row => row.device_id === privateShareDeviceId) ?? result.privateShare ?? nextShares[0] ?? null
+  privateShare = preferLatestSync(
+    nextShares.find(row => row.device_id === privateShareDeviceId) ?? nextShares[0] ?? null,
+    result.privateShare ?? null,
+  )
   privateShareExpiry = result.expiryPreset ?? getPrivateShareExpiryPreset(privateShare?.expires_at ?? null)
   syncSlotDailyLimitInput()
   renderPrivateShare()
@@ -299,14 +351,17 @@ async function savePrivateShare(payload) {
       deviceId: payload?.deviceId ?? privateShareDeviceId ?? privateShare?.device_id ?? privateShares[0]?.device_id ?? null,
     })
     if (!result?.success) throw new Error(result?.error || 'Could not update private sharing')
-    privateShares = Array.isArray(result.privateShares) ? result.privateShares : privateShares
-    slotLimits = mapSlotLimits(result.slotLimits ?? Object.values(slotLimits))
+    privateShares = mergePrivateShareRows(privateShares, Array.isArray(result.privateShares) ? result.privateShares : [])
+    slotLimits = mapSlotLimits([...(result.slotLimits ?? []), ...Object.values(slotLimits)])
     const nextDeviceId = result.privateShareDeviceId ?? privateShareDeviceId ?? result.privateShare?.device_id ?? null
     if (nextDeviceId) {
       privateShareDeviceId = nextDeviceId
       privateShareSelectionLocked = true
     }
-    privateShare = privateShares.find(row => row.device_id === privateShareDeviceId) ?? result.privateShare ?? privateShare
+    privateShare = preferLatestSync(
+      privateShares.find(row => row.device_id === privateShareDeviceId) ?? privateShare,
+      result.privateShare ?? null,
+    )
     privateShareExpiry = result.expiryPreset ?? getPrivateShareExpiryPreset(privateShare?.expires_at ?? null)
     syncSlotDailyLimitInput()
     await pollState()
@@ -348,7 +403,10 @@ function renderSlots(configured, slots) {
     dots.appendChild(dot)
   }
 
-  summary.textContent = slotUpdating ? 'Applying slot change...' : `${active} / ${configured} slots active`
+  const slotSyncLabel = formatSyncLabel(window.__lastPeerMeshState?.connectionSlotsSync ?? null)
+  summary.textContent = slotUpdating
+    ? 'Applying slot change...'
+    : `${active} / ${configured} slots active${slotSyncLabel ? ` - ${slotSyncLabel}` : ''}`
   const warningText = getSlotWarning(configured)
   warning.textContent = warningText ?? ''
   warning.style.display = warningText ? 'block' : 'none'
@@ -404,7 +462,8 @@ function renderDailyLimit(state) {
     status.textContent = 'Updating daily limit...'
     return
   }
-  status.textContent = `${formatDailyLimit(currentLimit)} Minimum custom limit: 1024 MB.`
+  const syncLabel = formatSyncLabel(state?.profileSync ?? null)
+  status.textContent = `${formatDailyLimit(currentLimit)} Minimum custom limit: 1024 MB.${syncLabel ? ` ${syncLabel}` : ''}`
 }
 
 function renderStartupPreferences(state) {
@@ -741,7 +800,7 @@ async function doToggleSharing(isSharing) {
 
 function updateUI(state) {
   window.__lastPeerMeshState = state
-  privateShares = Array.isArray(state?.privateShares) ? state.privateShares : privateShares
+  privateShares = mergePrivateShareRows(privateShares, Array.isArray(state?.privateShares) ? state.privateShares : [])
   if (!privateShareSelectionLocked && state?.privateShareDeviceId) privateShareDeviceId = state.privateShareDeviceId
   if (!privateShareSelectionLocked && state?.privateShare?.device_id) privateShareDeviceId = state.privateShare.device_id
   const running = !!state?.running
@@ -783,7 +842,7 @@ function updateUI(state) {
     : (desktopSlots ?? { configured: configuredSlots, active: 0, statuses: [] })
 
   if (state.privateShare !== undefined) {
-    privateShare = state.privateShare ?? null
+    privateShare = preferLatestSync(privateShare, state.privateShare ?? null)
     privateShareExpiry = getPrivateShareExpiryPreset(privateShare?.expires_at ?? null)
   }
 

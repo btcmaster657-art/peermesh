@@ -1,3 +1,8 @@
+export type SyncState = {
+  state_actor: string | null
+  state_changed_at: string | null
+}
+
 export type Profile = {
   id: string
   username: string | null
@@ -20,7 +25,7 @@ export type Profile = {
   daily_share_limit_mb: number | null
   created_at: string
   updated_at: string
-}
+} & SyncState
 
 export type PrivateShare = {
   device_id: string
@@ -30,7 +35,7 @@ export type PrivateShare = {
   enabled: boolean
   expires_at: string | null
   active: boolean
-}
+} & SyncState
 
 export type Session = {
   id: string

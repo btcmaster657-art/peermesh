@@ -10,10 +10,41 @@ import {
 } from '@/lib/private-sharing'
 
 const RELAY_SECRET = process.env.RELAY_SECRET ?? ''
+const SURFACE_ACTORS = new Set(['dashboard', 'desktop', 'cli', 'extension'])
 
 function isRelayRequest(req: Request): boolean {
   const relaySecret = req.headers.get('x-relay-secret') ?? ''
   return !!RELAY_SECRET && relaySecret === RELAY_SECRET
+}
+
+function normalizeStateActor(value: string | null | undefined): string | null {
+  const normalized = value?.trim().toLowerCase() ?? ''
+  return SURFACE_ACTORS.has(normalized) ? normalized : null
+}
+
+function getRequestStateActor(req: Request, fallback = 'system'): string {
+  if (isRelayRequest(req)) return 'relay'
+
+  const explicit = normalizeStateActor(req.headers.get('x-peermesh-actor'))
+  if (explicit) return explicit
+
+  const origin = req.headers.get('origin') ?? ''
+  if (origin.startsWith('chrome-extension://')) return 'extension'
+
+  return fallback
+}
+
+function getStateChangedAt(value: string | null | undefined): number {
+  if (!value) return 0
+  const parsed = new Date(value).getTime()
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+function serializeSyncState(row: { state_actor?: string | null; state_changed_at?: string | null } | null) {
+  return {
+    state_actor: row?.state_actor ?? null,
+    state_changed_at: row?.state_changed_at ?? null,
+  }
 }
 
 function getTodaySharedBytes(profile: {
@@ -62,6 +93,8 @@ type PrivateShareRow = {
   share_code: string
   enabled: boolean
   expires_at: string | null
+  state_actor: string | null
+  state_changed_at: string | null
 }
 
 type SlotLimitRow = {
@@ -71,6 +104,32 @@ type SlotLimitRow = {
   daily_limit_mb: number | null
   bytes_today: number | null
   bytes_today_date: string | null
+  state_actor: string | null
+  state_changed_at: string | null
+}
+
+type ProviderDeviceStateRow = {
+  device_id: string
+  connection_slots: number | null
+  last_heartbeat: string | null
+  state_actor: string | null
+  state_changed_at: string | null
+}
+
+type ProfileStateRow = {
+  total_bytes_shared: number | null
+  total_bytes_used: number | null
+  bandwidth_used_month: number | null
+  bandwidth_limit: number | null
+  trust_score: number | null
+  is_sharing: boolean | null
+  is_premium: boolean | null
+  daily_share_limit_mb: number | null
+  has_accepted_provider_terms: boolean | null
+  share_bytes_today: number | null
+  share_bytes_today_date: string | null
+  state_actor: string | null
+  state_changed_at: string | null
 }
 
 function toBaseDeviceId(deviceKey: string): string {
@@ -131,6 +190,7 @@ function serializePrivateShare(row: PrivateShareRow | null) {
     enabled: row.enabled,
     expires_at: row.expires_at,
     active: isPrivateShareActive(row.enabled, row.expires_at),
+    ...serializeSyncState(row),
   }
 }
 
@@ -145,6 +205,7 @@ function serializeSlotLimit(row: SlotLimitRow | null) {
     daily_limit_mb: row.daily_limit_mb ?? null,
     bytes_today: status.slot_total_bytes_today,
     can_accept_sessions: status.slot_can_accept_sessions,
+    ...serializeSyncState(row),
   }
 }
 
@@ -178,7 +239,7 @@ function isMatchingSlotKey(deviceKey: string, baseDeviceId: string): boolean {
 async function loadSlotLimitDevices(userId: string, baseDeviceId: string): Promise<SlotLimitRow[]> {
   const { data, error } = await adminClient
     .from('provider_slot_limits')
-    .select('device_id, base_device_id, slot_index, daily_limit_mb, bytes_today, bytes_today_date')
+    .select('device_id, base_device_id, slot_index, daily_limit_mb, bytes_today, bytes_today_date, state_actor, state_changed_at')
     .eq('user_id', userId)
 
   if (error) throw error
@@ -188,6 +249,24 @@ async function loadSlotLimitDevices(userId: string, baseDeviceId: string): Promi
     const aSlot = Number.isInteger(a.slot_index) ? (a.slot_index as number) : getSlotIndex(a.device_id, baseDeviceId) ?? -1
     const bSlot = Number.isInteger(b.slot_index) ? (b.slot_index as number) : getSlotIndex(b.device_id, baseDeviceId) ?? -1
     if (aSlot !== bSlot) return aSlot - bSlot
+    return a.device_id.localeCompare(b.device_id)
+  })
+}
+
+async function loadProviderDeviceStates(userId: string, baseDeviceId: string): Promise<ProviderDeviceStateRow[]> {
+  const { data, error } = await adminClient
+    .from('provider_devices')
+    .select('device_id, connection_slots, last_heartbeat, state_actor, state_changed_at')
+    .eq('user_id', userId)
+
+  if (error) throw error
+
+  const filtered = (data ?? []).filter((row) => isMatchingSlotKey(row.device_id, baseDeviceId))
+  return filtered.sort((a, b) => {
+    const changedDiff = getStateChangedAt(b.state_changed_at) - getStateChangedAt(a.state_changed_at)
+    if (changedDiff !== 0) return changedDiff
+    const heartbeatDiff = getStateChangedAt(b.last_heartbeat) - getStateChangedAt(a.last_heartbeat)
+    if (heartbeatDiff !== 0) return heartbeatDiff
     return a.device_id.localeCompare(b.device_id)
   })
 }
@@ -247,11 +326,28 @@ async function cleanupStaleSlotLimits(
 async function loadPrivateShareDevices(userId: string, baseDeviceId: string): Promise<PrivateShareRow[]> {
   const { data, error } = await adminClient
     .from('private_share_devices')
-    .select('base_device_id, share_code, enabled, expires_at')
+    .select('base_device_id, share_code, enabled, expires_at, state_actor, state_changed_at')
     .eq('user_id', userId)
 
   if (error) throw error
   return sortPrivateShareRows((data ?? []).filter(row => isMatchingPrivateShareKey(row.base_device_id, baseDeviceId)))
+}
+
+function selectConnectionSlotState(
+  rows: ProviderDeviceStateRow[],
+  deviceId?: string | null,
+  baseDeviceId?: string | null,
+): ProviderDeviceStateRow | null {
+  if (rows.length === 0) return null
+  if (deviceId) {
+    const exact = rows.find((row) => row.device_id === deviceId)
+    if (exact) return exact
+  }
+  if (baseDeviceId) {
+    const slotZero = rows.find((row) => getSlotIndex(row.device_id, baseDeviceId) === 0)
+    if (slotZero) return slotZero
+  }
+  return rows[0] ?? null
 }
 
 async function issuePrivateShareCode(userId: string): Promise<string> {
@@ -341,7 +437,7 @@ export async function GET(req: Request) {
   if (isRelayRequest(req) && relayProviderUserId) {
     const { data, error } = await adminClient
       .from('profiles')
-      .select('daily_share_limit_mb, share_bytes_today, share_bytes_today_date')
+      .select('daily_share_limit_mb, share_bytes_today, share_bytes_today_date, state_actor, state_changed_at')
       .eq('id', relayProviderUserId)
       .single()
 
@@ -352,6 +448,8 @@ export async function GET(req: Request) {
     let private_shares = null
     let slot_limit = null
     let slot_limits = null
+    let connection_slots = null
+    let connection_slots_sync = null
     const resolvedBaseDeviceId = baseDeviceId || (deviceId ? toBaseDeviceId(deviceId) : null)
     if (deviceId || resolvedBaseDeviceId) {
       const rows = resolvedBaseDeviceId
@@ -360,19 +458,37 @@ export async function GET(req: Request) {
       const slotRows = resolvedBaseDeviceId
         ? await loadSlotLimitDevices(relayProviderUserId, resolvedBaseDeviceId)
         : []
+      const providerRows = resolvedBaseDeviceId
+        ? await loadProviderDeviceStates(relayProviderUserId, resolvedBaseDeviceId)
+        : []
+      const selectedProviderRow = selectConnectionSlotState(providerRows, deviceId, resolvedBaseDeviceId)
       private_share = serializePrivateShare(selectPrivateShareRow(rows, deviceId, resolvedBaseDeviceId))
       private_shares = rows.map(serializePrivateShare)
       slot_limit = serializeSlotLimit(selectSlotLimitRow(slotRows, deviceId, resolvedBaseDeviceId))
       slot_limits = slotRows.map(serializeSlotLimit)
+      connection_slots = selectedProviderRow?.connection_slots ?? null
+      connection_slots_sync = serializeSyncState(selectedProviderRow)
       return NextResponse.json({
         ...getProviderShareStatus(data, selectSlotLimitRow(slotRows, deviceId, resolvedBaseDeviceId)),
+        profile_sync: serializeSyncState(data),
         private_share,
         private_shares,
         slot_limit,
         slot_limits,
+        connection_slots,
+        connection_slots_sync,
       })
     }
-    return NextResponse.json({ ...getProviderShareStatus(data), private_share, private_shares, slot_limit, slot_limits })
+    return NextResponse.json({
+      ...getProviderShareStatus(data),
+      profile_sync: serializeSyncState(data),
+      private_share,
+      private_shares,
+      slot_limit,
+      slot_limits,
+      connection_slots,
+      connection_slots_sync,
+    })
   }
 
   const userId = await resolveUserId(req)
@@ -380,9 +496,9 @@ export async function GET(req: Request) {
 
   const { data, error } = await adminClient
     .from('profiles')
-    .select('total_bytes_shared, total_bytes_used, bandwidth_used_month, bandwidth_limit, trust_score, is_sharing, is_premium, daily_share_limit_mb, has_accepted_provider_terms, share_bytes_today, share_bytes_today_date')
+    .select('total_bytes_shared, total_bytes_used, bandwidth_used_month, bandwidth_limit, trust_score, is_sharing, is_premium, daily_share_limit_mb, has_accepted_provider_terms, share_bytes_today, share_bytes_today_date, state_actor, state_changed_at')
     .eq('id', userId)
-    .single()
+    .single<ProfileStateRow>()
 
   if (error || !data) return NextResponse.json({ error: 'Not found' }, { status: 404 })
   const resolvedBaseDeviceId = baseDeviceId || (deviceId ? toBaseDeviceId(deviceId) : null)
@@ -392,11 +508,15 @@ export async function GET(req: Request) {
   const slotLimitRows = resolvedBaseDeviceId
     ? await loadSlotLimitDevices(userId, resolvedBaseDeviceId)
     : []
+  const providerRows = resolvedBaseDeviceId
+    ? await loadProviderDeviceStates(userId, resolvedBaseDeviceId)
+    : []
   const privateShare = serializePrivateShare(selectPrivateShareRow(privateShareRows, deviceId, resolvedBaseDeviceId))
   const privateShares = privateShareRows.map(serializePrivateShare)
   const selectedSlotLimit = selectSlotLimitRow(slotLimitRows, deviceId, resolvedBaseDeviceId)
   const slotLimit = serializeSlotLimit(selectedSlotLimit)
   const slotLimits = slotLimitRows.map(serializeSlotLimit)
+  const selectedProviderRow = selectConnectionSlotState(providerRows, deviceId, resolvedBaseDeviceId)
   return NextResponse.json({
     total_bytes_shared: data.total_bytes_shared,
     total_bytes_used: data.total_bytes_used,
@@ -407,10 +527,13 @@ export async function GET(req: Request) {
     is_premium: data.is_premium,
     daily_share_limit_mb: data.daily_share_limit_mb,
     has_accepted_provider_terms: data.has_accepted_provider_terms,
+    profile_sync: serializeSyncState(data),
     private_share: privateShare,
     private_shares: privateShares,
     slot_limit: slotLimit,
     slot_limits: slotLimits,
+    connection_slots: selectedProviderRow?.connection_slots ?? null,
+    connection_slots_sync: serializeSyncState(selectedProviderRow),
     ...getProviderShareStatus(data, selectedSlotLimit),
   })
 }
@@ -418,6 +541,7 @@ export async function GET(req: Request) {
 // ── POST: set is_sharing flag OR increment bytes (desktop provider) ───────────
 export async function POST(req: Request) {
   const body = await req.json().catch(() => ({}))
+  const stateActor = getRequestStateActor(req)
 
   // Desktop bandwidth report: { bytes: number }
   if (typeof body.bytes === 'number' && body.bytes > 0) {
@@ -520,6 +644,7 @@ export async function POST(req: Request) {
       share_code: code,
       enabled,
       expires_at: expiresAt,
+      state_actor: stateActor,
       updated_at: new Date().toISOString(),
     }
 
@@ -534,7 +659,7 @@ export async function POST(req: Request) {
           .upsert(payload, { onConflict: 'user_id,base_device_id' })
 
     const { data, error } = await writeQuery
-      .select('base_device_id, share_code, enabled, expires_at')
+      .select('base_device_id, share_code, enabled, expires_at, state_actor, state_changed_at')
       .single()
 
     if (error || !data) {
@@ -566,8 +691,22 @@ export async function POST(req: Request) {
     if (limitMb === undefined) {
       return NextResponse.json({ error: 'dailyLimitMb must be null or at least 1024 MB (1 GB)' }, { status: 400 })
     }
-    await adminClient.from('profiles').update({ daily_share_limit_mb: limitMb ?? null }).eq('id', userId)
-    return NextResponse.json({ ok: true, daily_share_limit_mb: limitMb ?? null })
+    const { data: updatedProfile, error: updateError } = await adminClient
+      .from('profiles')
+      .update({ daily_share_limit_mb: limitMb ?? null, state_actor: stateActor })
+      .eq('id', userId)
+      .select('daily_share_limit_mb, state_actor, state_changed_at')
+      .single()
+
+    if (updateError || !updatedProfile) {
+      return NextResponse.json({ error: updateError?.message ?? 'Could not update daily limit' }, { status: 500 })
+    }
+
+    return NextResponse.json({
+      ok: true,
+      daily_share_limit_mb: updatedProfile.daily_share_limit_mb ?? null,
+      profile_sync: serializeSyncState(updatedProfile),
+    })
   }
 
   // Setting per-slot daily share limit
@@ -604,6 +743,7 @@ export async function POST(req: Request) {
           daily_limit_mb: limitMb ?? null,
           base_device_id: baseDeviceId,
           slot_index: slotIndex,
+          state_actor: stateActor,
           updated_at: nowIso,
         })
         .eq('id', existing.id)
@@ -618,6 +758,7 @@ export async function POST(req: Request) {
           base_device_id: baseDeviceId,
           slot_index: slotIndex,
           daily_limit_mb: limitMb ?? null,
+          state_actor: stateActor,
           bytes_today: 0,
           bytes_today_date: new Date().toISOString().slice(0, 10),
           updated_at: nowIso,
@@ -641,13 +782,21 @@ export async function POST(req: Request) {
       const normalizedSlots = Math.max(1, Math.min(32, Number.parseInt(String(body.connectionSlots), 10) || 1))
       await adminClient
         .from('provider_devices')
-        .update({ connection_slots: normalizedSlots })
+        .update({ connection_slots: normalizedSlots, state_actor: stateActor })
         .eq('user_id', userId)
         .like('device_id', `${baseDeviceId}_slot_%`)
 
       const resultPrivate = await cleanupStalePrivateShareSlots(userId, baseDeviceId, body.connectionSlots)
       const resultLimits = await cleanupStaleSlotLimits(userId, baseDeviceId, body.connectionSlots)
       console.log(`Slot cleanup for ${userId}/${baseDeviceId}: private=${resultPrivate.deletedCount} slotLimits=${resultLimits.deletedCount}`)
+
+      const providerRows = await loadProviderDeviceStates(userId, baseDeviceId)
+      const selectedProviderRow = selectConnectionSlotState(providerRows, `${baseDeviceId}_slot_0`, baseDeviceId)
+      return NextResponse.json({
+        ok: true,
+        connection_slots: selectedProviderRow?.connection_slots ?? normalizedSlots,
+        connection_slots_sync: serializeSyncState(selectedProviderRow),
+      })
     }
     return NextResponse.json({ ok: true })
   }
@@ -656,14 +805,29 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'isSharing must be boolean' }, { status: 400 })
   }
 
-  await adminClient.from('profiles').update({ is_sharing: body.isSharing }).eq('id', userId)
-  return NextResponse.json({ success: true, isSharing: body.isSharing })
+  const { data: updatedProfile, error: updateError } = await adminClient
+    .from('profiles')
+    .update({ is_sharing: body.isSharing, state_actor: stateActor })
+    .eq('id', userId)
+    .select('is_sharing, state_actor, state_changed_at')
+    .single()
+
+  if (updateError || !updatedProfile) {
+    return NextResponse.json({ error: updateError?.message ?? 'Could not update sharing state' }, { status: 500 })
+  }
+
+  return NextResponse.json({
+    success: true,
+    isSharing: updatedProfile.is_sharing,
+    profile_sync: serializeSyncState(updatedProfile),
+  })
 }
 
 // ── PUT: provider heartbeat ───────────────────────────────────────────────────
 export async function PUT(req: Request) {
   const body = await req.json().catch(() => ({}))
   const { device_id, user_id } = body
+  const stateActor = getRequestStateActor(req)
 
   if (!device_id) {
     return NextResponse.json({ error: 'device_id required' }, { status: 400 })
@@ -716,14 +880,22 @@ export async function PUT(req: Request) {
 
   if (rpcError) return NextResponse.json({ error: rpcError.message }, { status: 500 })
 
+  const providerUpdate: { state_actor: string; connection_slots?: number } = { state_actor: stateActor }
   const connectionSlots = Number.parseInt(String(body.connection_slots ?? ''), 10)
   if (Number.isInteger(connectionSlots) && connectionSlots >= 1 && connectionSlots <= 32) {
-    await adminClient
-      .from('provider_devices')
-      .update({ connection_slots: connectionSlots })
-      .eq('user_id', userId)
-      .eq('device_id', device_id)
+    providerUpdate.connection_slots = connectionSlots
   }
+
+  await adminClient
+    .from('provider_devices')
+    .update(providerUpdate)
+    .eq('user_id', userId)
+    .eq('device_id', device_id)
+
+  await adminClient
+    .from('profiles')
+    .update({ state_actor: stateActor })
+    .eq('id', userId)
 
   return NextResponse.json({ ok: true })
 }
@@ -732,16 +904,28 @@ export async function PUT(req: Request) {
 export async function DELETE(req: Request) {
   const body = await req.json().catch(() => ({}))
   const { device_id, user_id } = body
+  const stateActor = getRequestStateActor(req)
 
   if (!device_id) return NextResponse.json({ error: 'device_id required' }, { status: 400 })
 
   const userId = await resolveUserId(req, user_id)
   if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
+  await adminClient
+    .from('provider_devices')
+    .update({ state_actor: stateActor })
+    .eq('user_id', userId)
+    .eq('device_id', device_id)
+
   await adminClient.rpc('remove_provider_device', {
     p_user_id: userId,
     p_device_id: device_id,
   })
+
+  await adminClient
+    .from('profiles')
+    .update({ state_actor: stateActor })
+    .eq('id', userId)
 
   // Clean up any other stale devices so is_sharing never stays stale
   try { await adminClient.rpc('cleanup_stale_providers') } catch {}

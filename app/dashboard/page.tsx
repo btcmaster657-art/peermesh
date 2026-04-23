@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 import { checkDesktop, syncDesktopAuth, startDesktopSharing, stopDesktopSharing, setDesktopConnectionSlots } from '@/lib/agent-client'
 import { formatBytes } from '@/lib/utils'
-import type { Profile, PeerAvailability, PrivateShare } from '@/lib/types'
+import type { Profile, PeerAvailability, PrivateShare, SyncState } from '@/lib/types'
 import type { DesktopState } from '@/lib/agent-client'
 
 type Country = { code: string; name: string; flag: string }
@@ -44,6 +44,11 @@ type SlotLimitEntry = {
   daily_limit_mb: number | null
   bytes_today: number
   can_accept_sessions: boolean
+} & SyncState
+
+const DASHBOARD_SHARING_HEADERS = {
+  'Content-Type': 'application/json',
+  'x-peermesh-actor': 'dashboard',
 }
 
 function getHelperMismatchError(where: string | null | undefined): string {
@@ -83,6 +88,45 @@ function createDisabledPrivateShare(deviceId: string, baseDeviceId: string, slot
     enabled: false,
     expires_at: null,
     active: false,
+    state_actor: null,
+    state_changed_at: null,
+  }
+}
+
+function getSyncTimestamp(value: string | null | undefined): number {
+  if (!value) return 0
+  const parsed = new Date(value).getTime()
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+function preferLatestSync<T extends SyncState>(current: T | null | undefined, candidate: T | null | undefined): T | null {
+  if (!candidate) return current ?? null
+  if (!current) return candidate
+
+  const currentTs = getSyncTimestamp(current.state_changed_at)
+  const candidateTs = getSyncTimestamp(candidate.state_changed_at)
+  if (candidateTs > currentTs) return candidate
+  if (candidateTs < currentTs) return current
+  return current
+}
+
+function formatSyncLabel(sync: SyncState | null | undefined): string | null {
+  if (!sync?.state_changed_at) return null
+  const actor = sync.state_actor ? sync.state_actor.toUpperCase() : 'SYSTEM'
+  return `Synced from ${actor} at ${new Date(sync.state_changed_at).toLocaleTimeString()}`
+}
+
+function mergeProfileSync(profile: Profile | null, sync: SyncState | null | undefined, updates: Partial<Profile> = {}): Profile | null {
+  if (!profile) return profile
+
+  const nextProfile = { ...profile, ...updates }
+  if (!sync) return nextProfile
+  if (getSyncTimestamp(sync.state_changed_at) < getSyncTimestamp(profile.state_changed_at)) return nextProfile
+
+  return {
+    ...nextProfile,
+    state_actor: sync.state_actor ?? nextProfile.state_actor,
+    state_changed_at: sync.state_changed_at ?? nextProfile.state_changed_at,
   }
 }
 
@@ -108,7 +152,9 @@ function sortPrivateShares(rows: PrivateShare[]): PrivateShare[] {
 function mergePrivateShares(rows: PrivateShare[] | null | undefined, baseDeviceId: string, desktop: DesktopState | null): PrivateShare[] {
   const merged = new Map<string, PrivateShare>()
   const add = (share: PrivateShare | null | undefined) => {
-    if (share?.device_id) merged.set(share.device_id, share)
+    if (!share?.device_id) return
+    const current = merged.get(share.device_id)
+    merged.set(share.device_id, preferLatestSync(current, share) ?? share)
   }
 
   // First, add all API rows
@@ -184,7 +230,7 @@ function mapSlotLimits(rows: SlotLimitEntry[] | null | undefined): Record<string
   const mapped: Record<string, SlotLimitEntry> = {}
   for (const row of rows ?? []) {
     if (!row?.device_id) continue
-    mapped[row.device_id] = row
+    mapped[row.device_id] = preferLatestSync(mapped[row.device_id], row) ?? row
   }
   return mapped
 }
@@ -353,11 +399,15 @@ export default function Dashboard() {
             setShareError(prev => prev != null && prev.includes('signed in as a different user') ? null : prev)
           }
         } else if (data.is_sharing) {
-          await fetch('/api/user/sharing', {
+          const shareStateResponse = await fetch('/api/user/sharing', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: DASHBOARD_SHARING_HEADERS,
             body: JSON.stringify({ isSharing: false }),
           }).catch(() => {})
+          const shareStateData = await shareStateResponse?.json?.().catch(() => null)
+          if (shareStateData?.profile_sync) {
+            setProfile(current => mergeProfileSync(current, shareStateData.profile_sync, { is_sharing: false }))
+          }
         }
       } catch (err: unknown) {
         setLoadError(err instanceof Error ? err.message : 'Something went wrong – please refresh')
@@ -620,7 +670,9 @@ export default function Dashboard() {
     const requestSeq = ++privateShareReqSeqRef.current
     const effectiveDesktopState = desktopState ?? desktop
     log('loadPrivateShare START', 'baseDeviceId=' + baseDeviceId, 'userSelectedSlotRef=' + (userSelectedSlotRef.current ?? 'null'))
-    const res = await fetch(`/api/user/sharing?baseDeviceId=${encodeURIComponent(baseDeviceId)}`)
+    const res = await fetch(`/api/user/sharing?baseDeviceId=${encodeURIComponent(baseDeviceId)}`, {
+      headers: { 'x-peermesh-actor': 'dashboard' },
+    })
     if (!res.ok) throw new Error('Could not load private sharing state')
     const data = await res.json()
     if (requestSeq !== privateShareReqSeqRef.current) {
@@ -676,7 +728,7 @@ export default function Dashboard() {
         : (input.expiryHours === 'none' ? null : Number.parseInt(input.expiryHours, 10))
       const res = await fetch('/api/user/sharing', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: DASHBOARD_SHARING_HEADERS,
         body: JSON.stringify({
           privateSharing: {
             deviceId: targetDeviceId,
@@ -729,7 +781,7 @@ export default function Dashboard() {
     setSlotUpdating(true)
     setShareError(null)
     try {
-      const result = await setDesktopConnectionSlots(nextSlots)
+      const result = await setDesktopConnectionSlots(nextSlots, { actor: 'dashboard' })
       if (!result.ok || !result.state) throw new Error(result.error ?? 'Could not update connection slots')
       applyDesktopSnapshot(result.state, profile?.id ?? null)
       const baseDeviceId = result.state.baseDeviceId ?? result.state.peer?.baseDeviceId ?? null
@@ -756,13 +808,13 @@ export default function Dashboard() {
     try {
       const res = await fetch('/api/user/sharing', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: DASHBOARD_SHARING_HEADERS,
         body: JSON.stringify({ dailyLimitMb: nextLimitMb }),
       })
       const data = await res.json().catch(() => ({}))
       if (!res.ok || data.error) throw new Error(data.error ?? 'Could not update daily limit')
       const savedLimit = data.daily_share_limit_mb ?? null
-      setProfile(p => p ? { ...p, daily_share_limit_mb: savedLimit } : p)
+      setProfile(current => mergeProfileSync(current, data.profile_sync ?? null, { daily_share_limit_mb: savedLimit }))
       setDailyLimitInput(savedLimit != null ? String(savedLimit) : '')
     } catch (err: unknown) {
       setDailyLimitError(err instanceof Error ? err.message : 'Could not update daily limit')
@@ -794,7 +846,7 @@ export default function Dashboard() {
     try {
       const res = await fetch('/api/user/sharing', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: DASHBOARD_SHARING_HEADERS,
         body: JSON.stringify({
           slotDailyLimitMb: nextLimitMb,
           slotDeviceId,
@@ -832,11 +884,15 @@ export default function Dashboard() {
       setShareToggling(true)
       const result = await stopDesktopSharing()
       if (result.state) applyDesktopSnapshot(result.state, profile.id)
-      await fetch('/api/user/sharing', {
+      const shareStateResponse = await fetch('/api/user/sharing', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: DASHBOARD_SHARING_HEADERS,
         body: JSON.stringify({ isSharing: false }),
       }).catch(() => {})
+      const shareStateData = await shareStateResponse?.json?.().catch(() => null)
+      if (shareStateData?.profile_sync) {
+        setProfile(current => mergeProfileSync(current, shareStateData.profile_sync, { is_sharing: false }))
+      }
       if (!result.ok) {
         pendingShareTargetRef.current = null
         setShareTarget(null)
@@ -916,11 +972,15 @@ export default function Dashboard() {
         setShareToggling(false)
       }
       setPrivateShareStoppedSharing(false)
-      await fetch('/api/user/sharing', {
+      const shareStateResponse = await fetch('/api/user/sharing', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: DASHBOARD_SHARING_HEADERS,
         body: JSON.stringify({ isSharing: true }),
       }).catch(() => {})
+      const shareStateData = await shareStateResponse?.json?.().catch(() => null)
+      if (shareStateData?.profile_sync) {
+        setProfile(current => mergeProfileSync(current, shareStateData.profile_sync, { is_sharing: true }))
+      }
     } catch {
       pendingShareTargetRef.current = null
       setShareTarget(null)
@@ -1029,6 +1089,10 @@ export default function Dashboard() {
   const slotDisplayActive = helperSlots?.active ?? 0
   const selectedSlotDeviceId = privateShareDeviceId ?? privateShare?.device_id ?? (helperBaseDeviceId ? `${helperBaseDeviceId}_slot_0` : null)
   const selectedSlotLimit = selectedSlotDeviceId ? slotLimits[selectedSlotDeviceId] : null
+  const connectionSlotsSyncLabel = formatSyncLabel(desktop?.connectionSlotsSync ?? desktop?.peer?.connectionSlotsSync ?? null)
+  const privateShareSyncLabel = formatSyncLabel(privateShare)
+  const slotLimitSyncLabel = formatSyncLabel(selectedSlotLimit)
+  const profileSyncLabel = formatSyncLabel(profile)
   const displayIsSharing = shareTarget ?? isSharing
   const helperStarting = isDesktopSharePending(desktop)
   const privateConnectReady = !selectedCountry && !!privateCodeInput.trim()
@@ -1154,7 +1218,7 @@ export default function Dashboard() {
       </div>
 
       {/* Mobile: only show stats + bandwidth + free tier enforcement */}
-      {!isMobile && (<>
+      {!isMobile && (<div style={{ display: 'contents' }}>
 
       {/* Private connect */}
       <div style={{ background: 'var(--surface)', border: '1px solid rgba(0,255,136,0.18)', borderRadius: '12px', padding: '16px', marginBottom: '16px' }}>
@@ -1362,8 +1426,15 @@ export default function Dashboard() {
                   )
                 })}
               </div>
-              <div style={{ fontSize: '11px', color: 'var(--muted)' }}>
-                {slotUpdating ? 'Updating slot count...' : `${slotDisplayActive} / ${slotDisplayCount} active${helperSlots?.warning ? ` – ${helperSlots.warning}` : ''}`}
+              <div style={{ display: 'grid', gap: '2px' }}>
+                <div style={{ fontSize: '11px', color: 'var(--muted)' }}>
+                  {slotUpdating ? 'Updating slot count...' : `${slotDisplayActive} / ${slotDisplayCount} active${helperSlots?.warning ? ` - ${helperSlots.warning}` : ''}`}
+                </div>
+                {!slotUpdating && connectionSlotsSyncLabel && (
+                  <div style={{ fontSize: '10px', color: 'var(--muted)', fontFamily: 'var(--font-geist-mono)' }}>
+                    {connectionSlotsSyncLabel}
+                  </div>
+                )}
               </div>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
@@ -1388,8 +1459,17 @@ export default function Dashboard() {
         <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px' }}>
           <div>
             <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--muted)', letterSpacing: '0.5px', marginBottom: '2px' }}>DAILY SHARE LIMIT</div>
-            <div style={{ fontSize: '11px', color: 'var(--muted)' }}>
-              {profile.daily_share_limit_mb != null ? `${profile.daily_share_limit_mb} MB/day – auto-stops when reached` : 'No limit set'}
+            <div style={{ display: 'grid', gap: '2px' }}>
+              <div style={{ fontSize: '11px', color: 'var(--muted)' }}>
+                {dailyLimitSaving
+                  ? 'Updating daily limit...'
+                  : (profile.daily_share_limit_mb != null ? `${profile.daily_share_limit_mb} MB/day - auto-stops when reached` : 'No limit set')}
+              </div>
+              {!dailyLimitSaving && profileSyncLabel && (
+                <div style={{ fontSize: '10px', color: 'var(--muted)', fontFamily: 'var(--font-geist-mono)' }}>
+                  {profileSyncLabel}
+                </div>
+              )}
             </div>
           </div>
           <div style={{ display: 'grid', gap: '8px', minWidth: '220px', flex: '1 1 220px' }}>
@@ -1444,7 +1524,7 @@ export default function Dashboard() {
                 <>Desktop or CLI not running.{' '}<a href="/api/desktop-download" download style={{ color: 'var(--accent)', textDecoration: 'underline' }}>Download desktop</a>{' '}or run <code style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px' }}>npx @btcmaster1000/peermesh-provider</code> then reopen this page.</>
               ) : shareError}
             </div>
-            <button onClick={() => setShareError(null)} style={{ background: 'none', border: 'none', color: 'var(--muted)', cursor: 'pointer', fontSize: '13px', lineHeight: 1, padding: '0', flexShrink: 0 }}>✕</button>
+            <button onClick={() => setShareError(null)} style={{ background: 'none', border: 'none', color: 'var(--muted)', cursor: 'pointer', fontSize: '13px', lineHeight: 1, padding: '0', flexShrink: 0 }}>x</button>
           </div>
         )}
       </div>
@@ -1454,14 +1534,25 @@ export default function Dashboard() {
           <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '12px', marginBottom: '12px' }}>
             <div>
               <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--accent)', letterSpacing: '1px', marginBottom: '4px' }}>PRIVATE SHARING</div>
-              <div style={{ fontSize: '12px', color: 'var(--muted)', lineHeight: 1.6 }}>
-                {privateShare?.active
-                  ? `Enabled for ${getPrivateShareLabel(privateShare)} only. Requesters need this code for that slot.`
-                  : 'Optional per-slot sharing for trusted requesters only.'}
+              <div style={{ display: 'grid', gap: '4px' }}>
+                <div style={{ fontSize: '12px', color: 'var(--muted)', lineHeight: 1.6 }}>
+                  {privateShare?.active
+                    ? `Enabled for ${getPrivateShareLabel(privateShare)} only. Requesters need this code for that slot.`
+                    : 'Optional per-slot sharing for trusted requesters only.'}
+                </div>
+                {privateShareSaving ? (
+                  <div style={{ fontSize: '10px', color: 'var(--muted)', fontFamily: 'var(--font-geist-mono)' }}>
+                    Waiting for the database to confirm the latest private-share state...
+                  </div>
+                ) : privateShareSyncLabel ? (
+                  <div style={{ fontSize: '10px', color: 'var(--muted)', fontFamily: 'var(--font-geist-mono)' }}>
+                    {privateShareSyncLabel}
+                  </div>
+                ) : null}
               </div>
             </div>
             <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: privateShare?.active ? 'var(--accent)' : 'var(--muted)', whiteSpace: 'nowrap' }}>
-              {privateShare?.active ? '● ACTIVE' : '○ OFF'}
+              {privateShare?.active ? 'ACTIVE' : 'OFF'}
             </div>
           </div>
 
@@ -1540,8 +1631,17 @@ export default function Dashboard() {
                 NO LIMIT
               </button>
             </div>
-            <div style={{ marginTop: '6px', fontSize: '10px', color: 'var(--muted)', fontFamily: 'var(--font-geist-mono)' }}>
-              {selectedSlotLimit?.daily_limit_mb != null ? `${selectedSlotLimit.daily_limit_mb} MB/day on this slot` : 'No per-slot cap on this slot'}
+            <div style={{ display: 'grid', gap: '2px', marginTop: '6px' }}>
+              <div style={{ fontSize: '10px', color: 'var(--muted)', fontFamily: 'var(--font-geist-mono)' }}>
+                {slotDailyLimitSaving
+                  ? 'Updating slot limit...'
+                  : (selectedSlotLimit?.daily_limit_mb != null ? `${selectedSlotLimit.daily_limit_mb} MB/day on this slot` : 'No per-slot cap on this slot')}
+              </div>
+              {!slotDailyLimitSaving && slotLimitSyncLabel && (
+                <div style={{ fontSize: '10px', color: 'var(--muted)', fontFamily: 'var(--font-geist-mono)' }}>
+                  {slotLimitSyncLabel}
+                </div>
+              )}
             </div>
             {slotDailyLimitError && (
               <div style={{ marginTop: '6px', fontSize: '10px', color: '#ff9090', fontFamily: 'var(--font-geist-mono)' }}>
@@ -1628,7 +1728,7 @@ export default function Dashboard() {
       )}
 
       {/* Close desktop-only wrapper */}
-      </>)}
+      </div>)}
 
       {/* Upgrade banner – always visible so mobile users can upgrade */}
       {!profile.is_premium && (
@@ -1644,7 +1744,7 @@ export default function Dashboard() {
       )}
 
       {/* Desktop-only: premium reservation, CLI banner, modals */}
-      {!isMobile && (<>
+      {!isMobile && (<div style={{ display: 'contents' }}>
 
       {/* Premium peer reservation */}
       {profile.is_premium && selectedCountry && (
@@ -1896,7 +1996,7 @@ export default function Dashboard() {
         </div>
       )}
       {/* End desktop-only block */}
-      </>)}
+      </div>)}
 
     </main>
   )

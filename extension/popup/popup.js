@@ -46,6 +46,14 @@ function getHelperMismatchError(helper = state.helper) {
 const FREE_TIER_MESSAGE = 'FREE TIER â€” Enable sharing above to connect, or upgrade to premium to browse without sharing.'
 const DAILY_LIMIT_MIN_MB = 1024
 
+function withSharingHeaders(token, contentType = true) {
+  const headers = {}
+  if (contentType) headers['Content-Type'] = 'application/json'
+  if (token) headers.Authorization = `Bearer ${token}`
+  headers['x-peermesh-actor'] = 'extension'
+  return headers
+}
+
 let state = {
   user: null,
   session: null,
@@ -78,6 +86,7 @@ let state = {
   slotDailyLimitInput: '',
   slotDailyLimitSaving: false,
   connectionType: 'public', // 'public' | 'private'
+  profileSync: null,
 }
 
 window.addEventListener('online', () => { state.isOnline = true; render() })
@@ -112,7 +121,31 @@ function createDisabledPrivateShare(deviceId, baseDeviceId, slotIndex) {
     enabled: false,
     expires_at: null,
     active: false,
+    state_actor: null,
+    state_changed_at: null,
   }
+}
+
+function getSyncTimestamp(value) {
+  if (!value) return 0
+  const parsed = new Date(value).getTime()
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+function preferLatestSync(current, candidate) {
+  if (!candidate) return current ?? null
+  if (!current) return candidate
+  const currentTs = getSyncTimestamp(current.state_changed_at)
+  const candidateTs = getSyncTimestamp(candidate.state_changed_at)
+  if (candidateTs > currentTs) return candidate
+  if (candidateTs < currentTs) return current
+  return current
+}
+
+function formatSyncLabel(sync) {
+  if (!sync?.state_changed_at) return ''
+  const actor = sync.state_actor ? String(sync.state_actor).toUpperCase() : 'SYSTEM'
+  return `Synced from ${actor} at ${new Date(sync.state_changed_at).toLocaleTimeString()}`
 }
 
 function sortPrivateShares(rows) {
@@ -134,7 +167,7 @@ function mergePrivateShares(rows, baseDeviceId, helper = ownedHelper()) {
 
   const merged = new Map()
   const add = (row) => {
-    if (row?.device_id) merged.set(row.device_id, row)
+    if (row?.device_id) merged.set(row.device_id, preferLatestSync(merged.get(row.device_id), row) ?? row)
   }
 
   ;(rows || []).forEach(add)
@@ -198,7 +231,7 @@ function mapSlotLimits(rows = []) {
   const mapped = {}
   for (const row of rows) {
     if (!row?.device_id) continue
-    mapped[row.device_id] = row
+    mapped[row.device_id] = preferLatestSync(mapped[row.device_id], row) ?? row
   }
   return mapped
 }
@@ -296,13 +329,19 @@ async function init() {
       })
       if (res.ok) {
         const data = await res.json()
+        const previousProfileSync = state.profileSync
+        const resolvedProfileSync = preferLatestSync(previousProfileSync, data.profile_sync ?? null)
+        const shouldApplyProfileState = !previousProfileSync || resolvedProfileSync !== previousProfileSync || !data.profile_sync
+        state.profileSync = resolvedProfileSync
         state.hasAcceptedProviderTerms = data.has_accepted_provider_terms ?? false
-        state.user = {
-          ...state.user,
-          isPremium: data.is_premium ?? state.user.isPremium ?? false,
-          dailyLimitMb: data.daily_share_limit_mb ?? state.user.dailyLimitMb ?? null,
+        if (shouldApplyProfileState) {
+          state.user = {
+            ...state.user,
+            isPremium: data.is_premium ?? state.user.isPremium ?? false,
+            dailyLimitMb: data.daily_share_limit_mb ?? state.user.dailyLimitMb ?? null,
+          }
         }
-        if (!state.dailyLimitSaving) {
+        if (!state.dailyLimitSaving && shouldApplyProfileState) {
           state.dailyLimitInput = state.user.dailyLimitMb != null ? String(state.user.dailyLimitMb) : ''
         }
       }
@@ -377,7 +416,7 @@ async function loadPrivateShareState(baseDeviceId) {
     if (await handleAuthFailure(res.status, { preserveWhileSharing: true })) return
     if (!res.ok) return
     const data = await res.json()
-    state.slotLimits = mapSlotLimits(data.slot_limits ?? [])
+    state.slotLimits = mapSlotLimits([...(data.slot_limits ?? []), ...Object.values(state.slotLimits ?? {})])
     applyPrivateShareRows(data.private_shares ?? (data.private_share ? [data.private_share] : []), baseDeviceId, data.private_share?.device_id ?? null)
   } catch {}
 }
@@ -405,10 +444,7 @@ async function savePrivateShareState(input) {
       : (input.expiryHours === 'none' ? null : parseInt(input.expiryHours, 10))
     const res = await fetch(`${API}/api/user/sharing`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${getUserSharingToken()}`,
-      },
+      headers: withSharingHeaders(getUserSharingToken()),
       body: JSON.stringify({
         privateSharing: {
           deviceId: state.selectedPrivateSlot ?? baseDeviceId,
@@ -422,7 +458,7 @@ async function savePrivateShareState(input) {
     const data = await res.json()
     if (await handleAuthFailure(res.status, { preserveWhileSharing: true })) return
     if (!res.ok || data.error) throw new Error(data.error || 'Could not update private sharing')
-    state.slotLimits = mapSlotLimits(data.slot_limits ?? [])
+    state.slotLimits = mapSlotLimits([...(data.slot_limits ?? []), ...Object.values(state.slotLimits ?? {})])
     applyPrivateShareRows(data.private_shares ?? (data.private_share ? [data.private_share] : state.privateShares), baseDeviceId, data.private_share?.device_id ?? state.selectedPrivateSlot)
     if (input.expiryHours !== undefined && state.privateShare) state.privateExpiryHours = input.expiryHours
     const enabledChanged = input.enabled !== undefined && previousEnabled !== !!state.privateShare?.enabled
@@ -485,15 +521,21 @@ function startPeerPolling() {
       if (await handleAuthFailure(res.status, { preserveWhileSharing: true })) return
       if (!res.ok) return
       const data = await res.json()
-      state.user = {
-        ...state.user,
-        totalShared: data.total_bytes_shared ?? state.user.totalShared,
-        totalUsed: data.total_bytes_used ?? state.user.totalUsed,
-        trustScore: data.trust_score ?? state.user.trustScore,
-        isPremium: data.is_premium ?? state.user.isPremium ?? false,
-        dailyLimitMb: data.daily_share_limit_mb ?? state.user.dailyLimitMb ?? null,
+      const previousProfileSync = state.profileSync
+      const resolvedProfileSync = preferLatestSync(previousProfileSync, data.profile_sync ?? null)
+      const shouldApplyProfileState = !previousProfileSync || resolvedProfileSync !== previousProfileSync || !data.profile_sync
+      state.profileSync = resolvedProfileSync
+      if (shouldApplyProfileState) {
+        state.user = {
+          ...state.user,
+          totalShared: data.total_bytes_shared ?? state.user.totalShared,
+          totalUsed: data.total_bytes_used ?? state.user.totalUsed,
+          trustScore: data.trust_score ?? state.user.trustScore,
+          isPremium: data.is_premium ?? state.user.isPremium ?? false,
+          dailyLimitMb: data.daily_share_limit_mb ?? state.user.dailyLimitMb ?? null,
+        }
       }
-      if (!state.dailyLimitSaving) state.dailyLimitInput = state.user.dailyLimitMb != null ? String(state.user.dailyLimitMb) : ''
+      if (!state.dailyLimitSaving && shouldApplyProfileState) state.dailyLimitInput = state.user.dailyLimitMb != null ? String(state.user.dailyLimitMb) : ''
       if (data.has_accepted_provider_terms === true) state.hasAcceptedProviderTerms = true
       await chrome.storage.local.set({ user: state.user })
       document.querySelectorAll('.stat').forEach(el => {
@@ -605,6 +647,10 @@ function renderDashboard(app) {
       : 'Sharing is unavailable right now.'
   const selectedSlotDeviceId = state.selectedPrivateSlot || state.privateShare?.device_id || (helperBaseDeviceId ? `${helperBaseDeviceId}_slot_0` : null)
   const selectedSlotLimit = selectedSlotDeviceId ? state.slotLimits?.[selectedSlotDeviceId] : null
+  const slotsSyncLabel = formatSyncLabel(activeHelper?.connectionSlotsSync ?? null)
+  const profileSyncLabel = formatSyncLabel(state.profileSync)
+  const privateShareSyncLabel = formatSyncLabel(state.privateShare)
+  const slotLimitSyncLabel = formatSyncLabel(selectedSlotLimit)
 
   const offlineBanner = !state.isOnline
     ? `<div style="display:flex;align-items:center;gap:8px;background:rgba(255,170,0,0.08);border:1px solid rgba(255,170,0,0.35);border-radius:8px;padding:8px 12px;margin:0 16px 8px;font-family:'Courier New',monospace;font-size:10px;color:#ffaa00">âš  NO INTERNET â€” features unavailable</div>`
@@ -719,6 +765,7 @@ function renderDashboard(app) {
                 <div style="font-family:'Courier New',monospace;font-size:9px;color:var(--muted);letter-spacing:0.5px">CONNECTION SLOTS</div>
                 <div style="margin-top:4px;display:flex;align-items:center;gap:5px;flex-wrap:wrap">${slotDots}</div>
                 <p style="font-size:10px;color:var(--muted);margin-top:6px">${state.slotUpdating ? 'Updating slot count...' : `${activeSlots} / ${configuredSlots} slots active${activeHelper?.slots?.warning ? ` - ${activeHelper.slots.warning}` : ''}`}</p>
+                ${!state.slotUpdating && slotsSyncLabel ? `<p style="font-size:10px;color:var(--muted);margin-top:4px;font-family:'Courier New',monospace">${slotsSyncLabel}</p>` : ''}
               </div>
               <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
                 <button id="decrementSlotsBtn" style="width:28px;height:28px;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:${configuredSlots <= 1 ? 'var(--muted)' : 'var(--text)'};cursor:${configuredSlots <= 1 || state.slotUpdating || !helperReady ? 'not-allowed' : 'pointer'};font-family:'Courier New',monospace;font-size:16px" ${configuredSlots <= 1 || state.slotUpdating || !helperReady ? 'disabled' : ''}>-</button>
@@ -739,7 +786,7 @@ function renderDashboard(app) {
               <button id="dailyLimit5gbBtn" style="padding:6px 8px;background:${user?.dailyLimitMb === 5120 ? 'var(--accent-dim)' : 'var(--bg)'};border:1px solid ${user?.dailyLimitMb === 5120 ? 'rgba(0,255,136,0.35)' : 'var(--border)'};border-radius:7px;color:${user?.dailyLimitMb === 5120 ? 'var(--accent)' : 'var(--text)'};font-family:'Courier New',monospace;font-size:9px;cursor:${state.dailyLimitSaving || helperMismatch ? 'not-allowed' : 'pointer'}" ${state.dailyLimitSaving || helperMismatch ? 'disabled' : ''}>5 GB</button>
               <button id="dailyLimitNoneBtn" style="padding:6px 8px;background:${user?.dailyLimitMb == null ? 'var(--accent-dim)' : 'var(--bg)'};border:1px solid ${user?.dailyLimitMb == null ? 'rgba(0,255,136,0.35)' : 'var(--border)'};border-radius:7px;color:${user?.dailyLimitMb == null ? 'var(--accent)' : 'var(--text)'};font-family:'Courier New',monospace;font-size:9px;cursor:${state.dailyLimitSaving || helperMismatch ? 'not-allowed' : 'pointer'}" ${state.dailyLimitSaving || helperMismatch ? 'disabled' : ''}>NO LIMIT</button>
             </div>
-            <p style="font-size:10px;color:var(--muted);margin-top:6px">${user?.dailyLimitMb != null ? `${user.dailyLimitMb} MB/day cap.` : 'No daily cap set.'} Minimum custom limit: 1024 MB.</p>
+            <p style="font-size:10px;color:var(--muted);margin-top:6px">${state.dailyLimitSaving ? 'Updating daily limit...' : `${user?.dailyLimitMb != null ? `${user.dailyLimitMb} MB/day cap.` : 'No daily cap set.'} Minimum custom limit: 1024 MB.${profileSyncLabel ? ` ${profileSyncLabel}` : ''}`}</p>
           </div>
           ${standaloneHelper ? `<p style="font-size:10px;color:var(--muted);margin-top:4px">Desktop or CLI is optional, but unlocks multi-slot sharing and tunnel support.</p>` : ''}
         </div>
@@ -760,6 +807,7 @@ function renderDashboard(app) {
       <div class="share-info" style="margin-bottom:10px">
         <h4>Private sharing</h4>
         <p>${state.privateShare?.active ? 'Pinned to selected slot.' : 'Per-slot code for trusted requesters.'}</p>
+        ${state.privateShareSaving ? `<p style="font-size:10px;color:var(--muted);margin-top:6px;font-family:'Courier New',monospace">Waiting for the database to confirm the latest private-share state...</p>` : (privateShareSyncLabel ? `<p style="font-size:10px;color:var(--muted);margin-top:6px;font-family:'Courier New',monospace">${privateShareSyncLabel}</p>` : '')}
       </div>
       ${state.privateShares.length > 1 ? `
       <select id="privateSlotSelect" style="width:100%;margin-bottom:8px;padding:7px 8px;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:6px;font-family:'Courier New',monospace;font-size:10px">
@@ -781,7 +829,7 @@ function renderDashboard(app) {
           <button id="slotLimit5gbBtn" style="padding:6px 8px;background:${selectedSlotLimit?.daily_limit_mb === 5120 ? 'var(--accent-dim)' : 'var(--surface)'};border:1px solid ${selectedSlotLimit?.daily_limit_mb === 5120 ? 'rgba(0,255,136,0.35)' : 'var(--border)'};border-radius:7px;color:${selectedSlotLimit?.daily_limit_mb === 5120 ? 'var(--accent)' : 'var(--text)'};font-family:'Courier New',monospace;font-size:9px;cursor:${state.slotDailyLimitSaving || helperMismatch ? 'not-allowed' : 'pointer'}" ${state.slotDailyLimitSaving || helperMismatch ? 'disabled' : ''}>5 GB</button>
           <button id="slotLimitNoneBtn" style="padding:6px 8px;background:${selectedSlotLimit?.daily_limit_mb == null ? 'var(--accent-dim)' : 'var(--surface)'};border:1px solid ${selectedSlotLimit?.daily_limit_mb == null ? 'rgba(0,255,136,0.35)' : 'var(--border)'};border-radius:7px;color:${selectedSlotLimit?.daily_limit_mb == null ? 'var(--accent)' : 'var(--text)'};font-family:'Courier New',monospace;font-size:9px;cursor:${state.slotDailyLimitSaving || helperMismatch ? 'not-allowed' : 'pointer'}" ${state.slotDailyLimitSaving || helperMismatch ? 'disabled' : ''}>NO LIMIT</button>
         </div>
-        <p style="font-size:10px;color:var(--muted);margin-top:6px">${selectedSlotLimit?.daily_limit_mb != null ? `${selectedSlotLimit.daily_limit_mb} MB/day on selected slot.` : 'No slot cap on selected slot.'}</p>
+        <p style="font-size:10px;color:var(--muted);margin-top:6px">${state.slotDailyLimitSaving ? 'Updating slot limit...' : `${selectedSlotLimit?.daily_limit_mb != null ? `${selectedSlotLimit.daily_limit_mb} MB/day on selected slot.` : 'No slot cap on selected slot.'}${slotLimitSyncLabel ? ` ${slotLimitSyncLabel}` : ''}`}</p>
       </div>
       <div style="display:grid;grid-template-columns:1fr auto;gap:8px;margin-bottom:8px">
         <div style="padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:8px;font-family:'Courier New',monospace;font-size:13px;letter-spacing:2px;color:${state.privateShare?.code ? 'var(--accent)' : 'var(--muted)'}">${state.privateShare?.code || 'CODE OFF'}</div>
@@ -997,7 +1045,7 @@ function renderDashboard(app) {
       try {
         await fetch(`${API}/api/user/sharing`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.supabaseToken || state.user?.token}` },
+          headers: withSharingHeaders(state.supabaseToken || state.user?.token),
           body: JSON.stringify({ acceptProviderTerms: true }),
         })
       } catch {}
@@ -1171,10 +1219,7 @@ async function toggleSharing(on) {
   try {
     await fetch(`${API}/api/user/sharing`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${state.supabaseToken || state.user?.token}`,
-      },
+      headers: withSharingHeaders(state.supabaseToken || state.user?.token),
       body: JSON.stringify({ isSharing: on }),
     })
   } catch {}
@@ -1243,16 +1288,14 @@ async function saveDailyLimit(limitMb) {
   try {
     const res = await fetch(`${API}/api/user/sharing`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${state.supabaseToken || state.user?.token}`,
-      },
+      headers: withSharingHeaders(state.supabaseToken || state.user?.token),
       body: JSON.stringify({ dailyLimitMb: limitMb }),
     })
     const data = await res.json().catch(() => ({}))
     if (await handleAuthFailure(res.status, { preserveWhileSharing: true })) return
     if (!res.ok || data.error) throw new Error(data.error || 'Could not update daily limit')
 
+    state.profileSync = preferLatestSync(state.profileSync, data.profile_sync ?? null)
     state.user = {
       ...state.user,
       dailyLimitMb: data.daily_share_limit_mb ?? null,
@@ -1295,10 +1338,7 @@ async function saveSlotDailyLimit(limitMb) {
   try {
     const res = await fetch(`${API}/api/user/sharing`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${state.supabaseToken || state.user?.token}`,
-      },
+      headers: withSharingHeaders(state.supabaseToken || state.user?.token),
       body: JSON.stringify({
         slotDailyLimitMb: limitMb,
         slotDeviceId,
@@ -1309,7 +1349,7 @@ async function saveSlotDailyLimit(limitMb) {
     if (await handleAuthFailure(res.status, { preserveWhileSharing: true })) return
     if (!res.ok || data.error) throw new Error(data.error || 'Could not update slot daily limit')
 
-    state.slotLimits = mapSlotLimits(data.slot_limits ?? [])
+    state.slotLimits = mapSlotLimits([...(data.slot_limits ?? []), ...Object.values(state.slotLimits ?? {})])
     syncSlotDailyLimitInput()
   } catch (err) {
     state.error = err.message || 'Could not update slot daily limit'
