@@ -224,7 +224,7 @@ let _userStopped = false
 let myPort = null
 let peerPort = null
 let _controlLimitBytes = null
-let _pendingBytes = 0
+const _pendingBytesByDevice = new Map()
 let _flushTimer = null
 let _profileSyncTimer = null
 let _profileSyncInterval = 5000
@@ -518,19 +518,23 @@ async function flushPendingBytes() {
   if (_flushTimer) return
   _flushTimer = setTimeout(async () => {
     _flushTimer = null
-    const toFlush = _pendingBytes
-    _pendingBytes = 0
-    if (!toFlush || !config.token) return
-    clogRequest('POST', `${API_BASE}/api/user/sharing`, { bytes: toFlush })
-    try {
-      const res = await fetch(`${API_BASE}/api/user/sharing`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
-        body: JSON.stringify({ bytes: toFlush }),
-      })
-      clogResponse('POST', `${API_BASE}/api/user/sharing`, res.status)
-    } catch (e) {
-      clog.warn('API', 'flushStats failed', { err: e.message })
+    if (!config.token || _pendingBytesByDevice.size === 0) return
+    const pendingEntries = [..._pendingBytesByDevice.entries()]
+    _pendingBytesByDevice.clear()
+
+    for (const [deviceId, toFlush] of pendingEntries) {
+      if (!toFlush) continue
+      clogRequest('POST', `${API_BASE}/api/user/sharing`, { bytes: toFlush, deviceId })
+      try {
+        const res = await fetch(`${API_BASE}/api/user/sharing`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
+          body: JSON.stringify({ bytes: toFlush, deviceId }),
+        })
+        clogResponse('POST', `${API_BASE}/api/user/sharing`, res.status, { deviceId })
+      } catch (e) {
+        clog.warn('API', 'flushStats failed', { err: e.message, deviceId })
+      }
     }
   }, 5000)
 }
@@ -633,7 +637,7 @@ function startProfileSync() {
 
 function addBytes(slot, bytes, limitBytes) {
   slot.sessionBytes += bytes
-  _pendingBytes += bytes
+  _pendingBytesByDevice.set(slot.deviceId, (_pendingBytesByDevice.get(slot.deviceId) ?? 0) + bytes)
   flushPendingBytes()
   enforceLocalLimit(limitBytes)
 }

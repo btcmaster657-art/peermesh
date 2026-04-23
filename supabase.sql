@@ -31,6 +31,7 @@ drop table if exists abuse_reports cascade;
 drop table if exists session_accountability cascade;
 drop table if exists sessions cascade;
 drop table if exists provider_devices cascade;
+drop table if exists provider_slot_limits cascade;
 drop table if exists private_share_devices cascade;
 drop table if exists device_codes cascade;
 drop table if exists auth_tokens cascade;
@@ -124,6 +125,7 @@ create table provider_devices (
   id uuid primary key default gen_random_uuid(),
   user_id uuid references profiles(id) on delete cascade not null,
   device_id text not null,
+  connection_slots integer not null default 1,
   country_code text not null,
   relay_url text default null,         -- relay the device is currently connected to
   last_heartbeat timestamptz not null default now(),
@@ -134,6 +136,26 @@ create table provider_devices (
 create index on provider_devices (last_heartbeat);
 create index on provider_devices (user_id);
 create index on provider_devices (country_code, last_heartbeat);
+
+-- Slot-level sharing controls and daily limits
+create table provider_slot_limits (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid references profiles(id) on delete cascade not null,
+  device_id text not null,
+  base_device_id text not null,
+  slot_index integer,
+  daily_limit_mb integer,
+  bytes_today bigint not null default 0,
+  bytes_today_date date not null default current_date,
+  created_at timestamptz default now(),
+  updated_at timestamptz default now(),
+  unique (user_id, device_id),
+  check (daily_limit_mb is null or daily_limit_mb >= 1024),
+  check (slot_index is null or slot_index >= 0)
+);
+
+create index on provider_slot_limits (user_id, base_device_id);
+create index on provider_slot_limits (user_id, bytes_today_date);
 
 -- Private sharing codes
 create table private_share_devices (
@@ -396,10 +418,43 @@ create policy "Service role only auth tokens" on auth_tokens for all using (fals
 alter table private_share_devices enable row level security;
 create policy "Service role only private share devices" on private_share_devices for all using (false);
 
+alter table provider_slot_limits enable row level security;
+create policy "Service role only provider slot limits" on provider_slot_limits for all using (false);
+
 -- ================================
 -- Migrations (safe to run on existing DBs)
 -- ================================
 alter table provider_devices add column if not exists relay_url text default null;
+alter table provider_devices add column if not exists connection_slots integer not null default 1;
+create table if not exists provider_slot_limits (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid references profiles(id) on delete cascade not null,
+  device_id text not null,
+  base_device_id text not null,
+  slot_index integer,
+  daily_limit_mb integer,
+  bytes_today bigint not null default 0,
+  bytes_today_date date not null default current_date,
+  created_at timestamptz default now(),
+  updated_at timestamptz default now(),
+  unique (user_id, device_id),
+  check (daily_limit_mb is null or daily_limit_mb >= 1024),
+  check (slot_index is null or slot_index >= 0)
+);
+create index if not exists provider_slot_limits_user_base_idx on provider_slot_limits (user_id, base_device_id);
+create index if not exists provider_slot_limits_user_date_idx on provider_slot_limits (user_id, bytes_today_date);
+alter table provider_slot_limits enable row level security;
+do $$
+begin
+  if not exists (
+    select 1 from pg_policies
+    where schemaname = 'public'
+      and tablename = 'provider_slot_limits'
+      and policyname = 'Service role only provider slot limits'
+  ) then
+    create policy "Service role only provider slot limits" on provider_slot_limits for all using (false);
+  end if;
+end $$;
 alter table profiles add column if not exists has_accepted_provider_terms boolean default false;
 alter table profiles add column if not exists daily_share_limit_mb integer default null;
 alter table profiles add column if not exists share_bytes_today bigint default 0;

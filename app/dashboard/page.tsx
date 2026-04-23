@@ -37,6 +37,14 @@ function CliSection({ label, cmd }: { label: string; cmd: string }) {
 }
 
 type PrivateShareState = PrivateShare | null
+type SlotLimitEntry = {
+  device_id: string
+  base_device_id: string
+  slot_index: number | null
+  daily_limit_mb: number | null
+  bytes_today: number
+  can_accept_sessions: boolean
+}
 
 function getHelperMismatchError(where: string | null | undefined): string {
   const source = where === 'cli' ? 'CLI' : 'desktop app'
@@ -168,6 +176,15 @@ function getPrivateShareLabel(share: PrivateShareState, fallbackIndex = 0): stri
   return `Slot ${fallbackIndex + 1}`
 }
 
+function mapSlotLimits(rows: SlotLimitEntry[] | null | undefined): Record<string, SlotLimitEntry> {
+  const mapped: Record<string, SlotLimitEntry> = {}
+  for (const row of rows ?? []) {
+    if (!row?.device_id) continue
+    mapped[row.device_id] = row
+  }
+  return mapped
+}
+
 export default function Dashboard() {
   const router = useRouter()
   const supabase = createClient()
@@ -200,6 +217,10 @@ export default function Dashboard() {
   const [dailyLimitInput, setDailyLimitInput] = useState('')
   const [dailyLimitSaving, setDailyLimitSaving] = useState(false)
   const [dailyLimitError, setDailyLimitError] = useState<string | null>(null)
+  const [slotLimits, setSlotLimits] = useState<Record<string, SlotLimitEntry>>({})
+  const [slotDailyLimitInput, setSlotDailyLimitInput] = useState('')
+  const [slotDailyLimitSaving, setSlotDailyLimitSaving] = useState(false)
+  const [slotDailyLimitError, setSlotDailyLimitError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [shareError, setShareError] = useState<string | null>(null)
@@ -393,6 +414,12 @@ export default function Dashboard() {
   }, [profile?.daily_share_limit_mb])
 
   useEffect(() => {
+    const selectedDeviceId = privateShareDeviceId ?? privateShare?.device_id ?? null
+    const selected = selectedDeviceId ? slotLimits[selectedDeviceId] : null
+    setSlotDailyLimitInput(selected?.daily_limit_mb != null ? String(selected.daily_limit_mb) : '')
+  }, [privateShareDeviceId, privateShare?.device_id, slotLimits])
+
+  useEffect(() => {
     const baseDeviceId = isDesktopOwnedByUser(desktop, profile?.id)
       ? (desktop?.baseDeviceId ?? desktop?.peer?.baseDeviceId ?? null)
       : null
@@ -503,6 +530,7 @@ export default function Dashboard() {
           setPrivateShare(null)
           setPrivateShares([])
           setPrivateShareDeviceId(null)
+          setSlotLimits({})
         }
       }
     }, 3000)
@@ -580,12 +608,15 @@ export default function Dashboard() {
     if (!res.ok) throw new Error('Could not load private sharing state')
     const data = await res.json()
     const apiShares: PrivateShare[] = data.private_shares ?? (data.private_share ? [data.private_share] : [])
+    const apiSlotLimits: SlotLimitEntry[] = data.slot_limits ?? []
     log('loadPrivateShare API RESPONSE',
       'private_shares.length=' + apiShares.length,
       'ids=' + apiShares.map((s: PrivateShare) => s.device_id + '[enabled=' + s.enabled + ',active=' + s.active + ',slot=' + s.slot_index + ',code=' + (s.code || 'EMPTY') + ']').join(','),
       'primary_device_id=' + (data.private_share?.device_id ?? 'null'),
       'primary_code=' + (data.private_share?.code ?? 'null'),
+      'slot_limits.length=' + apiSlotLimits.length,
     )
+    setSlotLimits(mapSlotLimits(apiSlotLimits))
     applyPrivateShareRows(
       apiShares,
       baseDeviceId,
@@ -651,6 +682,7 @@ export default function Dashboard() {
         setPrivateShareDeviceId(returnedId)
       }
 
+      setSlotLimits(mapSlotLimits(data.slot_limits ?? []))
       applyPrivateShareRows(apiShares, baseDeviceId, returnedId)
       if (input.expiryHours !== undefined && data.private_share) setPrivateExpiryHours(input.expiryHours)
     } catch (err: unknown) {
@@ -713,6 +745,49 @@ export default function Dashboard() {
       setDailyLimitError(err instanceof Error ? err.message : 'Could not update daily limit')
     } finally {
       setDailyLimitSaving(false)
+    }
+  }
+
+  async function saveSlotDailyLimit(nextLimitMb: number | null) {
+    if (slotDailyLimitSaving) return
+    if (profile && !isDesktopOwnedByUser(desktop, profile.id)) {
+      setSlotDailyLimitError(getHelperMismatchError(desktop?.where))
+      return
+    }
+    if (nextLimitMb !== null && nextLimitMb < DAILY_LIMIT_MIN_MB) {
+      setSlotDailyLimitError(`Minimum slot limit is ${DAILY_LIMIT_MIN_MB} MB (1 GB)`)
+      return
+    }
+
+    const baseDeviceId = desktop?.baseDeviceId ?? desktop?.peer?.baseDeviceId ?? null
+    const slotDeviceId = privateShareDeviceId ?? privateShare?.device_id ?? (baseDeviceId ? `${baseDeviceId}_slot_0` : null)
+    if (!baseDeviceId || !slotDeviceId) {
+      setSlotDailyLimitError('Select an active slot to configure a per-slot limit.')
+      return
+    }
+
+    setSlotDailyLimitSaving(true)
+    setSlotDailyLimitError(null)
+    try {
+      const res = await fetch('/api/user/sharing', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          slotDailyLimitMb: nextLimitMb,
+          slotDeviceId,
+          baseDeviceId,
+        }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok || data.error) throw new Error(data.error ?? 'Could not update slot daily limit')
+      const mapped = mapSlotLimits(data.slot_limits ?? [])
+      setSlotLimits(mapped)
+      const savedLimit = mapped[slotDeviceId]?.daily_limit_mb ?? null
+      setSlotDailyLimitInput(savedLimit != null ? String(savedLimit) : '')
+    } catch (err: unknown) {
+      setSlotDailyLimitError(err instanceof Error ? err.message : 'Could not update slot daily limit')
+    } finally {
+      setSlotDailyLimitSaving(false)
     }
   }
 
@@ -929,6 +1004,8 @@ export default function Dashboard() {
   const helperSlots = helperOwnedByCurrentUser ? (desktop?.slots ?? desktop?.peer?.slots ?? null) : null
   const slotDisplayCount = helperSlots?.configured ?? (helperOwnedByCurrentUser ? (desktop?.connectionSlots ?? desktop?.peer?.connectionSlots ?? 1) : 1)
   const slotDisplayActive = helperSlots?.active ?? 0
+  const selectedSlotDeviceId = privateShareDeviceId ?? privateShare?.device_id ?? (helperBaseDeviceId ? `${helperBaseDeviceId}_slot_0` : null)
+  const selectedSlotLimit = selectedSlotDeviceId ? slotLimits[selectedSlotDeviceId] : null
   const displayIsSharing = shareTarget ?? isSharing
   const privateConnectReady = !selectedCountry && !!privateCodeInput.trim()
 
@@ -1396,6 +1473,56 @@ export default function Dashboard() {
               </select>
             </div>
           )}
+
+          <div style={{ marginBottom: '10px', padding: '10px', border: '1px solid var(--border)', borderRadius: '8px', background: 'var(--bg)' }}>
+            <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '9px', color: 'var(--muted)', letterSpacing: '0.5px', marginBottom: '6px', textTransform: 'uppercase' }}>
+              {selectedSlotDeviceId ? `${getPrivateShareLabel(privateShare)} SLOT LIMIT` : 'SLOT LIMIT'}
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '8px' }}>
+              <input
+                value={slotDailyLimitInput}
+                onChange={(e) => { setSlotDailyLimitInput(e.target.value.replace(/\D/g, '')); setSlotDailyLimitError(null) }}
+                inputMode="numeric"
+                placeholder="1024+ MB"
+                disabled={!helperOwnedByCurrentUser}
+                style={{ width: '100%', background: 'var(--surface)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: '6px', padding: '7px 9px', fontFamily: 'var(--font-geist-mono)', fontSize: '10px' }}
+              />
+              <button
+                onClick={() => saveSlotDailyLimit(slotDailyLimitInput ? Number.parseInt(slotDailyLimitInput, 10) : null)}
+                disabled={slotDailyLimitSaving || !helperOwnedByCurrentUser}
+                style={{ padding: '7px 10px', background: 'var(--accent)', color: '#000', border: 'none', borderRadius: '6px', fontFamily: 'var(--font-geist-mono)', fontSize: '10px', fontWeight: 700, cursor: slotDailyLimitSaving || !helperOwnedByCurrentUser ? 'not-allowed' : 'pointer', opacity: slotDailyLimitSaving || !helperOwnedByCurrentUser ? 0.6 : 1 }}
+              >
+                {slotDailyLimitSaving ? '...' : 'APPLY'}
+              </button>
+            </div>
+            <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginTop: '6px' }}>
+              {[1024, 2048, 5120].map(limit => (
+                <button
+                  key={`slot-limit-preset-${limit}`}
+                  onClick={() => { setSlotDailyLimitInput(String(limit)); void saveSlotDailyLimit(limit) }}
+                  disabled={slotDailyLimitSaving || !helperOwnedByCurrentUser}
+                  style={{ padding: '6px 8px', background: selectedSlotLimit?.daily_limit_mb === limit ? 'var(--accent-dim)' : 'var(--surface)', color: selectedSlotLimit?.daily_limit_mb === limit ? 'var(--accent)' : 'var(--text)', border: `1px solid ${selectedSlotLimit?.daily_limit_mb === limit ? 'rgba(0,255,136,0.4)' : 'var(--border)'}`, borderRadius: '6px', fontFamily: 'var(--font-geist-mono)', fontSize: '9px', cursor: slotDailyLimitSaving || !helperOwnedByCurrentUser ? 'not-allowed' : 'pointer', opacity: slotDailyLimitSaving || !helperOwnedByCurrentUser ? 0.6 : 1 }}
+                >
+                  {limit >= 1024 ? `${limit / 1024} GB` : `${limit} MB`}
+                </button>
+              ))}
+              <button
+                onClick={() => { setSlotDailyLimitInput(''); void saveSlotDailyLimit(null) }}
+                disabled={slotDailyLimitSaving || !helperOwnedByCurrentUser}
+                style={{ padding: '6px 8px', background: selectedSlotLimit?.daily_limit_mb == null ? 'var(--accent-dim)' : 'var(--surface)', color: selectedSlotLimit?.daily_limit_mb == null ? 'var(--accent)' : 'var(--text)', border: `1px solid ${selectedSlotLimit?.daily_limit_mb == null ? 'rgba(0,255,136,0.4)' : 'var(--border)'}`, borderRadius: '6px', fontFamily: 'var(--font-geist-mono)', fontSize: '9px', cursor: slotDailyLimitSaving || !helperOwnedByCurrentUser ? 'not-allowed' : 'pointer', opacity: slotDailyLimitSaving || !helperOwnedByCurrentUser ? 0.6 : 1 }}
+              >
+                NO LIMIT
+              </button>
+            </div>
+            <div style={{ marginTop: '6px', fontSize: '10px', color: 'var(--muted)', fontFamily: 'var(--font-geist-mono)' }}>
+              {selectedSlotLimit?.daily_limit_mb != null ? `${selectedSlotLimit.daily_limit_mb} MB/day on this slot` : 'No per-slot cap on this slot'}
+            </div>
+            {slotDailyLimitError && (
+              <div style={{ marginTop: '6px', fontSize: '10px', color: '#ff9090', fontFamily: 'var(--font-geist-mono)' }}>
+                {slotDailyLimitError}
+              </div>
+            )}
+          </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '10px', marginBottom: '10px' }}>
             <div style={{ padding: '10px 12px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '8px', fontFamily: 'var(--font-geist-mono)', fontSize: '15px', letterSpacing: '3px', color: privateShare?.code ? 'var(--accent)' : 'var(--muted)' }}>

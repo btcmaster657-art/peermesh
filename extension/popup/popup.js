@@ -72,6 +72,9 @@ let state = {
   slotUpdating: false,
   dailyLimitInput: '',
   dailyLimitSaving: false,
+  slotLimits: {},
+  slotDailyLimitInput: '',
+  slotDailyLimitSaving: false,
   connectionType: 'public', // 'public' | 'private'
 }
 
@@ -168,12 +171,31 @@ function applyPrivateShareRows(rows, baseDeviceId, preferredDeviceId = null) {
     state.privateShare = null
     state.privateShares = []
     state.selectedPrivateSlot = null
+    state.slotLimits = {}
+    state.slotDailyLimitInput = ''
+    state.slotDailyLimitSaving = false
     return
   }
   state.privateShares = mergePrivateShares(rows, baseDeviceId)
   state.privateShare = selectPrivateShare(state.privateShares, preferredDeviceId || state.selectedPrivateSlot, baseDeviceId)
   state.selectedPrivateSlot = state.privateShare?.device_id ?? preferredDeviceId ?? null
   state.privateExpiryHours = getPrivateShareExpiryPreset(state.privateShare?.expires_at ?? null)
+  syncSlotDailyLimitInput()
+}
+
+function mapSlotLimits(rows = []) {
+  const mapped = {}
+  for (const row of rows) {
+    if (!row?.device_id) continue
+    mapped[row.device_id] = row
+  }
+  return mapped
+}
+
+function syncSlotDailyLimitInput() {
+  const selectedDeviceId = state.selectedPrivateSlot || state.privateShare?.device_id || null
+  const selected = selectedDeviceId ? state.slotLimits?.[selectedDeviceId] : null
+  state.slotDailyLimitInput = selected?.daily_limit_mb != null ? String(selected.daily_limit_mb) : ''
 }
 
 function shouldPreserveAuthState() {
@@ -200,6 +222,9 @@ async function handleExpiredSession() {
   state.supabaseToken = null
   state.dailyLimitInput = ''
   state.dailyLimitSaving = false
+  state.slotLimits = {}
+  state.slotDailyLimitInput = ''
+  state.slotDailyLimitSaving = false
   state.privateShare = null
   state.privateShares = []
   state.selectedPrivateSlot = null
@@ -329,6 +354,7 @@ async function loadPrivateShareState(baseDeviceId) {
     if (await handleAuthFailure(res.status, { preserveWhileSharing: true })) return
     if (!res.ok) return
     const data = await res.json()
+    state.slotLimits = mapSlotLimits(data.slot_limits ?? [])
     applyPrivateShareRows(data.private_shares ?? (data.private_share ? [data.private_share] : []), baseDeviceId, data.private_share?.device_id ?? null)
   } catch {}
 }
@@ -372,6 +398,7 @@ async function savePrivateShareState(input) {
     const data = await res.json()
     if (await handleAuthFailure(res.status, { preserveWhileSharing: true })) return
     if (!res.ok || data.error) throw new Error(data.error || 'Could not update private sharing')
+    state.slotLimits = mapSlotLimits(data.slot_limits ?? [])
     applyPrivateShareRows(data.private_shares ?? (data.private_share ? [data.private_share] : state.privateShares), baseDeviceId, data.private_share?.device_id ?? state.selectedPrivateSlot)
     if (input.expiryHours !== undefined && state.privateShare) state.privateExpiryHours = input.expiryHours
     const enabledChanged = input.enabled !== undefined && previousEnabled !== !!state.privateShare?.enabled
@@ -549,6 +576,8 @@ function renderDashboard(app) {
     : helperReady
       ? (isSharing ? `${helperSource} sharing active â€” earning credits.` : `${helperSource} helper detected â€” ready to share.`)
       : 'Sharing is unavailable right now.'
+  const selectedSlotDeviceId = state.selectedPrivateSlot || state.privateShare?.device_id || (helperBaseDeviceId ? `${helperBaseDeviceId}_slot_0` : null)
+  const selectedSlotLimit = selectedSlotDeviceId ? state.slotLimits?.[selectedSlotDeviceId] : null
 
   const offlineBanner = !state.isOnline
     ? `<div style="display:flex;align-items:center;gap:8px;background:rgba(255,170,0,0.08);border:1px solid rgba(255,170,0,0.35);border-radius:8px;padding:8px 12px;margin:0 16px 8px;font-family:'Courier New',monospace;font-size:10px;color:#ffaa00">âš  NO INTERNET â€” features unavailable</div>`
@@ -713,6 +742,20 @@ function renderDashboard(app) {
           return `<option value="${s.device_id}" ${s.device_id === state.selectedPrivateSlot ? 'selected' : ''}>${label}${badge}</option>`
         }).join('')}
       </select>` : ''}
+      <div style="margin-bottom:8px;padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--bg)">
+        <div style="font-family:'Courier New',monospace;font-size:9px;color:var(--muted);letter-spacing:0.5px;margin-bottom:6px">SLOT DAILY LIMIT</div>
+        <div style="display:grid;grid-template-columns:1fr auto;gap:6px">
+          <input id="slotDailyLimitInput" value="${state.slotDailyLimitInput || ''}" placeholder="1024+ MB" inputmode="numeric" style="padding:8px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;color:var(--text);font-family:'Courier New',monospace;font-size:10px" ${state.slotDailyLimitSaving || helperMismatch ? 'disabled' : ''} />
+          <button id="saveSlotDailyLimitBtn" style="padding:0 10px;background:var(--accent);border:none;border-radius:8px;color:#000;font-family:'Courier New',monospace;font-size:10px;font-weight:700;cursor:${state.slotDailyLimitSaving || helperMismatch ? 'not-allowed' : 'pointer'}" ${state.slotDailyLimitSaving || helperMismatch ? 'disabled' : ''}>${state.slotDailyLimitSaving ? '...' : 'APPLY'}</button>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+          <button id="slotLimit1gbBtn" style="padding:6px 8px;background:${selectedSlotLimit?.daily_limit_mb === 1024 ? 'var(--accent-dim)' : 'var(--surface)'};border:1px solid ${selectedSlotLimit?.daily_limit_mb === 1024 ? 'rgba(0,255,136,0.35)' : 'var(--border)'};border-radius:7px;color:${selectedSlotLimit?.daily_limit_mb === 1024 ? 'var(--accent)' : 'var(--text)'};font-family:'Courier New',monospace;font-size:9px;cursor:${state.slotDailyLimitSaving || helperMismatch ? 'not-allowed' : 'pointer'}" ${state.slotDailyLimitSaving || helperMismatch ? 'disabled' : ''}>1 GB</button>
+          <button id="slotLimit2gbBtn" style="padding:6px 8px;background:${selectedSlotLimit?.daily_limit_mb === 2048 ? 'var(--accent-dim)' : 'var(--surface)'};border:1px solid ${selectedSlotLimit?.daily_limit_mb === 2048 ? 'rgba(0,255,136,0.35)' : 'var(--border)'};border-radius:7px;color:${selectedSlotLimit?.daily_limit_mb === 2048 ? 'var(--accent)' : 'var(--text)'};font-family:'Courier New',monospace;font-size:9px;cursor:${state.slotDailyLimitSaving || helperMismatch ? 'not-allowed' : 'pointer'}" ${state.slotDailyLimitSaving || helperMismatch ? 'disabled' : ''}>2 GB</button>
+          <button id="slotLimit5gbBtn" style="padding:6px 8px;background:${selectedSlotLimit?.daily_limit_mb === 5120 ? 'var(--accent-dim)' : 'var(--surface)'};border:1px solid ${selectedSlotLimit?.daily_limit_mb === 5120 ? 'rgba(0,255,136,0.35)' : 'var(--border)'};border-radius:7px;color:${selectedSlotLimit?.daily_limit_mb === 5120 ? 'var(--accent)' : 'var(--text)'};font-family:'Courier New',monospace;font-size:9px;cursor:${state.slotDailyLimitSaving || helperMismatch ? 'not-allowed' : 'pointer'}" ${state.slotDailyLimitSaving || helperMismatch ? 'disabled' : ''}>5 GB</button>
+          <button id="slotLimitNoneBtn" style="padding:6px 8px;background:${selectedSlotLimit?.daily_limit_mb == null ? 'var(--accent-dim)' : 'var(--surface)'};border:1px solid ${selectedSlotLimit?.daily_limit_mb == null ? 'rgba(0,255,136,0.35)' : 'var(--border)'};border-radius:7px;color:${selectedSlotLimit?.daily_limit_mb == null ? 'var(--accent)' : 'var(--text)'};font-family:'Courier New',monospace;font-size:9px;cursor:${state.slotDailyLimitSaving || helperMismatch ? 'not-allowed' : 'pointer'}" ${state.slotDailyLimitSaving || helperMismatch ? 'disabled' : ''}>NO LIMIT</button>
+        </div>
+        <p style="font-size:10px;color:var(--muted);margin-top:6px">${selectedSlotLimit?.daily_limit_mb != null ? `${selectedSlotLimit.daily_limit_mb} MB/day on selected slot.` : 'No slot cap on selected slot.'}</p>
+      </div>
       <div style="display:grid;grid-template-columns:1fr auto;gap:8px;margin-bottom:8px">
         <div style="padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:8px;font-family:'Courier New',monospace;font-size:13px;letter-spacing:2px;color:${state.privateShare?.code ? 'var(--accent)' : 'var(--muted)'}">${state.privateShare?.code || 'CODE OFF'}</div>
         <button id="copyPrivateCodeBtn" style="padding:0 10px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-family:'Courier New',monospace;font-size:10px;cursor:${state.privateShare?.code ? 'pointer' : 'not-allowed'}" ${!state.privateShare?.code ? 'disabled' : ''}>COPY</button>
@@ -809,6 +852,7 @@ function renderDashboard(app) {
     state.selectedPrivateSlot = e.target.value
     state.privateShare = selectPrivateShare(state.privateShares, e.target.value, ownedHelper()?.baseDeviceId ?? null)
     state.privateExpiryHours = getPrivateShareExpiryPreset(state.privateShare?.expires_at ?? null)
+    syncSlotDailyLimitInput()
     render()
   })
   document.getElementById('privateExpirySelect')?.addEventListener('change', (e) => {
@@ -855,6 +899,36 @@ function renderDashboard(app) {
   document.getElementById('dailyLimitNoneBtn')?.addEventListener('click', () => {
     state.dailyLimitInput = ''
     void saveDailyLimit(null)
+  })
+  document.getElementById('slotDailyLimitInput')?.addEventListener('input', (e) => {
+    state.slotDailyLimitInput = e.target.value.replace(/\D/g, '')
+    state.error = null
+  })
+  document.getElementById('slotDailyLimitInput')?.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return
+    e.preventDefault()
+    const raw = (e.target.value || '').trim()
+    void saveSlotDailyLimit(raw ? parseInt(raw, 10) : null)
+  })
+  document.getElementById('saveSlotDailyLimitBtn')?.addEventListener('click', () => {
+    const raw = (document.getElementById('slotDailyLimitInput')?.value || '').trim()
+    void saveSlotDailyLimit(raw ? parseInt(raw, 10) : null)
+  })
+  document.getElementById('slotLimit1gbBtn')?.addEventListener('click', () => {
+    state.slotDailyLimitInput = '1024'
+    void saveSlotDailyLimit(1024)
+  })
+  document.getElementById('slotLimit2gbBtn')?.addEventListener('click', () => {
+    state.slotDailyLimitInput = '2048'
+    void saveSlotDailyLimit(2048)
+  })
+  document.getElementById('slotLimit5gbBtn')?.addEventListener('click', () => {
+    state.slotDailyLimitInput = '5120'
+    void saveSlotDailyLimit(5120)
+  })
+  document.getElementById('slotLimitNoneBtn')?.addEventListener('click', () => {
+    state.slotDailyLimitInput = ''
+    void saveSlotDailyLimit(null)
   })
 
   // Disclosure modal
@@ -1163,6 +1237,58 @@ async function saveDailyLimit(limitMb) {
   }
 }
 
+async function saveSlotDailyLimit(limitMb) {
+  if (state.slotDailyLimitSaving) return
+  if (helperOwnerMismatch()) {
+    state.error = getHelperMismatchError()
+    render()
+    return
+  }
+  if (limitMb !== null && (!Number.isInteger(limitMb) || limitMb < DAILY_LIMIT_MIN_MB)) {
+    state.error = `Minimum slot limit is ${DAILY_LIMIT_MIN_MB} MB (1 GB)`
+    render()
+    return
+  }
+
+  const baseDeviceId = ownedHelper()?.baseDeviceId
+  const slotDeviceId = state.selectedPrivateSlot || state.privateShare?.device_id || (baseDeviceId ? `${baseDeviceId}_slot_0` : null)
+  if (!baseDeviceId || !slotDeviceId) {
+    state.error = 'Select a slot first to set a per-slot limit'
+    render()
+    return
+  }
+
+  state.slotDailyLimitSaving = true
+  state.error = null
+  render()
+
+  try {
+    const res = await fetch(`${API}/api/user/sharing`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${state.supabaseToken || state.user?.token}`,
+      },
+      body: JSON.stringify({
+        slotDailyLimitMb: limitMb,
+        slotDeviceId,
+        baseDeviceId,
+      }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (await handleAuthFailure(res.status, { preserveWhileSharing: true })) return
+    if (!res.ok || data.error) throw new Error(data.error || 'Could not update slot daily limit')
+
+    state.slotLimits = mapSlotLimits(data.slot_limits ?? [])
+    syncSlotDailyLimitInput()
+  } catch (err) {
+    state.error = err.message || 'Could not update slot daily limit'
+  } finally {
+    state.slotDailyLimitSaving = false
+    render()
+  }
+}
+
 async function signOut() {
   if (!confirm('Sign out of PeerMesh?')) return
   if (state.isSharing) {
@@ -1186,6 +1312,9 @@ async function signOut() {
   state.helper = null
   state.dailyLimitInput = ''
   state.dailyLimitSaving = false
+  state.slotLimits = {}
+  state.slotDailyLimitInput = ''
+  state.slotDailyLimitSaving = false
   state.privateShare = null
   state.privateShares = []
   state.selectedPrivateSlot = null

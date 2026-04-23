@@ -106,6 +106,8 @@ let _sharingConfigSyncInterval = 5000
 let _sharingConfigConsecutiveFailures = 0
 const SHARING_CONFIG_SYNC_MAX = 30000
 const AUTH_CLEAR_FAILURE_THRESHOLD = 3
+const _pendingBytesByDevice = new Map()
+let _flushTimer = null
 
 function notifyPeer(p, body) {
   if (!peerPort) return
@@ -786,6 +788,7 @@ function shutdownDesktopRuntime(reason = 'quit') {
   log.info('PROCESS', 'shutdownDesktopRuntime', { reason })
   logState(`shutdown:${reason}`)
   stopSharingConfigSync()
+  void flushPendingBytes()
   if (_cliWatchTimer) {
     clearInterval(_cliWatchTimer)
     _cliWatchTimer = null
@@ -840,6 +843,31 @@ async function persistSharingState(isSharing) {
     })
     logResponse('POST', `${API_BASE}/api/user/sharing`, r.status)
   } catch (e) { log.warn('API', 'persistSharingState failed', { err: e.message }) }
+}
+
+async function flushPendingBytes() {
+  if (_flushTimer) return
+  _flushTimer = setTimeout(async () => {
+    _flushTimer = null
+    if (!config.token || _pendingBytesByDevice.size === 0) return
+    const pendingEntries = [..._pendingBytesByDevice.entries()]
+    _pendingBytesByDevice.clear()
+
+    for (const [deviceId, bytes] of pendingEntries) {
+      if (!bytes) continue
+      logRequest('POST', `${API_BASE}/api/user/sharing`, { bytes, deviceId })
+      try {
+        const res = await fetch(`${API_BASE}/api/user/sharing`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
+          body: JSON.stringify({ bytes, deviceId }),
+        })
+        logResponse('POST', `${API_BASE}/api/user/sharing`, res.status, { deviceId })
+      } catch (e) {
+        log.warn('API', 'flushPendingBytes failed', { err: e.message, deviceId })
+      }
+    }
+  }, 5000)
 }
 
 function getPrivateShareExpiryPreset(expiresAt) {
@@ -1094,6 +1122,8 @@ function isAllowed(hostname) {
 
 function addBytes(slot, bytes) {
   slot.sessionBytes += bytes
+  _pendingBytesByDevice.set(slot.deviceId, (_pendingBytesByDevice.get(slot.deviceId) ?? 0) + bytes)
+  void flushPendingBytes()
   syncAggregateState()
   enforceLocalLimit()
 }
