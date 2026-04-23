@@ -1,4 +1,4 @@
-// background/service-worker.js - PeerMesh Extension Service Worker
+﻿// background/service-worker.js - PeerMesh Extension Service Worker
 const APP_URL = 'https://peermesh-beta.vercel.app'
 
 const EXTENSION_VERSION = chrome.runtime.getManifest().version
@@ -244,7 +244,7 @@ function getStandalonePrivateShares(baseDeviceId, deviceId) {
   }]
 }
 
-// â”€â”€ Logger â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ Logger Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 const MAX_LOGS = 200
 const _logs = []
@@ -322,7 +322,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return true
 })
 
-// â”€â”€ Proxy fetch â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ Proxy fetch Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 function proxyFetch(url, { method = 'GET', headers = {}, body = null } = {}) {
   return new Promise((resolve) => {
@@ -344,7 +344,7 @@ function proxyFetch(url, { method = 'GET', headers = {}, body = null } = {}) {
   })
 }
 
-// â”€â”€ Extension heartbeat â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ Extension heartbeat Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 function getShareAuthToken() {
   return desktopToken || supabaseToken || null
@@ -623,7 +623,7 @@ async function syncProviderPrivateShareState({ source = 'sync' } = {}) {
   }
 }
 
-// â”€â”€ Native messaging / desktop detection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ Native messaging / desktop detection Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 async function sendNativeMessage(message) {
   return new Promise((resolve, reject) => {
@@ -637,44 +637,38 @@ async function sendNativeMessage(message) {
 const PEER_PORT = 7656
 
 async function getDesktopHelperStatusHttp() {
-  let primary = null
-  try {
-    const res = await fetch(`http://127.0.0.1:${CONTROL_PORT}/native/state`, { signal: AbortSignal.timeout(1500) })
-    if (res.ok) {
-      const data = await res.json()
-      primary = {
-        available: true,
-        source: data.where ?? 'desktop',
-        running: !!data.running,
-        shareEnabled: !!data.shareEnabled,
-        configured: !!data.configured,
-        country: data.country ?? null,
-        userId: data.userId ?? null,
-        version: data.version ?? null,
-        baseDeviceId: data.baseDeviceId ?? null,
-        privateShareActive: !!data.privateShareActive,
-        privateShare: data.privateShare ?? null,
-        privateShares: Array.isArray(data.privateShares) ? data.privateShares : [],
-        privateShareDeviceId: data.privateShareDeviceId ?? null,
-        connectionSlots: data.connectionSlots ?? null,
-        connectionSlotsSync: data.connectionSlotsSync ?? null,
-        slots: data.slots ?? null,
-        stats: data.stats ?? null,
-      }
-    }
-  } catch (e) { log('warn', 'desktop HTTP unreachable: ' + e.message) }
+  const [primaryData, peerState] = await Promise.all([
+    fetch(`http://127.0.0.1:${CONTROL_PORT}/native/state`, { signal: AbortSignal.timeout(800) })
+      .then(r => r.ok ? r.json() : null).catch(() => null),
+    fetch(`http://127.0.0.1:${PEER_PORT}/native/state`, { signal: AbortSignal.timeout(800) })
+      .then(r => r.ok ? r.json() : null).catch(() => null),
+  ])
 
-  // Also check peer port â€” whichever process is running the relay
-  let peerState = null
-  try {
-    const res2 = await fetch(`http://127.0.0.1:${PEER_PORT}/native/state`, { signal: AbortSignal.timeout(1000) })
-    if (res2.ok) peerState = await res2.json()
-  } catch {}
+  if (!primaryData) { log('warn', 'desktop HTTP unreachable') }
+  if (!primaryData) return null
 
-  if (!primary) return null
+  const primary = {
+    available: true,
+    source: primaryData.where ?? 'desktop',
+    running: !!primaryData.running,
+    shareEnabled: !!primaryData.shareEnabled,
+    configured: !!primaryData.configured,
+    country: primaryData.country ?? null,
+    userId: primaryData.userId ?? null,
+    version: primaryData.version ?? null,
+    baseDeviceId: primaryData.baseDeviceId ?? null,
+    privateShareActive: !!primaryData.privateShareActive,
+    privateShare: primaryData.privateShare ?? null,
+    privateShares: Array.isArray(primaryData.privateShares) ? primaryData.privateShares : [],
+    privateShareDeviceId: primaryData.privateShareDeviceId ?? null,
+    connectionSlots: primaryData.connectionSlots ?? null,
+    connectionSlotsSync: primaryData.connectionSlotsSync ?? null,
+    slots: primaryData.slots ?? null,
+    stats: primaryData.stats ?? null,
+  }
+
   const peerRunning = !!peerState?.running
   const eitherRunning = primary.running || peerRunning
-  // If peer is the active sharer, use its stats for live display
   const stats = (peerRunning && peerState?.stats) ? peerState.stats : (primary.stats ?? null)
   const activeUserId = peerRunning ? (peerState?.userId ?? primary.userId ?? null) : primary.userId
   const activeCountry = peerRunning ? (peerState?.country ?? primary.country ?? null) : primary.country
@@ -882,7 +876,7 @@ async function stopDesktopSharing() {
   }
 }
 
-// â”€â”€ Relay connection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ Relay connection Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 function scheduleProviderReconnect(reason) {
   if (sharingMode !== 'extension' || !providerShareEnabled) return
@@ -914,7 +908,7 @@ async function connectStandaloneProvider() {
   if (!baseDeviceId || !deviceId) throw new Error('Extension identity is missing')
 
   const relays = await getLiveRelays()
-  // Hash baseDeviceId to pick a relay deterministically â€” same logic as desktop/CLI
+  // Hash baseDeviceId to pick a relay deterministically Ã¢â‚¬â€ same logic as desktop/CLI
   // so the extension provider lands on the same relay consistently across restarts.
   // Persist lastRelay to storage so it survives service worker termination.
   const stored = await chrome.storage.local.get(['providerLastRelay'])
@@ -923,7 +917,7 @@ async function connectStandaloneProvider() {
   if (lastRelay && relays.includes(lastRelay)) {
     relay = lastRelay
   } else {
-    // Rendezvous/HRW consistent hashing â€” same algorithm as desktop/CLI.
+    // Rendezvous/HRW consistent hashing Ã¢â‚¬â€ same algorithm as desktop/CLI.
     // Adding/removing a relay only moves ~1/n providers, not all of them.
     let best = null, bestScore = -1
     for (const r of relays) {
@@ -1195,7 +1189,7 @@ async function connectToRelay(opts, attempt = 0, retries = 0) {
   // Merge: server-ordered list first (health-aware), then any live relays not already included
   const fallbackList = [...new Set([...serverFallbackList, ...liveFallbackList])]
   if (attempt >= fallbackList.length) {
-    // Exhausted all relays â€” if providers exist but were all busy, retry up to 3 times
+    // Exhausted all relays Ã¢â‚¬â€ if providers exist but were all busy, retry up to 3 times
     // with a short backoff. This handles the race where both users connect simultaneously
     // and each provider slot is briefly occupied by the other user's session.
     if (retries < 3) {
@@ -1203,7 +1197,7 @@ async function connectToRelay(opts, attempt = 0, retries = 0) {
       await new Promise(resolve => setTimeout(resolve, 3000))
       return connectToRelay(opts, 0, retries + 1)
     }
-    throw new Error('No peer available in ' + opts.country + ' â€” try again shortly')
+    throw new Error('No peer available in ' + opts.country + ' Ã¢â‚¬â€ try again shortly')
   }
   const relay = fallbackList[attempt]
   try {
@@ -1214,7 +1208,7 @@ async function connectToRelay(opts, attempt = 0, retries = 0) {
       await new Promise(resolve => setTimeout(resolve, 500))
       return connectToRelay(opts, attempt + 1, retries)
     }
-    // Last relay also failed â€” fall through to retry logic above
+    // Last relay also failed Ã¢â‚¬â€ fall through to retry logic above
     return connectToRelay(opts, fallbackList.length, retries)
   }
 }
@@ -1235,7 +1229,7 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
     }
 
     ws.onopen = () => {
-      log('info', `[CONNECT] WS open â†’ sending request_session country=${country}`)
+      log('info', `[CONNECT] WS open Ã¢â€ â€™ sending request_session country=${country}`)
       ws.send(JSON.stringify({
         type: 'request_session',
         country,
@@ -1272,7 +1266,7 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ sessionId: agentSessionId, relayEndpoint, country }),
             })
-            log('info', '[CONNECT] proxy-session sent to desktop âœ“')
+            log('info', '[CONNECT] proxy-session sent to desktop Ã¢Å“â€œ')
           } catch (e) {
             log('error', `[CONNECT] proxy-session failed: ${e.message}`)
           }
@@ -1283,10 +1277,10 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
         settle(resolve, undefined)
       }
 
-      // â”€â”€ Auto-reconnect: relay found a new provider transparently â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // Ã¢â€â‚¬Ã¢â€â‚¬ Auto-reconnect: relay found a new provider transparently Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
       if (msg.type === 'session_reconnected') {
         agentSessionId = msg.sessionId
-        // Use the relayEndpoint from the message if provided â€” it's the relay the
+        // Use the relayEndpoint from the message if provided Ã¢â‚¬â€ it's the relay the
         // requester is already on, so the desktop proxy-session must point there.
         const reconnectRelay = msg.relayEndpoint || relayEndpoint
         if (currentSession) currentSession = { ...currentSession, sessionId: msg.sessionId, relayEndpoint: reconnectRelay }
@@ -1326,7 +1320,7 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
       }
 
       if (msg.type === 'session_ended') {
-        log('info', '[CONNECT] session_ended â†’ clearing proxy')
+        log('info', '[CONNECT] session_ended Ã¢â€ â€™ clearing proxy')
         clearProxy()
         currentSession = null
         relayWs = null
@@ -1355,16 +1349,16 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
 
     setTimeout(() => {
       if (!settled) {
-        log('warn', `[CONNECT] timeout â€” no peer found in ${country} after 15s`)
+        log('warn', `[CONNECT] timeout Ã¢â‚¬â€ no peer found in ${country} after 15s`)
         ws.close(1000)
-        settle(reject, new Error('No peer available in ' + country + ' â€” try again shortly'))
+        settle(reject, new Error('No peer available in ' + country + ' Ã¢â‚¬â€ try again shortly'))
       }
     }, 15000)
   })
 }
 
-// â”€â”€ Header spoofing (declarativeNetRequest dynamic rules) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// Rule IDs â€” must be stable integers
+// Ã¢â€â‚¬Ã¢â€â‚¬ Header spoofing (declarativeNetRequest dynamic rules) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// Rule IDs Ã¢â‚¬â€ must be stable integers
 const HDR_RULE_USER_AGENT = 1
 const HDR_RULE_ACCEPT_LANG = 2
 const HDR_RULE_SEC_CH_UA_PLATFORM = 3
@@ -1472,7 +1466,7 @@ async function syncSessionSpoofState(session) {
   }
 }
 
-// â”€â”€ Proxy settings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ Proxy settings Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 function blockWebRTC() {
   chrome.privacy.network.webRTCIPHandlingPolicy.set(
@@ -1506,7 +1500,7 @@ function setProxyDesktop(sessionId, country) {
       if (chrome.runtime.lastError) {
         log('error', `[PROXY] fixed_servers error: ${chrome.runtime.lastError.message}`)
       } else {
-        log('info', '[PROXY] mode=fixed_servers 127.0.0.1:7655 âœ“')
+        log('info', '[PROXY] mode=fixed_servers 127.0.0.1:7655 Ã¢Å“â€œ')
       }
     }
   )
@@ -1519,7 +1513,7 @@ function setProxyDesktop(sessionId, country) {
 function setProxyRelay(relayEndpoint, sessionId, country) {
   const relayUrl = relayEndpoint.replace('wss://', 'https://').replace('ws://', 'http://')
   const relayHost = new URL(relayUrl).hostname
-  // Port 8080 is the relay's actual HTTP port â€” it handles both WS upgrades
+  // Port 8080 is the relay's actual HTTP port Ã¢â‚¬â€ it handles both WS upgrades
   // and raw HTTP CONNECT requests for the PAC proxy path.
   const pacScript = `
     function FindProxyForURL(url, host) {
@@ -1531,7 +1525,7 @@ function setProxyRelay(relayEndpoint, sessionId, country) {
     { value: { mode: 'pac_script', pacScript: { data: pacScript } }, scope: 'regular' },
     () => {
       if (chrome.runtime.lastError) log('error', `[PROXY] PAC error: ${chrome.runtime.lastError.message}`)
-      else log('info', `[PROXY] PAC active â†’ ${relayHost}:8080 âœ“`)
+      else log('info', `[PROXY] PAC active Ã¢â€ â€™ ${relayHost}:8080 Ã¢Å“â€œ`)
     }
   )
   chrome.storage.session.set({ proxySessionId: sessionId, proxyHost: relayHost, proxyPort: 8080 })
@@ -1579,7 +1573,7 @@ async function disconnect() {
   fetch(`http://127.0.0.1:${CONTROL_PORT}/proxy-session`, { method: 'DELETE' }).catch(() => {})
 }
 
-// â”€â”€ Lifecycle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ Lifecycle Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 async function restoreSharingRuntime() {
   clearProxy()
@@ -1657,3 +1651,4 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 })
 
 void restoreSharingRuntime()
+

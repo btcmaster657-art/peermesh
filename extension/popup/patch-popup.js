@@ -1,0 +1,7 @@
+const fs = require('fs')
+const path = require('path')
+const f = path.join(__dirname, 'popup.html')
+let c = fs.readFileSync(f, 'utf8')
+c = c.replace('<script type="module" src="popup.js"></script>', '<script src="popup.js"></script>')
+fs.writeFileSync(f, c, 'utf8')
+console.log('done')
