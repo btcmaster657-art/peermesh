@@ -120,8 +120,22 @@ async function handleFetch(request) {
         ...headers,
       },
       body: body ?? undefined,
-      redirect: 'follow',
+      redirect: 'manual',
+      signal: AbortSignal.timeout(30_000),
     })
+
+    // Return redirects directly so the requester's browser follows each hop
+    // through the proxy independently — prevents redirect chains (e.g. email
+    // tracking links) from consuming the entire fetch timeout in one shot.
+    if (res.status >= 300 && res.status < 400) {
+      const location = res.headers.get('location')
+      const responseHeaders = {}
+      if (location) responseHeaders['location'] = location
+      const cacheControl = res.headers.get('cache-control')
+      if (cacheControl) responseHeaders['cache-control'] = cacheControl
+      log(`  <- ${res.status} ${url} (redirect -> ${location})`)
+      return { requestId, status: res.status, headers: responseHeaders, body: '' }
+    }
 
     const responseBody = await res.text()
     const responseHeaders = {}
@@ -180,9 +194,11 @@ async function handleMessage(msg) {
       const { tunnelId, hostname, port } = msg
       log(`  TUNNEL ${hostname}:${port}`)
       const socket = connect(port, hostname)
+      socket.setTimeout(20000, () => { socket.destroy(new Error('connect timeout')) })
       activeTunnels.set(tunnelId, { socket, closed: false, sessionId: msg.sessionId ?? null })
 
       socket.on('connect', () => {
+        socket.setTimeout(0)
         sendRelayMessage({ type: 'tunnel_ready', tunnelId })
       })
       socket.on('data', (data) => {

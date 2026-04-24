@@ -415,9 +415,22 @@ async function handleProviderFetch(sessionId, request) {
       method,
       headers: sanitizeFetchHeaders(headers),
       body: method === 'GET' || method === 'HEAD' ? undefined : body ?? undefined,
-      redirect: 'follow',
-      signal: AbortSignal.timeout(20_000),
+      redirect: 'manual',
+      signal: AbortSignal.timeout(30_000),
     })
+
+    // For redirect responses, return the Location header directly so the
+    // requester's browser follows each hop through the proxy independently.
+    // This prevents the provider from chasing a full redirect chain (e.g.
+    // email tracking links) within a single fetch timeout.
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get('location')
+      const responseHeaders = {}
+      if (location) responseHeaders['location'] = location
+      const cacheControl = response.headers.get('cache-control')
+      if (cacheControl) responseHeaders['cache-control'] = cacheControl
+      return { requestId, status: response.status, headers: responseHeaders, body: '' }
+    }
     const responseBody = method === 'HEAD' ? '' : await response.text()
     const responseHeaders = {}
     response.headers.forEach((value, key) => {

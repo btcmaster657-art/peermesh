@@ -1345,9 +1345,22 @@ async function handleFetch(slot, request) {
         ...outboundHeaders,
       },
       body: requestBody,
-      redirect: 'follow',
-      signal: AbortSignal.timeout(20000),
+      redirect: 'manual',
+      signal: AbortSignal.timeout(30000),
     })
+
+    // Return redirects directly so the browser follows each hop through the
+    // proxy independently — prevents redirect chains (e.g. email tracking links)
+    // from consuming the entire fetch timeout in one shot.
+    if (res.status >= 300 && res.status < 400) {
+      const location = res.headers.get('location')
+      const responseHeaders = {}
+      if (location) responseHeaders['location'] = location
+      const cacheControl = res.headers.get('cache-control')
+      if (cacheControl) responseHeaders['cache-control'] = cacheControl
+      return { requestId, status: res.status, headers: responseHeaders, body: '', finalUrl: location || res.url }
+    }
+
     const responseBody = method === 'HEAD' ? '' : await res.text()
     const responseHeaders = {}
     res.headers.forEach((value, key) => {
@@ -1521,10 +1534,11 @@ function connectSlot(slot) {
         slot.requestsHandled++
         syncAggregateState()
         const socket = net.connect(msg.port, msg.hostname)
+        socket.setTimeout(20000, () => { socket.destroy(new Error('connect timeout')) })
         const tunnel = { socket, closed: false, sessionId: msg.sessionId ?? null, slotIndex: slot.index }
         slot.activeTunnels.set(msg.tunnelId, tunnel)
         activeTunnels.set(msg.tunnelId, tunnel)
-        socket.on('connect', () => sendRelayMessage(slot, { type: 'tunnel_ready', tunnelId: msg.tunnelId }))
+        socket.on('connect', () => { socket.setTimeout(0); sendRelayMessage(slot, { type: 'tunnel_ready', tunnelId: msg.tunnelId }) })
         socket.on('data', (chunk) => {
           sendRelayMessage(slot, { type: 'tunnel_data', tunnelId: msg.tunnelId, data: chunk.toString('base64') })
           addBytes(slot, chunk.length)
@@ -1744,7 +1758,7 @@ localProxyServer.on('connect', (req, clientSocket, head) => {
       log.warn('LOCAL-PROXY', 'tunnel timeout', { target: `${hostname}:${port}` })
       tunnelWs.terminate(); clientSocket.write('HTTP/1.1 504 Tunnel Timeout\r\n\r\n'); clientSocket.destroy()
     }
-  }, 15000)
+  }, 30000)
 })
 
 // Ã¢â€â‚¬Ã¢â€â‚¬ Control server Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
