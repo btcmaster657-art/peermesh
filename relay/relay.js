@@ -10,6 +10,7 @@ const peers = new Map()
 const sessions = new Map()
 const proxyClients = new Map()
 
+
 // peerAffinity: requesterUserId → Map(country → providerUserId)
 // In-memory cache — seeded from DB via request_session msg, updated on session end.
 // Survives within a relay process lifetime. DB is the persistent source of truth.
