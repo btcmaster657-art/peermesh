@@ -20,8 +20,15 @@ const TEXT_METRIC_KEYS = [
 const LOCATION_BAR_KEYS = ['locationbar', 'menubar', 'personalbar', 'scrollbars', 'statusbar', 'toolbar']
 const DPR_BY_PERSONA = { desktop: 1, mac: 2, linux: 1, mobile: 2.625, mixed: 1 }
 const WORKER_SPOOF_HOSTS = ['browserleaks.com', 'abrahamjuliot.github.io', 'creepjs.vercel.app']
+const CLOUDFLARE_CHALLENGE_HOSTS = ['challenges.cloudflare.com', 'cloudflare.com']
 
 ;(function bootstrapIdentity() {
+  // Never run inside Cloudflare challenge frames — they use strict CSP/sandboxing
+  // that blocks blob workers, postMessage cross-origin, and TrustedTypes.
+  try {
+    const hostname = window.location?.hostname || ''
+    if (CLOUDFLARE_CHALLENGE_HOSTS.some(h => hostname === h || hostname.endsWith('.' + h))) return
+  } catch {}
   const initialProfile = readInitialProfile()
   if (initialProfile) {
     applyIdentity(initialProfile)
@@ -1229,7 +1236,9 @@ function patchCanvas(seed, seededOffset, includeOffscreen = false) {
   if (nativeOffscreenConvertToBlob) {
     OffscreenCanvasCtor.prototype.convertToBlob = function convertToBlob(...args) {
       const noisyCanvas = cloneWithNoise(this)
-      return nativeOffscreenConvertToBlob.apply(noisyCanvas || this, args)
+      // Always call native on the original `this` or the clone via the unpatched native ref.
+      // Never call via noisyCanvas.convertToBlob() — that would recurse into this patch.
+      return nativeOffscreenConvertToBlob.call(noisyCanvas instanceof OffscreenCanvasCtor ? noisyCanvas : this, ...args)
     }
   }
 }
