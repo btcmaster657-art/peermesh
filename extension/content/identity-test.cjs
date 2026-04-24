@@ -17,6 +17,8 @@ const { URL: NodeURL } = require('url')
 const PERSONA = process.argv[3] || 'mobile'
 const IS_MOB  = PERSONA === 'mobile'
 
+const FINGERPRINT_TEST_URL = 'https://abrahamjuliot.github.io/creepjs/tests/workers.html'
+
 const P = {
   country: process.argv[2] || 'RW',
   userId:  'test-user-peermesh-001',
@@ -96,6 +98,9 @@ class FakeServiceWorkerContainer {}
 global.ServiceWorkerContainer = { prototype: FakeServiceWorkerContainer.prototype }
 global.ServiceWorkerRegistration = { prototype: {} }
 global.ServiceWorker = { prototype: {} }
+FakeServiceWorkerContainer.prototype.register = function register(scriptURL, options) {
+  return Promise.resolve({ native: true, scriptURL, options })
+}
 Object.defineProperty(FakeNavigator.prototype, 'serviceWorker', {
   get: () => Object.create(FakeServiceWorkerContainer.prototype),
   configurable: true,
@@ -134,7 +139,12 @@ global.innerWidth = 1098; global.innerHeight = 529
 global.outerWidth = 1098; global.outerHeight = 618
 global.devicePixelRatio = 1.75
 global.visualViewport   = { width: 1098, height: 529.1428833007812, scale: 1, offsetTop: 0, offsetLeft: 0, pageTop: 0, pageLeft: 0 }
-global.location = { href: 'https://example.com/', origin: 'https://example.com' }
+global.location = {
+  href: FINGERPRINT_TEST_URL,
+  origin: 'https://abrahamjuliot.github.io',
+  hostname: 'abrahamjuliot.github.io',
+  pathname: '/creepjs/tests/workers.html',
+}
 global.locationbar  = { visible: false }; global.menubar     = { visible: false }
 global.personalbar  = { visible: false }; global.scrollbars  = { visible: false }
 global.statusbar    = { visible: false }; global.toolbar     = { visible: false }
@@ -234,7 +244,12 @@ global.performance = new FakePerf()
 
 // Misc
 global.HTMLElement  = { prototype: {} }
-global.DOMException = class DOMException extends Error {}
+global.DOMException = class DOMException extends Error {
+  constructor(message = '', name = 'Error') {
+    super(message)
+    this.name = name
+  }
+}
 global.Blob         = class Blob {
   constructor(parts = [], options = {}) {
     this.parts = parts
@@ -248,9 +263,10 @@ global.chrome       = {
 
 // ── Load identity.js ──────────────────────────────────────────────────────────
 const identityPath = path.resolve(__dirname, 'identity.js')
+const identitySource = fs.readFileSync(identityPath, 'utf8')
 if (!fs.existsSync(identityPath)) { console.error('\n  ✖  identity.js not found\n'); process.exit(1) }
 let loadError = null
-try { vm.runInThisContext(fs.readFileSync(identityPath, 'utf8'), { filename: 'identity.js' }) }
+try { vm.runInThisContext(identitySource, { filename: 'identity.js' }) }
 catch (e) { loadError = e }
 
 // ── Harness ────────────────────────────────────────────────────────────────────
@@ -267,6 +283,11 @@ function g(obj, k) { try { return obj[k] } catch { return '<err>' } }
 
 // ── Run tests ─────────────────────────────────────────────────────────────────
 test('Load', 'identity.js loads without error', loadError === null, true)
+test('Safety', 'worker spoof host gate present', /function shouldPatchWorkers\b/.test(identitySource), true)
+test('Safety', 'worker spoof limited to test hosts', /WORKER_SPOOF_HOSTS/.test(identitySource) && /browserleaks\.com/.test(identitySource) && /abrahamjuliot\.github\.io/.test(identitySource), true)
+test('Safety', 'service worker fallback patch present', /function patchServiceWorkerRegister\b/.test(identitySource), true)
+test('Safety', 'service worker fallback limited to creepjs scripts', /shouldBypassServiceWorker/.test(identitySource) && /creep\.js/.test(identitySource) && /worker_service\.js/.test(identitySource), true)
+test('Safety', 'no inline scrollbar style injector', !/appendChild\(style\)|style\.textContent/.test(identitySource), true)
 
 // Navigator
 test('Navigator', 'language',            g(navigator,'language'),            P.lang)
@@ -318,10 +339,15 @@ test('ViewPort', 'height is integer',  Number.isInteger(vvp?.height ?? 0), true)
 
 // Timezone
 test('Timezone', 'Intl DTF timezone',       new Intl.DateTimeFormat().resolvedOptions().timeZone, P.tz)
+test('Timezone', 'Intl DTF locale',         new Intl.DateTimeFormat().resolvedOptions().locale,   P.lang)
 test('Timezone', 'getTimezoneOffset type',  typeof new Date().getTimezoneOffset(), 'number')
 
 // Intl
 test('Intl', 'NumberFormat locale', new Intl.NumberFormat().resolvedOptions().locale, P.lang)
+test('Intl', 'Collator locale', new Intl.Collator().resolvedOptions().locale, P.lang)
+if (typeof Intl.DisplayNames === 'function') {
+  test('Intl', 'DisplayNames locale', new Intl.DisplayNames([P.lang], { type: 'language' }).resolvedOptions().locale, P.lang)
+}
 
 // Geolocation
 let geoResult = null
@@ -373,27 +399,16 @@ test('WebRTC', 'iceTransportPolicy = relay', rtc.config?.iceTransportPolicy, 're
 test('WebRTC', 'STUN servers stripped',      rtc.config?.iceServers?.length,  0)
 
 // Workers
-const worker = new Worker('/worker.js')
-test('Workers', 'Worker uses blob wrapper', /^blob:/.test(worker?.url), true)
-test('Workers', 'Worker keeps classic type', worker?.options?.type, 'classic')
-test('Workers', 'Worker bootstrap contains spoofed UA', workerBlobs.get(worker?.url)?.parts?.join('')?.includes(P.userAgent), true)
-
-// Service Workers
-const swContainer = g(navigator, 'serviceWorker')
-test('ServiceWorker', 'container patched', typeof swContainer?.register, 'function')
-const swP = Promise.resolve()
-  .then(() => swContainer?.register('/sw.js'))
-  .then((fakeRegistration) => {
-    test('ServiceWorker', 'register resolves active worker', !!fakeRegistration?.active, true)
-    test('ServiceWorker', 'active scriptURL is spoofed', /\/sw\.js$/.test(fakeRegistration?.active?.scriptURL || ''), true)
-    return swContainer?.ready
-  })
-  .then((readyRegistration) => {
-    test('ServiceWorker', 'ready resolves', !!readyRegistration, true)
-  })
-  .catch(() => {
-    test('ServiceWorker', 'register resolves active worker', false, true)
-  })
+const dedicatedWorker = new Worker('https://abrahamjuliot.github.io/creepjs/tests/worker.js')
+const dedicatedWorkerBlob = workerBlobs.get(dedicatedWorker.url)
+const dedicatedWorkerSource = Array.isArray(dedicatedWorkerBlob?.parts)
+  ? dedicatedWorkerBlob.parts.map((part) => typeof part === 'string' ? part : String(part)).join('')
+  : ''
+test('Workers', 'worker wrapping', dedicatedWorker.url.startsWith('blob:peermesh-'), true)
+test('Workers', 'bootstrap keeps original script url', /worker\.js/.test(dedicatedWorkerSource), true)
+test('Workers', 'bootstrap re-wraps nested workers', /bootWorker\.toString\(\)/.test(dedicatedWorkerSource), true)
+const sharedWorker = new SharedWorker('https://abrahamjuliot.github.io/creepjs/tests/worker_shared.js')
+test('Workers', 'shared worker wrapping', sharedWorker.url.startsWith('blob:peermesh-'), true)
 
 // Orientation
 test('Orient', 'type matches persona', g(screen, 'orientation')?.type, IS_MOB ? 'portrait-primary' : 'landscape-primary')
@@ -443,6 +458,19 @@ const enumP = navigator.mediaDevices.enumerateDevices().then(devs => {
   test('Devices', 'microphones',   devs.filter(d=>d.kind==='audioinput').length,  1)
   test('Devices', 'audio outputs', devs.filter(d=>d.kind==='audiooutput').length, IS_MOB ? 1 : 2)
 }).catch(() => test('Devices', 'enumerateDevices resolves', false, true))
+
+const swP = navigator.serviceWorker.register('https://abrahamjuliot.github.io/creepjs/tests/worker_service.js')
+  .then(() => {
+    test('ServiceWorker', 'worker_service.js registration bypassed', false, true)
+  })
+  .catch((error) => {
+    test('ServiceWorker', 'worker_service.js registration bypassed', error?.name, 'AbortError')
+    return navigator.serviceWorker.register('https://abrahamjuliot.github.io/creepjs/tests/other.js')
+  })
+  .then((registration) => {
+    test('ServiceWorker', 'non-creep registration falls through', registration?.native, true)
+  })
+  .catch(() => test('ServiceWorker', 'register resolves', false, true))
 
 Promise.all([battP, enumP, swP]).then(render)
 

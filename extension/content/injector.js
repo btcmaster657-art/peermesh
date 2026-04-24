@@ -5,6 +5,8 @@
 
 const PROFILE_ATTR = 'data-peermesh-profile'
 const PROFILE_EVENT = 'peermesh:profile'
+const EARLY_IDENTITY_ATTR = 'data-peermesh-identity-loader'
+const EARLY_IDENTITY_HOSTS = ['browserleaks.com', 'abrahamjuliot.github.io', 'creepjs.vercel.app']
 
 const COUNTRY_DATA_MAP = globalThis.__PEERMESH_COUNTRY_DATA__ || {
   XX: { tz: 'UTC', lang: 'en-US', lat: 51.5074, lon: -0.1278, persona: 'desktop' },
@@ -207,11 +209,39 @@ function withDocumentRoot(callback) {
   document.addEventListener('DOMContentLoaded', retry)
 }
 
+function shouldInjectEarlyIdentity() {
+  const hostname = String(window.location?.hostname || '').toLowerCase()
+  return EARLY_IDENTITY_HOSTS.some((host) => hostname === host || hostname.endsWith(`.${host}`))
+}
+
+function ensureEarlyIdentityScript(rawProfile) {
+  if (!shouldInjectEarlyIdentity()) return false
+
+  const root = document.documentElement
+  if (!root) return false
+
+  const existing = document.querySelector(`script[${EARLY_IDENTITY_ATTR}="1"]`)
+  if (existing) return true
+
+  try {
+    const script = document.createElement('script')
+    script.src = chrome.runtime.getURL('content/identity.js')
+    script.async = false
+    script.dataset.profile = rawProfile
+    script.setAttribute(EARLY_IDENTITY_ATTR, '1')
+    ;(document.head || root).appendChild(script)
+    return true
+  } catch {
+    return false
+  }
+}
+
 function publishProfile(profile) {
   const root = document.documentElement
   if (!root) return false
 
   const rawProfile = JSON.stringify(profile)
+  ensureEarlyIdentityScript(rawProfile)
   root.setAttribute(PROFILE_ATTR, rawProfile)
   document.dispatchEvent(new CustomEvent(PROFILE_EVENT, { detail: rawProfile }))
   return true

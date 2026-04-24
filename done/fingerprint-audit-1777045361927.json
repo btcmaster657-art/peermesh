@@ -1,0 +1,316 @@
+{
+  "generatedAt": "2026-04-24T15:42:41.927Z",
+  "headless": true,
+  "browserPath": "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+  "sites": [
+    {
+      "name": "proxyrack-register",
+      "url": "https://peer.proxyrack.com/register"
+    }
+  ],
+  "runs": [
+    {
+      "name": "control",
+      "browserPath": "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+      "headless": true,
+      "results": [
+        {
+          "name": "proxyrack-register",
+          "url": "https://peer.proxyrack.com/register",
+          "snapshot": {
+            "href": "https://peer.proxyrack.com/register",
+            "title": "Just a moment...",
+            "extensionFlag": null,
+            "extVersion": null,
+            "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0",
+            "lang": "en-US",
+            "languages": [
+              "en-US",
+              "en"
+            ],
+            "platform": "Win32",
+            "timezone": "Africa/Lagos",
+            "locale": "en-US",
+            "screen": {
+              "width": 800,
+              "height": 600,
+              "availWidth": 800,
+              "availHeight": 600,
+              "colorDepth": 24,
+              "pixelDepth": 24
+            },
+            "window": {
+              "innerWidth": 1568,
+              "innerHeight": 1104,
+              "outerWidth": 1600,
+              "outerHeight": 1200,
+              "devicePixelRatio": 1,
+              "visualViewportHeight": 1104,
+              "visualViewportWidth": 1568
+            },
+            "uaData": {
+              "mobile": false,
+              "platform": "Windows",
+              "brands": [
+                {
+                  "brand": "Microsoft Edge",
+                  "version": "147"
+                },
+                {
+                  "brand": "Not.A/Brand",
+                  "version": "8"
+                },
+                {
+                  "brand": "Chromium",
+                  "version": "147"
+                }
+              ]
+            },
+            "uaHighEntropy": {
+              "architecture": "x86",
+              "bitness": "64",
+              "brands": [
+                {
+                  "brand": "Microsoft Edge",
+                  "version": "147"
+                },
+                {
+                  "brand": "Not.A/Brand",
+                  "version": "8"
+                },
+                {
+                  "brand": "Chromium",
+                  "version": "147"
+                }
+              ],
+              "formFactors": [
+                "Desktop"
+              ],
+              "fullVersionList": [
+                {
+                  "brand": "Microsoft Edge",
+                  "version": "147.0.3912.72"
+                },
+                {
+                  "brand": "Not.A/Brand",
+                  "version": "8.0.0.0"
+                },
+                {
+                  "brand": "Chromium",
+                  "version": "147.0.7727.102"
+                }
+              ],
+              "mobile": false,
+              "model": "",
+              "platform": "Windows",
+              "platformVersion": "10.0.0",
+              "uaFullVersion": "147.0.3912.72"
+            },
+            "connection": {
+              "type": null,
+              "effectiveType": "4g",
+              "downlink": 4.4,
+              "rtt": 200,
+              "saveData": false
+            },
+            "pluginsLength": 5,
+            "mimeTypesLength": 2,
+            "perf": {
+              "nowInteger": false
+            },
+            "media": {
+              "darkMode": true,
+              "finePointer": true,
+              "coarsePointer": false
+            },
+            "batteryApi": true,
+            "serviceWorkerApi": true,
+            "canvas": {
+              "hash": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAQAAAABACAYAAAD1Xam+AAAQAElEQVR4Aeyca6xdRRXH/5sW2v"
+            },
+            "webgl": {
+              "vendor": "Google Inc. (Microsoft)",
+              "renderer": "ANGLE (Microsoft, Microsoft Basic Render Driver (0x0000008C) Direct3D11 vs_5_0 ps_5_0, D3D11)"
+            },
+            "audio": {
+              "sampleRate": 48000,
+              "maxChannelCount": 2,
+              "channelCount": 2
+            },
+            "speechVoices": 0,
+            "iframeProbe": {
+              "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0",
+              "platform": "Win32"
+            },
+            "turnstileFrames": 0,
+            "pageText": "peer.proxyrack.com\nPerforming security verification\n\nThis website uses a security service to protect against malicious bots. This page is displayed while the website verifies you are not a bot.\n\nRay ID: 9f1637c89f13532a\nPerformance and Security by Cloudflare\nPrivacy"
+          },
+          "console": [],
+          "logs": [
+            {
+              "page": "proxyrack-register",
+              "level": "error",
+              "text": "Failed to load resource: the server responded with a status of 403 ()"
+            },
+            {
+              "page": "proxyrack-register",
+              "level": "error",
+              "text": "Failed to load resource: the server responded with a status of 403 ()"
+            },
+            {
+              "page": "proxyrack-register",
+              "level": "warning",
+              "text": "Tracking Prevention blocked access to storage for https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/turnstile/f/ov2/av0/rch/i0di1/0x4AAAAAAADnPIDROrmt1Wwj/dark/fbE/new/normal?lang=auto."
+            },
+            {
+              "page": "proxyrack-register",
+              "level": "warning",
+              "text": "Tracking Prevention blocked access to storage for https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/turnstile/f/ov2/av0/rch/i0di1/0x4AAAAAAADnPIDROrmt1Wwj/dark/fbE/new/normal?lang=auto."
+            },
+            {
+              "page": "proxyrack-register",
+              "level": "warning",
+              "text": "Tracking Prevention blocked access to storage for https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/turnstile/f/ov2/av0/rch/i0di1/0x4AAAAAAADnPIDROrmt1Wwj/dark/fbE/new/normal?lang=auto."
+            },
+            {
+              "page": "proxyrack-register",
+              "level": "warning",
+              "text": "Tracking Prevention blocked access to storage for https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/turnstile/f/ov2/av0/rch/i0di1/0x4AAAAAAADnPIDROrmt1Wwj/dark/fbE/new/normal?lang=auto."
+            },
+            {
+              "page": "proxyrack-register",
+              "level": "error",
+              "text": "Failed to load resource: the server responded with a status of 403 ()"
+            },
+            {
+              "page": "proxyrack-register",
+              "level": "warning",
+              "text": "Tracking Prevention blocked access to storage for https://challenges.cloudflare.com/."
+            },
+            {
+              "page": "proxyrack-register",
+              "level": "warning",
+              "text": "Tracking Prevention blocked access to storage for https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/cmg/1."
+            },
+            {
+              "page": "proxyrack-register",
+              "level": "warning",
+              "text": "Tracking Prevention blocked access to storage for https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/cmg/1."
+            },
+            {
+              "page": "proxyrack-register",
+              "level": "warning",
+              "text": "Tracking Prevention blocked access to storage for https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/cmg/1."
+            },
+            {
+              "page": "proxyrack-register",
+              "level": "warning",
+              "text": "Tracking Prevention blocked access to storage for https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/cmg/1."
+            },
+            {
+              "page": "proxyrack-register",
+              "level": "warning",
+              "text": "Tracking Prevention blocked access to storage for https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/flow/ov1/4102513725:1777043524:YOM6LMoz84nERDNnIrOVn04vfNysWgwzWeeF9rQU0H8/9f1637d85a6fc0ee/HC2j74UMVSoG6id0khc5vWBqwBmbM0f5i3S8_xbuFT4-1777045349-1.2.1.1-u8fMDSELbu3mV3GMdsupgz41.avcUN_9i_g9tonY6Jyqrviwsi0Lj1NALdCLHMju."
+            },
+            {
+              "page": "proxyrack-register",
+              "level": "warning",
+              "text": "Tracking Prevention blocked access to storage for https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/flow/ov1/4102513725:1777043524:YOM6LMoz84nERDNnIrOVn04vfNysWgwzWeeF9rQU0H8/9f1637d85a6fc0ee/HC2j74UMVSoG6id0khc5vWBqwBmbM0f5i3S8_xbuFT4-1777045349-1.2.1.1-u8fMDSELbu3mV3GMdsupgz41.avcUN_9i_g9tonY6Jyqrviwsi0Lj1NALdCLHMju."
+            },
+            {
+              "page": "proxyrack-register",
+              "level": "warning",
+              "text": "Tracking Prevention blocked access to storage for https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/flow/ov1/4102513725:1777043524:YOM6LMoz84nERDNnIrOVn04vfNysWgwzWeeF9rQU0H8/9f1637d85a6fc0ee/HC2j74UMVSoG6id0khc5vWBqwBmbM0f5i3S8_xbuFT4-1777045349-1.2.1.1-u8fMDSELbu3mV3GMdsupgz41.avcUN_9i_g9tonY6Jyqrviwsi0Lj1NALdCLHMju."
+            },
+            {
+              "page": "proxyrack-register",
+              "level": "warning",
+              "text": "Tracking Prevention blocked access to storage for https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/flow/ov1/4102513725:1777043524:YOM6LMoz84nERDNnIrOVn04vfNysWgwzWeeF9rQU0H8/9f1637d85a6fc0ee/HC2j74UMVSoG6id0khc5vWBqwBmbM0f5i3S8_xbuFT4-1777045349-1.2.1.1-u8fMDSELbu3mV3GMdsupgz41.avcUN_9i_g9tonY6Jyqrviwsi0Lj1NALdCLHMju."
+            },
+            {
+              "page": "proxyrack-register",
+              "level": "warning",
+              "text": "Tracking Prevention blocked access to storage for https://challenges.cloudflare.com/."
+            },
+            {
+              "page": "proxyrack-register",
+              "level": "warning",
+              "text": "Tracking Prevention blocked access to storage for https://challenges.cloudflare.com/."
+            },
+            {
+              "page": "proxyrack-register",
+              "level": "warning",
+              "text": "Tracking Prevention blocked access to storage for https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/turnstile/f/ov2/av0/rch/i0di1/0x4AAAAAAADnPIDROrmt1Wwj/dark/fbE/new/normal?lang=auto."
+            },
+            {
+              "page": "proxyrack-register",
+              "level": "warning",
+              "text": "Tracking Prevention blocked access to storage for https://challenges.cloudflare.com/."
+            },
+            {
+              "page": "proxyrack-register",
+              "level": "warning",
+              "text": "Tracking Prevention blocked access to storage for https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/d/9f1637d85a6fc0ee/1777045350135/D9DXvQOIPxUobUy."
+            },
+            {
+              "page": "proxyrack-register",
+              "level": "warning",
+              "text": "Tracking Prevention blocked access to storage for https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/d/9f1637d85a6fc0ee/1777045350135/D9DXvQOIPxUobUy."
+            },
+            {
+              "page": "proxyrack-register",
+              "level": "warning",
+              "text": "Tracking Prevention blocked access to storage for https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/d/9f1637d85a6fc0ee/1777045350135/D9DXvQOIPxUobUy."
+            },
+            {
+              "page": "proxyrack-register",
+              "level": "warning",
+              "text": "Tracking Prevention blocked access to storage for https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/d/9f1637d85a6fc0ee/1777045350135/D9DXvQOIPxUobUy."
+            },
+            {
+              "page": "proxyrack-register",
+              "level": "warning",
+              "text": "Tracking Prevention blocked access to storage for https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/pat/9f1637d85a6fc0ee/1777045350135/ef4a0a67a5d91b1cda027ba273f0dc7c7625672d8b7d900701654b5f2c543efc/yo8BYBgy8aqGhMw."
+            },
+            {
+              "page": "proxyrack-register",
+              "level": "warning",
+              "text": "Tracking Prevention blocked access to storage for https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/pat/9f1637d85a6fc0ee/1777045350135/ef4a0a67a5d91b1cda027ba273f0dc7c7625672d8b7d900701654b5f2c543efc/yo8BYBgy8aqGhMw."
+            },
+            {
+              "page": "proxyrack-register",
+              "level": "warning",
+              "text": "Tracking Prevention blocked access to storage for https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/pat/9f1637d85a6fc0ee/1777045350135/ef4a0a67a5d91b1cda027ba273f0dc7c7625672d8b7d900701654b5f2c543efc/yo8BYBgy8aqGhMw."
+            },
+            {
+              "page": "proxyrack-register",
+              "level": "warning",
+              "text": "Tracking Prevention blocked access to storage for https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/pat/9f1637d85a6fc0ee/1777045350135/ef4a0a67a5d91b1cda027ba273f0dc7c7625672d8b7d900701654b5f2c543efc/yo8BYBgy8aqGhMw."
+            },
+            {
+              "page": "proxyrack-register",
+              "level": "warning",
+              "text": "Tracking Prevention blocked access to storage for https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/flow/ov1/4102513725:1777043524:YOM6LMoz84nERDNnIrOVn04vfNysWgwzWeeF9rQU0H8/9f1637d85a6fc0ee/HC2j74UMVSoG6id0khc5vWBqwBmbM0f5i3S8_xbuFT4-1777045349-1.2.1.1-u8fMDSELbu3mV3GMdsupgz41.avcUN_9i_g9tonY6Jyqrviwsi0Lj1NALdCLHMju."
+            },
+            {
+              "page": "proxyrack-register",
+              "level": "warning",
+              "text": "Tracking Prevention blocked access to storage for https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/flow/ov1/4102513725:1777043524:YOM6LMoz84nERDNnIrOVn04vfNysWgwzWeeF9rQU0H8/9f1637d85a6fc0ee/HC2j74UMVSoG6id0khc5vWBqwBmbM0f5i3S8_xbuFT4-1777045349-1.2.1.1-u8fMDSELbu3mV3GMdsupgz41.avcUN_9i_g9tonY6Jyqrviwsi0Lj1NALdCLHMju."
+            },
+            {
+              "page": "proxyrack-register",
+              "level": "warning",
+              "text": "Tracking Prevention blocked access to storage for https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/flow/ov1/4102513725:1777043524:YOM6LMoz84nERDNnIrOVn04vfNysWgwzWeeF9rQU0H8/9f1637d85a6fc0ee/HC2j74UMVSoG6id0khc5vWBqwBmbM0f5i3S8_xbuFT4-1777045349-1.2.1.1-u8fMDSELbu3mV3GMdsupgz41.avcUN_9i_g9tonY6Jyqrviwsi0Lj1NALdCLHMju."
+            },
+            {
+              "page": "proxyrack-register",
+              "level": "warning",
+              "text": "Tracking Prevention blocked access to storage for https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/flow/ov1/4102513725:1777043524:YOM6LMoz84nERDNnIrOVn04vfNysWgwzWeeF9rQU0H8/9f1637d85a6fc0ee/HC2j74UMVSoG6id0khc5vWBqwBmbM0f5i3S8_xbuFT4-1777045349-1.2.1.1-u8fMDSELbu3mV3GMdsupgz41.avcUN_9i_g9tonY6Jyqrviwsi0Lj1NALdCLHMju."
+            }
+          ],
+          "exceptions": []
+        }
+      ]
+    }
+  ]
+}

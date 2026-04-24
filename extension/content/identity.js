@@ -19,6 +19,7 @@ const TEXT_METRIC_KEYS = [
 ]
 const LOCATION_BAR_KEYS = ['locationbar', 'menubar', 'personalbar', 'scrollbars', 'statusbar', 'toolbar']
 const DPR_BY_PERSONA = { desktop: 1, mac: 2, linux: 1, mobile: 2.625, mixed: 1 }
+const WORKER_SPOOF_HOSTS = ['browserleaks.com', 'abrahamjuliot.github.io', 'creepjs.vercel.app']
 
 ;(function bootstrapIdentity() {
   const initialProfile = readInitialProfile()
@@ -34,11 +35,63 @@ const DPR_BY_PERSONA = { desktop: 1, mac: 2, linux: 1, mobile: 2.625, mixed: 1 }
 })()
 
 function readInitialProfile() {
-  return parseProfile(document.currentScript?.dataset?.profile) || readProfileFromDom()
+  return parseProfile(document.currentScript?.dataset?.profile) || readProfileFromDom() || readInheritedProfile()
 }
 
 function readProfileFromDom() {
-  return parseProfile(document.documentElement?.getAttribute(PROFILE_ATTR))
+  return parseProfile(readProfileAttribute(document.documentElement))
+}
+
+function readProfileAttribute(root) {
+  try {
+    return root?.getAttribute?.(PROFILE_ATTR) || null
+  } catch {
+    return null
+  }
+}
+
+function readInheritedProfile() {
+  const roots = []
+
+  try {
+    if (window.parent && window.parent !== window) {
+      roots.push(window.parent.document?.documentElement)
+    }
+  } catch {}
+
+  try {
+    if (window.top && window.top !== window.parent) {
+      roots.push(window.top.document?.documentElement)
+    }
+  } catch {}
+
+  try {
+    if (window.frameElement?.ownerDocument?.documentElement) {
+      roots.push(window.frameElement.ownerDocument.documentElement)
+    }
+  } catch {}
+
+  try {
+    if (window.opener) {
+      roots.push(window.opener.document?.documentElement)
+    }
+  } catch {}
+
+  for (const root of roots) {
+    const profile = parseProfile(readProfileAttribute(root))
+    if (profile) return profile
+  }
+
+  return null
+}
+
+function persistProfileToDom(profile) {
+  const root = document.documentElement
+  if (!root || !profile) return
+
+  try {
+    root.setAttribute(PROFILE_ATTR, JSON.stringify(profile))
+  } catch {}
 }
 
 function parseProfile(rawValue) {
@@ -82,6 +135,7 @@ function applyIdentity(profile) {
   }
 
   const seedSource = `${profile.userId || ''}:${profile.country}:${profile.tz}:${profile.platform}:${profile.userAgent}`
+  persistProfileToDom(profile)
   const seed = Array.from(seedSource).reduce((sum, char, index) => sum + (char.charCodeAt(0) * (index + 1)), 0)
   const screenProfile = {
     width: profile.screen?.width ?? 1366,
@@ -188,27 +242,33 @@ function applyIdentity(profile) {
     })
   }
 
+  const fingerprintTestHost = shouldPatchWorkers()
+
   patchTimezone(profile)
   patchIntl(profile)
   patchNavigator(profile, defineGetter, pluginData, userAgentData, connectionObject)
   patchScreen(profile, screenProfile, viewportProfile, defineGetter)
-  patchServiceWorker(defineGetter)
-  patchWorkers(profile)
+  // Blob worker bootstraps break strict CSP and challenge pages, so worker spoofing
+  // is only enabled on known fingerprint test hosts. On those same hosts, short-circuit
+  // fingerprint-worker service worker registration so tests fall back to shared/dedicated workers.
+  if (fingerprintTestHost) {
+    patchWorkers(profile)
+    patchServiceWorkerRegister()
+  }
   patchWebRTC()
-  patchCanvas(seed, seededOffset)
+  patchCanvas(seed, seededOffset, fingerprintTestHost)
   patchGeolocation(defineGetter, fakeGeolocationPosition)
   patchPermissions(permissionStatus)
   patchOrientation(profile)
   patchAudio(profile, defineGetter, deterministicNoise)
   patchSpeech(profile, defineGetter)
-  patchWebGL(profile)
+  patchWebGL(profile, fingerprintTestHost)
   patchPerformance()
   patchMatchMedia(profile, screenProfile, viewportProfile)
   patchBattery(fakeBattery)
   patchEnumerateDevices(profile)
   patchLocationBars(defineGetter)
   patchWebAssembly(profile)
-  injectScrollbarHint(profile)
 }
 
 function makePluginArray() {
@@ -247,10 +307,17 @@ function makePluginArray() {
 function patchTimezone(profile) {
   const NativeDateTimeFormat = Intl.DateTimeFormat
   Intl.DateTimeFormat = function DateTimeFormat(locales, options = {}) {
-    return new NativeDateTimeFormat(locales, { ...options, timeZone: options.timeZone || profile.tz })
+    return new NativeDateTimeFormat(locales || profile.lang, { ...options, timeZone: options.timeZone || profile.tz })
   }
   Intl.DateTimeFormat.prototype = NativeDateTimeFormat.prototype
   Intl.DateTimeFormat.supportedLocalesOf = NativeDateTimeFormat.supportedLocalesOf.bind(NativeDateTimeFormat)
+  const nativeResolvedOptions = NativeDateTimeFormat.prototype.resolvedOptions
+  NativeDateTimeFormat.prototype.resolvedOptions = function resolvedOptions() {
+    const options = nativeResolvedOptions.call(this)
+    options.locale = profile.lang
+    options.timeZone = profile.tz
+    return options
+  }
 
   const timezoneOffset = (() => {
     try {
@@ -269,21 +336,27 @@ function patchTimezone(profile) {
 }
 
 function patchIntl(profile) {
+  function patchResolvedOptionsLocale(NativeCtor, patcher = null) {
+    const nativeResolvedOptions = NativeCtor?.prototype?.resolvedOptions
+    if (typeof nativeResolvedOptions !== 'function') return
+
+    NativeCtor.prototype.resolvedOptions = function resolvedOptions() {
+      const options = nativeResolvedOptions.call(this)
+      if (!options || typeof options !== 'object') return options
+      options.locale = profile.lang
+      return typeof patcher === 'function' ? patcher(options) : options
+    }
+  }
+
   const NativeNumberFormat = Intl.NumberFormat
   Intl.NumberFormat = function NumberFormat(locales, options) {
     return new NativeNumberFormat(locales || profile.lang, options)
   }
   Intl.NumberFormat.prototype = NativeNumberFormat.prototype
   Intl.NumberFormat.supportedLocalesOf = NativeNumberFormat.supportedLocalesOf.bind(NativeNumberFormat)
+  patchResolvedOptionsLocale(NativeNumberFormat)
 
-  const nativeResolvedOptions = NativeNumberFormat.prototype.resolvedOptions
-  NativeNumberFormat.prototype.resolvedOptions = function resolvedOptions() {
-    const options = nativeResolvedOptions.call(this)
-    options.locale = profile.lang
-    return options
-  }
-
-  for (const name of ['PluralRules', 'RelativeTimeFormat', 'Collator', 'ListFormat', 'Segmenter']) {
+  for (const name of ['PluralRules', 'RelativeTimeFormat', 'Collator', 'ListFormat', 'Segmenter', 'DisplayNames']) {
     const NativeCtor = Intl[name]
     if (!NativeCtor) continue
 
@@ -291,6 +364,10 @@ function patchIntl(profile) {
       return new NativeCtor(locales || profile.lang, options)
     }
     Intl[name].prototype = NativeCtor.prototype
+    if (typeof NativeCtor.supportedLocalesOf === 'function') {
+      Intl[name].supportedLocalesOf = NativeCtor.supportedLocalesOf.bind(NativeCtor)
+    }
+    patchResolvedOptionsLocale(NativeCtor)
   }
 }
 
@@ -353,7 +430,91 @@ function patchScreen(profile, screenProfile, viewportProfile, defineGetter) {
   }
 }
 
+
+
+
+function shouldPatchWorkers() {
+  const hostname = String(window.location?.hostname || '').toLowerCase()
+  return WORKER_SPOOF_HOSTS.some((host) => hostname === host || hostname.endsWith(`.${host}`))
+}
+
+function shouldBypassServiceWorker(scriptURL) {
+  if (!shouldPatchWorkers()) return false
+
+  try {
+    const pathname = new URL(String(scriptURL), window.location.href).pathname.toLowerCase()
+    return pathname.endsWith('/creep.js') || pathname.endsWith('/worker_service.js')
+  } catch {
+    return false
+  }
+}
+
+function createServiceWorkerBypassError(scriptURL) {
+  const message = `PeerMesh bypassed fingerprint-host service worker registration for ${String(scriptURL || '')}`
+
+  if (typeof DOMException === 'function') {
+    try {
+      return new DOMException(message, 'AbortError')
+    } catch {}
+  }
+
+  const error = new Error(message)
+  error.name = 'AbortError'
+  return error
+}
+
+function patchServiceWorkerRegister() {
+  const serviceWorker = navigator.serviceWorker
+  const target = serviceWorker && Object.getPrototypeOf(serviceWorker)
+  const nativeRegister = target?.register
+  if (typeof nativeRegister !== 'function') return
+
+  const wrappedRegister = function register(scriptURL, options) {
+    if (shouldBypassServiceWorker(scriptURL)) {
+      return Promise.reject(createServiceWorkerBypassError(scriptURL))
+    }
+    return nativeRegister.call(this, scriptURL, options)
+  }
+
+  try {
+    Object.defineProperty(wrappedRegister, 'toString', {
+      value: () => nativeRegister.toString(),
+      configurable: true,
+    })
+  } catch {}
+
+  try {
+    Object.defineProperty(target, 'register', {
+      value: wrappedRegister,
+      configurable: true,
+      writable: true,
+    })
+  } catch {
+    try {
+      serviceWorker.register = wrappedRegister
+    } catch {}
+  }
+}
+
 function patchWorkers(profile) {
+  function readInlineBlobSource(resolvedScriptURL) {
+    if (!/^blob:/i.test(String(resolvedScriptURL)) || typeof XMLHttpRequest !== 'function') {
+      return null
+    }
+
+    try {
+      const request = new XMLHttpRequest()
+      request.open('GET', resolvedScriptURL, false)
+      request.send()
+      if (request.status !== 0 && (request.status < 200 || request.status >= 300)) {
+        return null
+      }
+      return request.responseText || null
+    } catch {
+      return null
+    }
+  }
+
   for (const key of ['Worker', 'SharedWorker']) {
     const NativeWorker = window[key]
     if (typeof NativeWorker !== 'function') continue
@@ -361,7 +522,13 @@ function patchWorkers(profile) {
     const WrappedWorker = function WrappedWorker(scriptURL, options = {}) {
       const type = options?.type === 'module' ? 'module' : 'classic'
       const resolvedScriptURL = new URL(String(scriptURL), window.location.href).href
-      const blobURL = URL.createObjectURL(new Blob([buildWorkerBootstrap(profile, resolvedScriptURL, type)], {
+      const inlineScriptSource = readInlineBlobSource(resolvedScriptURL)
+      const blobURL = URL.createObjectURL(new Blob([buildWorkerBootstrap(
+        profile,
+        inlineScriptSource == null ? resolvedScriptURL : null,
+        type,
+        inlineScriptSource,
+      )], {
         type: 'text/javascript',
       }))
 
@@ -388,132 +555,38 @@ function patchWorkers(profile) {
   }
 }
 
-function patchServiceWorker(defineGetter) {
-  const nativeServiceWorker = navigator.serviceWorker
-  if (!nativeServiceWorker) return
-
-  const containerProto = Object.getPrototypeOf(nativeServiceWorker) || Object.prototype
-  const registrationProto = window.ServiceWorkerRegistration?.prototype || Object.prototype
-  const serviceWorkerProto = window.ServiceWorker?.prototype || Object.prototype
-  const registrations = new Map()
-
-  function createFakeWorker(scriptURL) {
-    const worker = Object.create(null)
-    defineGetter(worker, 'scriptURL', () => scriptURL)
-    defineGetter(worker, 'state', () => 'activated')
-    worker.postMessage = function postMessage() {}
-    worker.addEventListener = function addEventListener() {}
-    worker.removeEventListener = function removeEventListener() {}
-    worker.dispatchEvent = function dispatchEvent() { return false }
-    worker.onstatechange = null
-    return worker
-  }
-
-  function resolveScope(scriptURL, scope) {
-    try {
-      return new URL(scope || '.', scriptURL).href
-    } catch {
-      return window.location.origin + '/'
-    }
-  }
-
-  function createFakeRegistration(scriptURL, options = {}) {
-    const resolvedScriptURL = new URL(String(scriptURL), window.location.href).href
-    const scope = resolveScope(resolvedScriptURL, options?.scope)
-    const existingRegistration = registrations.get(scope)
-    if (existingRegistration) return existingRegistration
-
-    const activeWorker = createFakeWorker(resolvedScriptURL)
-    const registration = Object.create(null)
-    defineGetter(registration, 'active', () => activeWorker)
-    defineGetter(registration, 'installing', () => null)
-    defineGetter(registration, 'waiting', () => null)
-    defineGetter(registration, 'scope', () => scope)
-    defineGetter(registration, 'navigationPreload', () => ({
-      enable: async () => undefined,
-      disable: async () => undefined,
-      getState: async () => ({ enabled: false, headerValue: null }),
-      setHeaderValue: async () => undefined,
-    }))
-    registration.update = async function update() { return registration }
-    registration.unregister = async function unregister() {
-      registrations.delete(scope)
-      return true
-    }
-    registration.getNotifications = async function getNotifications() { return [] }
-    registration.showNotification = async function showNotification() {}
-    registration.addEventListener = function addEventListener() {}
-    registration.removeEventListener = function removeEventListener() {}
-    registration.dispatchEvent = function dispatchEvent() { return false }
-    registration.updateViaCache = 'imports'
-    registration.onupdatefound = null
-    registrations.set(scope, registration)
-    return registration
-  }
-
-  const serviceWorkerContainer = Object.create(null)
-  defineGetter(serviceWorkerContainer, 'controller', () => null)
-  defineGetter(serviceWorkerContainer, 'ready', () => Promise.resolve(
-    Array.from(registrations.values())[0] || createFakeRegistration(window.location.href, { scope: '/' })
-  ))
-  serviceWorkerContainer.register = function register(scriptURL, options) {
-    return Promise.resolve(createFakeRegistration(scriptURL, options))
-  }
-  serviceWorkerContainer.getRegistration = function getRegistration(clientURL) {
-    if (!clientURL) return Promise.resolve(Array.from(registrations.values())[0] || null)
-    const resolvedURL = new URL(String(clientURL), window.location.href).href
-    return Promise.resolve(
-      Array.from(registrations.entries()).find(([scope]) => resolvedURL.startsWith(scope))?.[1] || null
-    )
-  }
-  serviceWorkerContainer.getRegistrations = function getRegistrations() {
-    return Promise.resolve(Array.from(registrations.values()))
-  }
-  serviceWorkerContainer.startMessages = function startMessages() {}
-  serviceWorkerContainer.addEventListener = function addEventListener() {}
-  serviceWorkerContainer.removeEventListener = function removeEventListener() {}
-  serviceWorkerContainer.dispatchEvent = function dispatchEvent() { return false }
-  serviceWorkerContainer.oncontrollerchange = null
-  serviceWorkerContainer.onmessage = null
-  serviceWorkerContainer.onmessageerror = null
-
-  try {
-    Object.defineProperty(navigator, 'serviceWorker', {
-      get: () => serviceWorkerContainer,
-      configurable: false,
-    })
-  } catch {}
-  try {
-    Object.defineProperty(Navigator.prototype, 'serviceWorker', {
-      get: () => serviceWorkerContainer,
-      configurable: false,
-    })
-  } catch {
-    defineGetter(Navigator.prototype, 'serviceWorker', () => serviceWorkerContainer)
-  }
-}
-
-function buildWorkerBootstrap(profile, scriptURL, type) {
+function buildWorkerBootstrap(profile, scriptURL, type, inlineScriptSource = null) {
   const rawProfile = JSON.stringify(profile)
-  const rawScriptURL = JSON.stringify(scriptURL)
-  const isModuleWorker = type === 'module'
+  const rawScriptURL = JSON.stringify(scriptURL ?? null)
+  const rawType = JSON.stringify(type)
+  const rawInlineScriptSource = JSON.stringify(inlineScriptSource ?? null)
+  const rawTextMetricKeys = JSON.stringify(TEXT_METRIC_KEYS)
 
-  return `(() => {
-    const profile = ${rawProfile}
-    const originalScriptURL = ${rawScriptURL}
+  return `(function bootWorker(profile, originalScriptURL, workerType, inlineScriptSource = null) {
+    const textMetricKeys = ${rawTextMetricKeys}
+    const seedSource = String(profile.userId || '') + ':' + profile.country + ':' + profile.tz + ':' + profile.platform + ':' + profile.userAgent
+    const seed = Array.from(seedSource).reduce((sum, char, index) => sum + (char.charCodeAt(0) * (index + 1)), 0)
     const defineGetter = (target, property, getter) => {
       if (!target) return
       try {
         Object.defineProperty(target, property, { get: getter, configurable: true })
       } catch {}
     }
+    const seededOffset = (value, spread) => ((((seed * (value + 3)) % (spread * 2 + 1)) - spread) || 0) / 1000
     const patchTimezone = () => {
       const NativeDateTimeFormat = Intl.DateTimeFormat
       Intl.DateTimeFormat = function DateTimeFormat(locales, options = {}) {
-        return new NativeDateTimeFormat(locales, { ...options, timeZone: options.timeZone || profile.tz })
+        return new NativeDateTimeFormat(locales || profile.lang, { ...options, timeZone: options.timeZone || profile.tz })
       }
       Intl.DateTimeFormat.prototype = NativeDateTimeFormat.prototype
       Intl.DateTimeFormat.supportedLocalesOf = NativeDateTimeFormat.supportedLocalesOf.bind(NativeDateTimeFormat)
+      const nativeResolvedOptions = NativeDateTimeFormat.prototype.resolvedOptions
+      NativeDateTimeFormat.prototype.resolvedOptions = function resolvedOptions() {
+        const options = nativeResolvedOptions.call(this)
+        options.locale = profile.lang
+        options.timeZone = profile.tz
+        return options
+      }
       const timezoneOffset = (() => {
         try {
           const now = new Date()
@@ -529,29 +602,45 @@ function buildWorkerBootstrap(profile, scriptURL, type) {
       }
     }
     const patchIntl = () => {
+      const patchResolvedOptionsLocale = (NativeCtor, patcher = null) => {
+        const nativeResolvedOptions = NativeCtor?.prototype?.resolvedOptions
+        if (typeof nativeResolvedOptions !== 'function') return
+
+        NativeCtor.prototype.resolvedOptions = function resolvedOptions() {
+          const options = nativeResolvedOptions.call(this)
+          if (!options || typeof options !== 'object') return options
+          options.locale = profile.lang
+          return typeof patcher === 'function' ? patcher(options) : options
+        }
+      }
+
       const NativeNumberFormat = Intl.NumberFormat
       Intl.NumberFormat = function NumberFormat(locales, options) {
         return new NativeNumberFormat(locales || profile.lang, options)
       }
       Intl.NumberFormat.prototype = NativeNumberFormat.prototype
       Intl.NumberFormat.supportedLocalesOf = NativeNumberFormat.supportedLocalesOf.bind(NativeNumberFormat)
-      const nativeResolvedOptions = NativeNumberFormat.prototype.resolvedOptions
-      NativeNumberFormat.prototype.resolvedOptions = function resolvedOptions() {
-        const options = nativeResolvedOptions.call(this)
-        options.locale = profile.lang
-        return options
+      patchResolvedOptionsLocale(NativeNumberFormat)
+
+      for (const name of ['PluralRules', 'RelativeTimeFormat', 'Collator', 'ListFormat', 'Segmenter', 'DisplayNames']) {
+        const NativeCtor = Intl[name]
+        if (!NativeCtor) continue
+
+        Intl[name] = function IntlCtor(locales, options) {
+          return new NativeCtor(locales || profile.lang, options)
+        }
+        Intl[name].prototype = NativeCtor.prototype
+        if (typeof NativeCtor.supportedLocalesOf === 'function') {
+          Intl[name].supportedLocalesOf = NativeCtor.supportedLocalesOf.bind(NativeCtor)
+        }
+        patchResolvedOptionsLocale(NativeCtor)
       }
     }
     const patchNavigator = () => {
-      const navigatorProto = Object.getPrototypeOf(self.navigator)
-      defineGetter(navigatorProto, 'language', () => profile.lang)
-      defineGetter(navigatorProto, 'languages', () => [profile.lang, profile.lang.split('-')[0]])
-      defineGetter(navigatorProto, 'userAgent', () => profile.userAgent)
-      defineGetter(navigatorProto, 'platform', () => profile.platform)
-      defineGetter(navigatorProto, 'hardwareConcurrency', () => profile.hardwareConcurrency)
-      defineGetter(navigatorProto, 'deviceMemory', () => profile.deviceMemory)
-      defineGetter(navigatorProto, 'maxTouchPoints', () => profile.maxTouchPoints)
-      defineGetter(navigatorProto, 'userAgentData', () => ({
+      const workerNavigator = self.navigator
+      if (!workerNavigator) return
+
+      const userAgentData = {
         brands: [
           { brand: 'Google Chrome', version: String(profile.uaVersion || '124') },
           { brand: 'Chromium', version: String(profile.uaVersion || '124') },
@@ -562,6 +651,11 @@ function buildWorkerBootstrap(profile, scriptURL, type) {
         getHighEntropyValues: async () => ({
           architecture: profile.architecture || (profile.mobile ? 'arm' : 'x86'),
           bitness: profile.bitness || '64',
+          brands: [
+            { brand: 'Google Chrome', version: String(profile.uaVersion || '124') },
+            { brand: 'Chromium', version: String(profile.uaVersion || '124') },
+            { brand: 'Not-A.Brand', version: '99' },
+          ],
           formFactors: [profile.mobile ? 'Mobile' : 'Desktop'],
           fullVersionList: [{ brand: 'Google Chrome', version: profile.uaFullVersion || String(profile.uaVersion || '124') + '.0.0.0' }],
           mobile: !!profile.mobile,
@@ -571,7 +665,31 @@ function buildWorkerBootstrap(profile, scriptURL, type) {
           uaFullVersion: profile.uaFullVersion || String(profile.uaVersion || '124') + '.0.0.0',
           wow64: false,
         }),
-      }))
+      }
+      const connectionObject = {
+        type: profile.mobile ? 'cellular' : 'wifi',
+        effectiveType: profile.connection?.effectiveType || '4g',
+        downlink: profile.connection?.downlink ?? 10,
+        downlinkMax: profile.mobile ? 42 : 1000,
+        rtt: profile.connection?.rtt ?? 50,
+        saveData: !!profile.connection?.saveData,
+        onchange: null,
+        addEventListener() {},
+        removeEventListener() {},
+        dispatchEvent() { return false },
+      }
+
+      defineGetter(workerNavigator, 'language', () => profile.lang)
+      defineGetter(workerNavigator, 'languages', () => [profile.lang, profile.lang.split('-')[0]])
+      defineGetter(workerNavigator, 'userAgent', () => profile.userAgent)
+      defineGetter(workerNavigator, 'appVersion', () => profile.userAgent.replace(/^Mozilla\\//, ''))
+      defineGetter(workerNavigator, 'vendor', () => 'Google Inc.')
+      defineGetter(workerNavigator, 'platform', () => profile.platform)
+      defineGetter(workerNavigator, 'hardwareConcurrency', () => profile.hardwareConcurrency)
+      defineGetter(workerNavigator, 'deviceMemory', () => profile.deviceMemory)
+      defineGetter(workerNavigator, 'maxTouchPoints', () => profile.maxTouchPoints)
+      defineGetter(workerNavigator, 'userAgentData', () => userAgentData)
+      defineGetter(workerNavigator, 'connection', () => connectionObject)
     }
     const patchPerformance = () => {
       const nativeNow = globalThis.Performance?.prototype?.now
@@ -580,14 +698,159 @@ function buildWorkerBootstrap(profile, scriptURL, type) {
         return Math.floor(nativeNow.call(this))
       }
     }
+    const patchCanvas = () => {
+      const ContextProto = self.OffscreenCanvasRenderingContext2D?.prototype || self.CanvasRenderingContext2D?.prototype
+      const CanvasProto = self.OffscreenCanvas?.prototype
+      const nativeMeasureText = ContextProto?.measureText
+      const nativeConvertToBlob = CanvasProto?.convertToBlob
+
+      if (typeof nativeMeasureText === 'function') {
+        ContextProto.measureText = function measureText(text) {
+          const realMetrics = nativeMeasureText.call(this, text)
+          const widthOffset = seededOffset(String(text).length, 3)
+          const patchedMetrics = {}
+
+          for (const key of textMetricKeys) {
+            const value = realMetrics[key]
+            patchedMetrics[key] = typeof value === 'number'
+              ? (key === 'width' ? value + widthOffset : value)
+              : 0
+          }
+
+          return patchedMetrics
+        }
+      }
+
+      if (typeof nativeConvertToBlob === 'function' && typeof self.OffscreenCanvas === 'function') {
+        CanvasProto.convertToBlob = function convertToBlob(...args) {
+          const ctx = this.getContext && this.getContext('2d')
+          if (!ctx || this.width <= 0 || this.height <= 0 || typeof ctx.getImageData !== 'function' || typeof ctx.putImageData !== 'function') {
+            return nativeConvertToBlob.apply(this, args)
+          }
+
+          try {
+            const clone = new self.OffscreenCanvas(this.width, this.height)
+            const cloneCtx = clone.getContext('2d')
+            if (!cloneCtx || typeof cloneCtx.getImageData !== 'function' || typeof cloneCtx.putImageData !== 'function') {
+              return nativeConvertToBlob.apply(this, args)
+            }
+
+            cloneCtx.drawImage(this, 0, 0)
+            const imageData = cloneCtx.getImageData(0, 0, clone.width, clone.height)
+            for (let index = 0; index < imageData.data.length; index += 4) {
+              const delta = ((seed + index) % 3) - 1
+              imageData.data[index] = Math.max(0, Math.min(255, imageData.data[index] + delta))
+              imageData.data[index + 1] = Math.max(0, Math.min(255, imageData.data[index + 1] - delta))
+            }
+            cloneCtx.putImageData(imageData, 0, 0)
+            return nativeConvertToBlob.apply(clone, args)
+          } catch {
+            return nativeConvertToBlob.apply(this, args)
+          }
+        }
+      }
+    }
+    const patchWebGL = () => {
+      const prototypes = [self.OffscreenCanvas?.prototype, self.HTMLCanvasElement?.prototype].filter(Boolean)
+      if (prototypes.length === 0) return
+
+      const UNMASKED_VENDOR_WEBGL = 0x9245
+      const UNMASKED_RENDERER_WEBGL = 0x9246
+      const glVendor = profile.mobile ? 'ARM' : 'Google Inc. (Intel)'
+      const glRenderer = profile.mobile
+        ? 'Mali-G57 MC2'
+        : 'ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)'
+
+      for (const proto of prototypes) {
+        const nativeGetContext = proto?.getContext
+        if (typeof nativeGetContext !== 'function') continue
+
+        proto.getContext = function getContext(contextType, ...args) {
+          const context = nativeGetContext.call(this, contextType, ...args)
+          if (!context || !/^webgl/i.test(String(contextType))) return context
+
+          const nativeGetParameter = context.getParameter?.bind(context)
+          if (typeof nativeGetParameter !== 'function') return context
+
+          context.getParameter = function getParameter(parameter) {
+            if (parameter === UNMASKED_VENDOR_WEBGL) return glVendor
+            if (parameter === UNMASKED_RENDERER_WEBGL) return glRenderer
+            return nativeGetParameter(parameter)
+          }
+          return context
+        }
+      }
+    }
     const patchLocation = () => {
       try {
-        const realLocation = new URL(originalScriptURL, self.location.origin)
+        const origin = self.location?.origin || originalScriptURL
+        const realLocation = new URL(originalScriptURL, origin)
         const locationProto = Object.getPrototypeOf(self.location) || self.location
         for (const key of ['href', 'origin', 'protocol', 'host', 'hostname', 'pathname', 'search', 'hash']) {
           defineGetter(locationProto, key, () => realLocation[key])
         }
       } catch {}
+    }
+    const patchNestedWorkers = () => {
+      const readInlineBlobSource = (resolvedScriptURL) => {
+        if (!/^blob:/i.test(String(resolvedScriptURL)) || typeof XMLHttpRequest !== 'function') {
+          return null
+        }
+
+        try {
+          const request = new XMLHttpRequest()
+          request.open('GET', resolvedScriptURL, false)
+          request.send()
+          if (request.status !== 0 && (request.status < 200 || request.status >= 300)) {
+            return null
+          }
+          return request.responseText || null
+        } catch {
+          return null
+        }
+      }
+
+      for (const key of ['Worker', 'SharedWorker']) {
+        const NativeWorker = self[key]
+        if (typeof NativeWorker !== 'function') continue
+
+        const WrappedWorker = function WrappedWorker(scriptURL, options = {}) {
+          const nestedType = options?.type === 'module' ? 'module' : 'classic'
+          const baseURL = self.location?.href || originalScriptURL
+          const resolvedScriptURL = new URL(String(scriptURL), baseURL).href
+          const inlineNestedSource = readInlineBlobSource(resolvedScriptURL)
+          const source = '(' + bootWorker.toString() + ')('
+            + JSON.stringify(profile) + ','
+            + JSON.stringify(inlineNestedSource == null ? resolvedScriptURL : null) + ','
+            + JSON.stringify(nestedType)
+            + ','
+            + JSON.stringify(inlineNestedSource)
+            + ')'
+          const blobURL = URL.createObjectURL(new Blob([source], { type: 'text/javascript' }))
+
+          try {
+            return new NativeWorker(blobURL, { ...options, type: nestedType })
+          } catch {
+            return new NativeWorker(scriptURL, options)
+          } finally {
+            setTimeout(() => URL.revokeObjectURL(blobURL), 0)
+          }
+        }
+
+        WrappedWorker.prototype = NativeWorker.prototype
+
+        try {
+          Object.defineProperty(self, key, {
+            value: WrappedWorker,
+            configurable: true,
+            writable: true,
+          })
+        } catch {
+          try {
+            self[key] = WrappedWorker
+          } catch {}
+        }
+      }
     }
     const patchWebRTC = () => {
       const NativePeerConnection = self.RTCPeerConnection || self.webkitRTCPeerConnection
@@ -646,12 +909,27 @@ function buildWorkerBootstrap(profile, scriptURL, type) {
     patchIntl()
     patchNavigator()
     patchPerformance()
+    patchCanvas()
+    patchWebGL()
     patchLocation()
+    patchNestedWorkers()
     patchWebRTC()
-    ${isModuleWorker
-      ? `return import(originalScriptURL)`
-      : `importScripts(originalScriptURL)`}
-  })();`
+    if (inlineScriptSource != null) {
+      if (workerType === 'module') {
+        const moduleURL = URL.createObjectURL(new Blob([String(inlineScriptSource)], { type: 'text/javascript' }))
+        return import(moduleURL).finally(() => {
+          setTimeout(() => URL.revokeObjectURL(moduleURL), 0)
+        })
+      }
+
+      ;(0, eval)(String(inlineScriptSource))
+      return undefined
+    }
+
+    return workerType === 'module'
+      ? import(originalScriptURL)
+      : importScripts(originalScriptURL)
+  })(${rawProfile}, ${rawScriptURL}, ${rawType}, ${rawInlineScriptSource})`
 }
 
 function patchWebRTC() {
@@ -852,16 +1130,20 @@ function patchWebRTC() {
   window.RTCPeerConnection.prototype = NativePeerConnection.prototype
 }
 
-function patchCanvas(seed, seededOffset) {
+function patchCanvas(seed, seededOffset, includeOffscreen = false) {
   const NativeCanvasContext = globalThis.CanvasRenderingContext2D?.prototype
   const NativeCanvasElement = globalThis.HTMLCanvasElement?.prototype
   if (!NativeCanvasContext || !NativeCanvasElement) return
 
-  const nativeGetImageData = NativeCanvasContext.getImageData
   const nativeToDataURL = NativeCanvasElement.toDataURL
   const nativeToBlob = NativeCanvasElement.toBlob
-  const nativeMeasureText = NativeCanvasContext.measureText
-  if (!nativeGetImageData || !nativeToDataURL || !nativeToBlob || !nativeMeasureText) return
+  if (!nativeToDataURL || !nativeToBlob) return
+
+  const OffscreenCanvasCtor = includeOffscreen && typeof globalThis.OffscreenCanvas === 'function'
+    ? globalThis.OffscreenCanvas
+    : null
+  const OffscreenCanvasContext = includeOffscreen ? globalThis.OffscreenCanvasRenderingContext2D?.prototype : null
+  const nativeOffscreenConvertToBlob = OffscreenCanvasCtor?.prototype?.convertToBlob
 
   function applyCanvasNoise(data) {
     for (let index = 0; index < data.length; index += 4) {
@@ -871,19 +1153,36 @@ function patchCanvas(seed, seededOffset) {
     }
   }
 
+  function createLikeCanvas(sourceCanvas) {
+    if (OffscreenCanvasCtor && sourceCanvas instanceof OffscreenCanvasCtor) {
+      return new OffscreenCanvasCtor(sourceCanvas.width, sourceCanvas.height)
+    }
+
+    if (typeof document !== 'undefined' && document.createElement) {
+      const clone = document.createElement('canvas')
+      clone.width = sourceCanvas.width
+      clone.height = sourceCanvas.height
+      return clone
+    }
+
+    return null
+  }
+
   function cloneWithNoise(canvas) {
     const ctx = canvas.getContext && canvas.getContext('2d')
     if (!ctx || canvas.width <= 0 || canvas.height <= 0) return null
 
     try {
-      const clone = document.createElement('canvas')
-      clone.width = canvas.width
-      clone.height = canvas.height
+      const clone = createLikeCanvas(canvas)
+      if (!clone) return null
+
       const cloneCtx = clone.getContext('2d')
-      if (!cloneCtx) return null
+      if (!cloneCtx || typeof cloneCtx.getImageData !== 'function' || typeof cloneCtx.putImageData !== 'function') {
+        return null
+      }
 
       cloneCtx.drawImage(canvas, 0, 0)
-      const imageData = nativeGetImageData.call(cloneCtx, 0, 0, clone.width, clone.height)
+      const imageData = cloneCtx.getImageData(0, 0, clone.width, clone.height)
       applyCanvasNoise(imageData.data)
       cloneCtx.putImageData(imageData, 0, 0)
       return clone
@@ -902,18 +1201,36 @@ function patchCanvas(seed, seededOffset) {
     return nativeToBlob.call(noisyCanvas || this, callback, ...args)
   }
 
-  NativeCanvasContext.measureText = function measureText(text) {
-    const realMetrics = nativeMeasureText.call(this, text)
-    const widthOffset = seededOffset(String(text).length, 3)
-    const patchedMetrics = Object.create(Object.getPrototypeOf(realMetrics) || Object.prototype)
+  function patchMeasureText(ContextPrototype) {
+    const nativeMeasureText = ContextPrototype?.measureText
+    if (typeof nativeMeasureText !== 'function') return
 
-    for (const key of TEXT_METRIC_KEYS) {
-      const value = realMetrics[key]
-      if (typeof value !== 'number') continue
-      patchedMetrics[key] = key === 'width' ? value + widthOffset : value
+    ContextPrototype.measureText = function measureText(text) {
+      const realMetrics = nativeMeasureText.call(this, text)
+      const widthOffset = seededOffset(String(text).length, 3)
+      const patchedMetrics = {}
+
+      for (const key of TEXT_METRIC_KEYS) {
+        const value = realMetrics[key]
+        patchedMetrics[key] = typeof value === 'number'
+          ? (key === 'width' ? value + widthOffset : value)
+          : 0
+      }
+
+      return patchedMetrics
     }
+  }
 
-    return patchedMetrics
+  patchMeasureText(NativeCanvasContext)
+  if (OffscreenCanvasContext && OffscreenCanvasContext !== NativeCanvasContext) {
+    patchMeasureText(OffscreenCanvasContext)
+  }
+
+  if (nativeOffscreenConvertToBlob) {
+    OffscreenCanvasCtor.prototype.convertToBlob = function convertToBlob(...args) {
+      const noisyCanvas = cloneWithNoise(this)
+      return nativeOffscreenConvertToBlob.apply(noisyCanvas || this, args)
+    }
   }
 }
 
@@ -1035,30 +1352,33 @@ function patchSpeech(profile, defineGetter) {
   }))
 }
 
-function patchWebGL(profile) {
-  const NativeCanvasElement = globalThis.HTMLCanvasElement?.prototype
-  const nativeGetContext = NativeCanvasElement?.getContext
-  if (!nativeGetContext) return
-
+function patchWebGL(profile, includeOffscreen = false) {
+  const UNMASKED_VENDOR_WEBGL = 0x9245
+  const UNMASKED_RENDERER_WEBGL = 0x9246
   const glVendor = profile.mobile ? 'ARM' : 'Google Inc. (Intel)'
   const glRenderer = profile.mobile
     ? 'Mali-G57 MC2'
     : 'ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)'
 
-  NativeCanvasElement.getContext = function getContext(type, ...args) {
-    const context = nativeGetContext.call(this, type, ...args)
-    if (!context || !/^webgl/i.test(String(type))) return context
+  const targets = [globalThis.HTMLCanvasElement?.prototype]
+  if (includeOffscreen) targets.push(globalThis.OffscreenCanvas?.prototype)
 
-    const nativeGetParameter = context.getParameter.bind(context)
-    context.getParameter = function getParameter(parameter) {
-      const rendererInfo = context.getExtension('WEBGL_debug_renderer_info')
-      if (rendererInfo) {
-        if (parameter === rendererInfo.UNMASKED_VENDOR_WEBGL) return glVendor
-        if (parameter === rendererInfo.UNMASKED_RENDERER_WEBGL) return glRenderer
+  for (const prototype of targets.filter(Boolean)) {
+    const nativeGetContext = prototype.getContext
+    if (typeof nativeGetContext !== 'function') continue
+
+    prototype.getContext = function getContext(type, ...args) {
+      const context = nativeGetContext.call(this, type, ...args)
+      if (!context || !/^webgl/i.test(String(type))) return context
+
+      const nativeGetParameter = context.getParameter.bind(context)
+      context.getParameter = function getParameter(parameter) {
+        if (parameter === UNMASKED_VENDOR_WEBGL) return glVendor
+        if (parameter === UNMASKED_RENDERER_WEBGL) return glRenderer
+        return nativeGetParameter(parameter)
       }
-      return nativeGetParameter(parameter)
+      return context
     }
-    return context
   }
 }
 
@@ -1206,15 +1526,4 @@ function patchWebAssembly(profile) {
     } catch {}
     return nativeValidate(bufferSource)
   }
-}
-
-function injectScrollbarHint(profile) {
-  try {
-    const style = document.createElement('style')
-    style.setAttribute('data-peermesh', '1')
-    style.textContent = profile.mobile
-      ? '::-webkit-scrollbar{display:none!important;width:0!important}'
-      : '::-webkit-scrollbar{width:15px!important}'
-    ;(document.head || document.documentElement).appendChild(style)
-  } catch {}
 }
