@@ -435,13 +435,28 @@ server.on('connect', (req, clientSocket, head) => {
   send(provider, { type: 'open_tunnel', tunnelId, sessionId, hostname, port })
   session.lastActivity = Date.now()
 
+  // If tunnel_ready never arrives (provider net.connect timeout or slow destination)
+  // clean up after 35s so proxyClients doesn't leak.
+  const tunnelReadyTimer = setTimeout(() => {
+    if (proxyClients.has(tunnelId)) {
+      proxyClients.delete(tunnelId)
+      send(provider, { type: 'tunnel_close', tunnelId })
+      if (!clientSocket.destroyed) {
+        clientSocket.write('HTTP/1.1 504 Tunnel Timeout\r\n\r\n')
+        clientSocket.destroy()
+      }
+    }
+  }, 35_000)
+
   // tunnel_ready handler will write 200 and start piping
   // Cleanup on client disconnect
   clientSocket.on('error', () => {
+    clearTimeout(tunnelReadyTimer)
     proxyClients.delete(tunnelId)
     send(provider, { type: 'tunnel_close', tunnelId })
   })
   clientSocket.on('close', () => {
+    clearTimeout(tunnelReadyTimer)
     proxyClients.delete(tunnelId)
     send(provider, { type: 'tunnel_close', tunnelId })
   })
@@ -481,6 +496,15 @@ proxyWss.on('connection', (ws, req) => {
         send(provider, { type: 'open_tunnel', tunnelId, sessionId, hostname, port })
         const sess = sessions.get(sessionId)
         if (sess) recordSessionHost(sess, hostname, 'target_host')
+        // Clean up if tunnel_ready never arrives
+        const wsReadyTimer = setTimeout(() => {
+          if (proxyClients.has(tunnelId)) {
+            proxyClients.delete(tunnelId)
+            send(provider, { type: 'tunnel_close', tunnelId })
+            if (ws.readyState === WebSocket.OPEN) ws.close(1011, 'Tunnel timeout')
+          }
+        }, 35_000)
+        ws.once('close', () => clearTimeout(wsReadyTimer))
         return
       }
       return
