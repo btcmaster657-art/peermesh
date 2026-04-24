@@ -263,7 +263,10 @@ global.chrome       = {
 
 // ── Load identity.js ──────────────────────────────────────────────────────────
 const identityPath = path.resolve(__dirname, 'identity.js')
+const injectorPath = path.resolve(__dirname, 'injector.js')
+if (!fs.existsSync(identityPath)) { console.error('identity.js not found'); process.exit(1) }
 const identitySource = fs.readFileSync(identityPath, 'utf8')
+const injectorSource = fs.existsSync(injectorPath) ? fs.readFileSync(injectorPath, 'utf8') : ''
 if (!fs.existsSync(identityPath)) { console.error('\n  ✖  identity.js not found\n'); process.exit(1) }
 let loadError = null
 try { vm.runInThisContext(identitySource, { filename: 'identity.js' }) }
@@ -288,6 +291,10 @@ test('Safety', 'worker spoof limited to test hosts', /WORKER_SPOOF_HOSTS/.test(i
 test('Safety', 'service worker fallback patch present', /function patchServiceWorkerRegister\b/.test(identitySource), true)
 test('Safety', 'service worker fallback limited to creepjs scripts', /shouldBypassServiceWorker/.test(identitySource) && /creep\.js/.test(identitySource) && /worker_service\.js/.test(identitySource), true)
 test('Safety', 'no inline scrollbar style injector', !/appendChild\(style\)|style\.textContent/.test(identitySource), true)
+test('Safety', 'injector has shouldSkipFrame guard',          /function shouldSkipFrame\b/.test(injectorSource), true)
+test('Safety', 'injector skip covers challenge patterns',     /CHALLENGE_HOSTNAME_PATTERNS/.test(injectorSource), true)
+test('Safety', 'injector skip covers cross-origin iframes',  /window\.top/.test(injectorSource), true)
+test('Safety', 'injector syncProfile gated by shouldSkipFrame', /shouldSkipFrame\(\)/.test(injectorSource), true)
 
 // Navigator
 test('Navigator', 'language',            g(navigator,'language'),            P.lang)

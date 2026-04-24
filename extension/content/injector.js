@@ -209,6 +209,64 @@ function withDocumentRoot(callback) {
   document.addEventListener('DOMContentLoaded', retry)
 }
 
+// Pattern-based frame skip — covers Cloudflare, hCaptcha, reCAPTCHA, Turnstile,
+// DataDome, PerimeterX, Akamai, Stripe, PayPal, and any other challenge/payment
+// iframe that uses strict CSP / TrustedTypes / sandboxing.
+// Rules (all must match to skip):
+//   1. We are inside a cross-origin iframe (window !== window.top)
+//   2. The frame's hostname matches a known challenge/payment pattern
+// Rule 1 alone is not enough — legitimate proxy iframes also need spoofing.
+// Rule 2 alone is not enough — some challenge providers share domains with real pages.
+const CHALLENGE_HOSTNAME_PATTERNS = [
+  // Cloudflare
+  /^challenges\.cloudflare\.com$/,
+  /^[\w-]+\.turnstile\.cloudflare\.com$/,
+  // hCaptcha
+  /^(?:newassets|assets)\.hcaptcha\.com$/,
+  /^hcaptcha\.com$/,
+  // Google reCAPTCHA
+  /^(?:www\.)?google\.com$/, // only when in iframe — rule 1 guards this
+  /^recaptcha\.google\.com$/,
+  /^[\w-]+\.recaptcha\.net$/,
+  // DataDome
+  /^geo\.captcha-delivery\.com$/,
+  /^[\w-]+\.datadome\.co$/,
+  // PerimeterX / HUMAN
+  /^[\w-]+\.px-cdn\.net$/,
+  /^[\w-]+\.perimeterx\.net$/,
+  /^[\w-]+\.humansecurity\.com$/,
+  // Akamai Bot Manager
+  /^[\w-]+\.akstat\.io$/,
+  /^[\w-]+\.akamaized\.net$/,
+  // Arkose Labs (FunCaptcha)
+  /^[\w-]+\.arkoselabs\.com$/,
+  /^[\w-]+\.funcaptcha\.com$/,
+  // GeeTest
+  /^[\w-]+\.geetest\.com$/,
+  // Payment iframes (strict CSP + TrustedTypes)
+  /^js\.stripe\.com$/,
+  /^[\w-]+\.stripe\.com$/,
+  /^[\w-]+\.paypal\.com$/,
+  /^[\w-]+\.braintreegateway\.com$/,
+  /^[\w-]+\.adyen\.com$/,
+]
+
+function shouldSkipFrame() {
+  try {
+    if (window === window.top) return false // top-level page — always spoof
+  } catch {
+    // Cross-origin top access throws — we are in a sandboxed cross-origin iframe
+    // Fall through to hostname check
+  }
+
+  try {
+    const hostname = String(window.location?.hostname || '').toLowerCase()
+    return CHALLENGE_HOSTNAME_PATTERNS.some((pattern) => pattern.test(hostname))
+  } catch {
+    return false
+  }
+}
+
 function shouldInjectEarlyIdentity() {
   const hostname = String(window.location?.hostname || '').toLowerCase()
   return EARLY_IDENTITY_HOSTS.some((host) => hostname === host || hostname.endsWith(`.${host}`))
@@ -256,6 +314,7 @@ function clearPublishedProfile() {
 }
 
 function syncProfile(session) {
+  if (shouldSkipFrame()) return
   withDocumentRoot(() => {
     markExtensionPresence()
 
