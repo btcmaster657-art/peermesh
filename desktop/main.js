@@ -1678,6 +1678,32 @@ const localProxyServer = http.createServer((req, res) => {
         return
       }
       responseData = Buffer.concat([responseData, chunk])
+      // Try to send the response as soon as we have a complete HTTP message —
+      // don't wait for tunnel close, which may race with data delivery.
+      if (!res.headersSent) {
+        const hEnd = responseData.indexOf('\r\n\r\n')
+        if (hEnd !== -1) {
+          const hStr = responseData.slice(0, hEnd).toString()
+          const hLines = hStr.split('\r\n')
+          const hMatch = hLines[0].match(/HTTP\/\S+ (\d+)/)
+          const hStatus = hMatch ? parseInt(hMatch[1]) : 200
+          const hHdrs = {}
+          for (const line of hLines.slice(1)) { const idx = line.indexOf(':'); if (idx > 0) hHdrs[line.slice(0, idx).trim().toLowerCase()] = line.slice(idx + 1).trim() }
+          delete hHdrs['transfer-encoding']; delete hHdrs['content-encoding']
+          const contentLength = parseInt(hHdrs['content-length'] || '0')
+          const bodyData = responseData.slice(hEnd + 4)
+          // Send immediately if: redirect (no body), or body is complete
+          if (hStatus >= 300 && hStatus < 400) {
+            res.writeHead(hStatus, hHdrs); res.end(bodyData)
+            log.info('LOCAL-PROXY', `HTTP response sent (redirect)`, { status: hStatus, target: `${hostname}:${port}` })
+            tunnelWs.close()
+          } else if (contentLength > 0 && bodyData.length >= contentLength) {
+            res.writeHead(hStatus, hHdrs); res.end(bodyData.slice(0, contentLength))
+            log.info('LOCAL-PROXY', `HTTP response sent (complete)`, { status: hStatus, target: `${hostname}:${port}` })
+            tunnelWs.close()
+          }
+        }
+      }
     })
 
     tunnelWs.on('close', () => {
@@ -1692,7 +1718,7 @@ const localProxyServer = http.createServer((req, res) => {
           for (const line of lines.slice(1)) { const idx = line.indexOf(':'); if (idx > 0) hdrs[line.slice(0, idx).trim().toLowerCase()] = line.slice(idx + 1).trim() }
           delete hdrs['transfer-encoding']; delete hdrs['content-encoding']
           res.writeHead(status, hdrs); res.end(responseData.slice(headerEnd + 4))
-          log.info('LOCAL-PROXY', `HTTP response sent`, { status, target: `${hostname}:${port}` })
+          log.info('LOCAL-PROXY', `HTTP response sent (on close)`, { status, target: `${hostname}:${port}` })
         } else { res.writeHead(502); res.end('Bad Gateway') }
       } else if (!res.headersSent) { res.writeHead(502); res.end('Bad Gateway') }
     })
