@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto'
 import { NextResponse } from 'next/server'
-import { createFlutterwaveCheckout, getFlutterwaveTransferRate } from '@/lib/flutterwave'
+import { createFlutterwaveCheckout, quoteFlutterwaveDestinationFromSourceAmount } from '@/lib/flutterwave'
 import { getRequestUser } from '@/lib/request-auth'
 import { adminClient } from '@/lib/supabase/admin'
 
@@ -29,14 +29,14 @@ export async function POST(req: Request) {
   }
 
   const txRef = `pm_${user.id.slice(0, 8)}_${Date.now()}_${randomUUID().slice(0, 6)}`
-  const redirectUrl = `${resolveAppUrl(req)}/verify/payment`
+  const redirectUrl = `${resolveAppUrl(req)}/developers/billing`
   const destinationCurrency = (profile.payout_currency ?? 'NGN').toUpperCase()
 
   let localAmount: number | null = null
   let localCurrency: string | null = null
   try {
-    const rate = await getFlutterwaveTransferRate('USD', destinationCurrency, amountUsd)
-    localAmount = Number(rate.data.destination.amount ?? 0)
+    const quote = await quoteFlutterwaveDestinationFromSourceAmount('USD', destinationCurrency, amountUsd)
+    localAmount = Number(quote.destinationAmount ?? 0)
     localCurrency = destinationCurrency
   } catch {}
 

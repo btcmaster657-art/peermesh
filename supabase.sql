@@ -84,6 +84,13 @@ create table profiles (
   wallet_balance_usd numeric(14,2) not null default 0,
   wallet_pending_payout_usd numeric(14,2) not null default 0,
   payout_currency text,
+  payout_country_code text,
+  payout_bank_code text,
+  payout_bank_name text,
+  payout_account_number text,
+  payout_account_name text,
+  payout_beneficiary_name text,
+  payout_branch_code text,
   payment_provider text not null default 'flutterwave',
   state_actor text,
   state_changed_at timestamptz default now(),
@@ -602,6 +609,13 @@ alter table profiles add column if not exists contribution_credits_bytes bigint 
 alter table profiles add column if not exists wallet_balance_usd numeric(14,2) not null default 0;
 alter table profiles add column if not exists wallet_pending_payout_usd numeric(14,2) not null default 0;
 alter table profiles add column if not exists payout_currency text;
+alter table profiles add column if not exists payout_country_code text;
+alter table profiles add column if not exists payout_bank_code text;
+alter table profiles add column if not exists payout_bank_name text;
+alter table profiles add column if not exists payout_account_number text;
+alter table profiles add column if not exists payout_account_name text;
+alter table profiles add column if not exists payout_beneficiary_name text;
+alter table profiles add column if not exists payout_branch_code text;
 alter table profiles add column if not exists payment_provider text not null default 'flutterwave';
 alter table profiles add column if not exists state_actor text;
 alter table profiles add column if not exists state_changed_at timestamptz default now();

@@ -186,7 +186,7 @@ export async function POST(req: Request) {
       return NextResponse.json({
         error: 'Monthly free allocation exhausted. Use contribution credits or fund your USD wallet for more usage.',
         code: 'usage_access_required',
-        nextStep: '/verify/payment',
+        nextStep: '/developers/billing',
       }, { status: 403 })
     }
   }

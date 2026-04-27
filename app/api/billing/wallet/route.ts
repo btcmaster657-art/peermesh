@@ -1,28 +1,30 @@
 import { NextResponse } from 'next/server'
-import { getFlutterwaveTransferRate } from '@/lib/flutterwave'
+import { quoteFlutterwaveDestinationFromSourceAmount } from '@/lib/flutterwave'
 import { getRequestUser } from '@/lib/request-auth'
-import { getWalletSummary } from '@/lib/wallet'
+import { getActivePayoutTransfer, getWalletSummary } from '@/lib/wallet'
 
 export async function GET(req: Request) {
   const user = await getRequestUser(req)
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const summary = await getWalletSummary(user.id)
+  const activePayout = await getActivePayoutTransfer(user.id)
   const { searchParams } = new URL(req.url)
   const destinationCurrency = (searchParams.get('currency') ?? summary.profile.payout_currency ?? '').trim().toUpperCase()
 
   let payoutPreview = null
   if (destinationCurrency && destinationCurrency !== 'USD' && Number(summary.profile.wallet_pending_payout_usd ?? 0) > 0) {
     try {
-      const rate = await getFlutterwaveTransferRate(
+      const quote = await quoteFlutterwaveDestinationFromSourceAmount(
         'USD',
         destinationCurrency,
         Number(summary.profile.wallet_pending_payout_usd ?? 0),
       )
       payoutPreview = {
         destination_currency: destinationCurrency,
-        rate: Number(rate.data.rate ?? 0),
-        destination_amount: Number(rate.data.destination.amount ?? 0),
+        rate: Number(quote.rate ?? 0),
+        source_amount: Number(quote.sourceAmount ?? 0),
+        destination_amount: Number(quote.destinationAmount ?? 0),
       }
     } catch (error) {
       payoutPreview = {
@@ -37,6 +39,7 @@ export async function GET(req: Request) {
     ledger: summary.ledger,
     payments: summary.payments,
     payouts: summary.payouts,
+    activePayout,
     payoutPreview,
   })
 }

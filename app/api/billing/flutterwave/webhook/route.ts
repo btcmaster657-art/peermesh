@@ -5,7 +5,7 @@ import {
   verifyFlutterwaveWebhookSignature,
 } from '@/lib/flutterwave'
 import { adminClient } from '@/lib/supabase/admin'
-import { settleWalletTopUp } from '@/lib/wallet'
+import { settleWalletTopUp, syncProviderPayoutTransfer } from '@/lib/wallet'
 
 export async function POST(req: Request) {
   const rawBody = await req.text()
@@ -18,9 +18,11 @@ export async function POST(req: Request) {
 
   let payload: {
     type?: string
+    event?: string
     data?: {
       id?: string | number
       tx_ref?: string
+      reference?: string
     }
   }
   try {
@@ -31,6 +33,24 @@ export async function POST(req: Request) {
 
   const transactionId = payload.data?.id
   const txRef = String(payload.data?.tx_ref ?? '').trim()
+  const transferId = transactionId != null ? String(transactionId).trim() : ''
+
+  if (transferId && !txRef) {
+    const { data: payoutRow } = await adminClient
+      .from('provider_payouts')
+      .select('user_id')
+      .eq('flutterwave_transfer_id', transferId)
+      .maybeSingle<{ user_id: string | null }>()
+
+    if (payoutRow?.user_id) {
+      await syncProviderPayoutTransfer({
+        userId: payoutRow.user_id,
+        transferId,
+      })
+      return NextResponse.json({ ok: true })
+    }
+  }
+
   if (!transactionId || !txRef) {
     return NextResponse.json({ ok: true, ignored: true })
   }

@@ -29,6 +29,11 @@ function getCliVersion(): string {
 
 export async function GET() {
   return NextResponse.json({
+    api: {
+      version: 'v1',
+      prefix: '/api',
+      docs: '/developers/api-docs',
+    },
     desktop: getLatestDesktopVersion(),
     extension: getExtensionVersion(),
     cli: getCliVersion(),

@@ -15,7 +15,7 @@ export type ConnectionAccessRequirement = {
   ok: boolean
   code: 'phone_verification_required' | 'usage_access_required' | 'role_not_allowed' | null
   error: string | null
-  nextStep: '/verify/phone' | '/verify/payment' | null
+  nextStep: '/verify/phone' | '/developers/billing' | null
 }
 
 export function hasPaidAccess(profile: ConnectionAccessProfile | null | undefined): boolean {
@@ -68,7 +68,7 @@ export function getConnectionAccessRequirement(
       ok: false,
       code: 'usage_access_required',
       error: 'CLIENT MODE - Fund your USD wallet or spend contribution credits to connect publicly.',
-      nextStep: '/verify/payment',
+      nextStep: '/developers/billing',
     }
   }
 
@@ -77,7 +77,7 @@ export function getConnectionAccessRequirement(
       ok: false,
       code: 'usage_access_required',
       error: 'FREE LAYER - Enable sharing to connect, or fund your USD wallet to browse without sharing.',
-      nextStep: '/verify/payment',
+      nextStep: '/developers/billing',
     }
   }
 

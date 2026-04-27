@@ -11,6 +11,7 @@ import type { DesktopState } from '@/lib/agent-client'
 
 type Country = { code: string; name: string; flag: string }
 const COUNTRIES_PAGE_SIZE = 20
+const PROFILE_SELECT_FIELDS = 'id, username, role, country_code, trust_score, is_verified, verified_at, phone_number, gov_id_verified, is_premium, subscription_status, stripe_customer_id, is_sharing, total_bytes_shared, share_bytes_today, share_bytes_today_date, total_bytes_used, bandwidth_used_month, bandwidth_limit, preferred_providers, has_accepted_provider_terms, daily_share_limit_mb, contribution_credits_bytes, wallet_balance_usd, wallet_pending_payout_usd, payout_currency, created_at, updated_at, state_actor, state_changed_at'
 
 // ── Debug logger — all strings, no objects, easy to copy from console ──────────
 function log(tag: string, ...parts: (string | number | boolean | null | undefined)[]) {
@@ -173,11 +174,7 @@ function mergePrivateShares(rows: PrivateShare[] | null | undefined, baseDeviceI
     add(source.privateShare ?? null)
 
     const configuredSlots = Math.max(1, source.slots?.configured ?? source.connectionSlots ?? 1)
-    
-    // FIX: If there's a base device share with slot_index=null and code, replicate it to all slot placeholders
-    const baseShare = merged.get(baseDeviceId)
-    const hasBaseShareWithCode = baseShare && !Number.isInteger(baseShare.slot_index) && baseShare.code
-    
+
     for (let index = 0; index < configuredSlots; index++) {
       const slotDeviceId = `${baseDeviceId}_slot_${index}`
       if (!merged.has(slotDeviceId)) {
@@ -388,7 +385,7 @@ export default function Dashboard() {
 
         const user = session.user
 
-        const { data, error: profileError } = await supabase.from('profiles').select('*').eq('id', user.id).single<Profile>()
+        const { data, error: profileError } = await supabase.from('profiles').select(PROFILE_SELECT_FIELDS).eq('id', user.id).single<Profile>()
         if (profileError) throw new Error('Could not load your profile – please refresh')
         const nextProfile = data
 
@@ -584,7 +581,7 @@ export default function Dashboard() {
         else setShareError(prev => prev != null && prev.includes('signed in as a different user') ? null : prev)
       }
       if (tick % 3 === 0 && user) {
-        const { data } = await supabase.from('profiles').select('*').eq('id', user.id).single<Profile>()
+        const { data } = await supabase.from('profiles').select(PROFILE_SELECT_FIELDS).eq('id', user.id).single<Profile>()
         if (data) setProfile(data)
       }
       if (tick % 10 === 0) {
@@ -1045,7 +1042,7 @@ export default function Dashboard() {
       return
     }
     if (!isPrivateConnect && !hasPaidAccess && !displayIsSharing) {
-      router.push('/verify/payment')
+      router.push('/developers/billing')
       return
     }
     if (!navigator.onLine) {
@@ -1345,9 +1342,10 @@ export default function Dashboard() {
             </div>
           </div>
           <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-            <a href="/verify/payment" style={{ padding: '9px 12px', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text)', textDecoration: 'none', fontFamily: 'var(--font-geist-mono)', fontSize: '11px' }}>BILLING</a>
+            <a href="/developers/billing" style={{ padding: '9px 12px', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text)', textDecoration: 'none', fontFamily: 'var(--font-geist-mono)', fontSize: '11px' }}>BILLING</a>
             <a href="/provider/sessions" style={{ padding: '9px 12px', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text)', textDecoration: 'none', fontFamily: 'var(--font-geist-mono)', fontSize: '11px' }}>PROVIDER SESSIONS</a>
-            <a href="/api-docs" style={{ padding: '9px 12px', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text)', textDecoration: 'none', fontFamily: 'var(--font-geist-mono)', fontSize: '11px' }}>API DOCS</a>
+            <a href="/developers/api-docs" style={{ padding: '9px 12px', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text)', textDecoration: 'none', fontFamily: 'var(--font-geist-mono)', fontSize: '11px' }}>API DOCS</a>
+            <a href="/developers/keys" style={{ padding: '9px 12px', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text)', textDecoration: 'none', fontFamily: 'var(--font-geist-mono)', fontSize: '11px' }}>API KEYS</a>
           </div>
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '10px' }}>
@@ -1894,7 +1892,7 @@ export default function Dashboard() {
           <div style={{ background: 'rgba(255,80,80,0.07)', border: '1px solid rgba(255,80,80,0.3)', borderRadius: '10px', padding: '12px 16px', marginBottom: '16px', fontSize: '12px', color: '#ff9090' }}>
             <span style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', letterSpacing: '0.5px' }}>FREE LAYER – </span>
             Enable sharing above to connect publicly, or{' '}
-            <a href="/verify/payment" style={{ color: 'var(--accent)', textDecoration: 'underline' }}>fund your wallet</a> to browse without sharing.
+            <a href="/developers/billing" style={{ color: 'var(--accent)', textDecoration: 'underline' }}>fund your wallet</a> to browse without sharing.
           </div>
         ) : (
           <div style={{ background: 'rgba(0,255,136,0.07)', border: '1px solid rgba(0,255,136,0.24)', borderRadius: '10px', padding: '12px 16px', marginBottom: '16px', fontSize: '12px', color: 'var(--accent)' }}>
@@ -1914,7 +1912,7 @@ export default function Dashboard() {
             <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '11px', color: 'var(--accent)', letterSpacing: '0.5px', marginBottom: '2px' }}>FREE LAYER</div>
             <div style={{ fontSize: '12px', color: 'var(--muted)' }}>Fund your wallet to browse without sharing your IP</div>
           </div>
-          <a href="/verify/payment" style={{ padding: '8px 14px', background: 'var(--accent)', color: '#000', borderRadius: '7px', fontSize: '11px', fontFamily: 'var(--font-geist-mono)', fontWeight: 700, textDecoration: 'none', letterSpacing: '0.5px', whiteSpace: 'nowrap' }}>
+          <a href="/developers/billing" style={{ padding: '8px 14px', background: 'var(--accent)', color: '#000', borderRadius: '7px', fontSize: '11px', fontFamily: 'var(--font-geist-mono)', fontWeight: 700, textDecoration: 'none', letterSpacing: '0.5px', whiteSpace: 'nowrap' }}>
             FUND WALLET
           </a>
         </div>

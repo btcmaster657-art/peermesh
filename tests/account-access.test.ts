@@ -40,7 +40,7 @@ test('getConnectionAccessRequirement requires usage access after phone verificat
 
   assert.equal(requirement.ok, false)
   assert.equal(requirement.code, 'usage_access_required')
-  assert.equal(requirement.nextStep, '/verify/payment')
+  assert.equal(requirement.nextStep, '/developers/billing')
 })
 
 test('getConnectionAccessRequirement allows verified users with sharing or paid access', () => {

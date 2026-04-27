@@ -12,31 +12,23 @@ export async function GET(req: Request) {
 
   const { data: sessions, error } = await adminClient
     .from('sessions')
-    .select('id, user_id, provider_id, provider_kind, provider_device_id, provider_base_device_id, target_country, target_host, target_hosts, relay_endpoint, status, bytes_used, disconnect_reason, started_at, ended_at')
+    .select('id, provider_id, provider_kind, provider_device_id, provider_base_device_id, target_country, target_host, target_hosts, relay_endpoint, status, bytes_used, disconnect_reason, started_at, ended_at')
     .eq('provider_id', user.id)
     .order('started_at', { ascending: false })
     .limit(limit)
   if (error) return NextResponse.json({ error: error.message }, { status: 500 })
   const filteredSessions = q
     ? (sessions ?? []).filter((session) =>
-        String(session.target_host ?? '').toLowerCase().includes(q)
-        || String(session.target_country ?? '').toLowerCase().includes(q),
+        [session.target_host, ...((session.target_hosts ?? []) as string[])]
+          .filter(Boolean)
+          .some((host) => String(host).toLowerCase().includes(q)),
       )
     : (sessions ?? [])
 
-  const requesterIds = [...new Set(filteredSessions.map((session) => session.user_id).filter(Boolean))]
-  const { data: requesters } = requesterIds.length > 0
-    ? await adminClient
-        .from('profiles')
-        .select('id, username, country_code, trust_score')
-        .in('id', requesterIds)
-    : { data: [] as Array<{ id: string; username: string | null; country_code: string; trust_score: number }> }
-
-  const requesterMap = new Map((requesters ?? []).map((row) => [row.id, row]))
   return NextResponse.json({
     sessions: filteredSessions.map((session) => ({
       ...session,
-      requester: requesterMap.get(session.user_id) ?? null,
+      target_hosts: [...new Set([...(session.target_hosts ?? []), session.target_host].filter(Boolean))],
     })),
   })
 }
