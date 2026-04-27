@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { readFile } from 'fs/promises'
+import { readFile, readdir } from 'fs/promises'
 import { join } from 'path'
 
 type Platform = 'win' | 'mac' | 'linux'
@@ -16,10 +16,9 @@ const PLATFORM_EXT: Record<Platform, string> = {
   linux: '.AppImage',
 }
 
-function findLatestInstaller(dir: string, ext: string): string | null {
-  const { readdirSync } = require('fs')
+async function findLatestInstaller(dir: string, ext: string): Promise<string | null> {
   try {
-    const files = readdirSync(dir).filter((f: string) => f.startsWith('PeerMesh-Setup_') && f.endsWith(ext))
+    const files = (await readdir(dir)).filter((file) => file.startsWith('PeerMesh-Setup_') && file.endsWith(ext))
     if (!files.length) return null
     files.sort().reverse()
     return files[0]
@@ -45,10 +44,10 @@ export async function GET(req: Request) {
 
   // Try public/ first (Vercel)
   const publicDir = join(process.cwd(), 'public')
-  const publicFile = findLatestInstaller(publicDir, ext)
+  const publicFile = await findLatestInstaller(publicDir, ext)
   if (publicFile) {
     const content = await readFile(join(publicDir, publicFile))
-    return new NextResponse(content.buffer as ArrayBuffer, {
+    return new NextResponse(content, {
       headers: {
         'Content-Type': mime,
         'Content-Disposition': `attachment; filename="${publicFile}"`,
@@ -61,10 +60,10 @@ export async function GET(req: Request) {
   // Try desktop/dist/ (local dev)
   try {
     const distDir = join(process.cwd(), 'desktop', 'dist')
-    const found = findLatestInstaller(distDir, ext)
+    const found = await findLatestInstaller(distDir, ext)
     if (found) {
       const content = await readFile(join(distDir, found))
-      return new NextResponse(content.buffer as ArrayBuffer, {
+      return new NextResponse(content, {
         headers: {
           'Content-Type': mime,
           'Content-Disposition': `attachment; filename="${found}"`,

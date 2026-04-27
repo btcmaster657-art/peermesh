@@ -2,322 +2,396 @@
 
 Last updated: 2026-04-27
 
-This document is implementation-accurate. It describes what the current codebase does today, where it matches the intended PeerMesh model, and where it does not.
+This document is implementation-accurate for the current repository state.
 
 ## What PeerMesh Is
 
-PeerMesh is a residential bandwidth exchange network.
+PeerMesh is a residential bandwidth exchange network with three user-facing modes:
 
-- A requester chooses a country or a private share code.
-- PeerMesh assigns a live provider slot from a desktop app or CLI helper running on a real user machine.
-- Traffic flows through the relay to that provider, and the target site sees the provider's residential IP.
+- public browsing through any eligible provider in a selected country
+- private browsing through a specific provider using a 9-digit share code
+- metered developer/API access authenticated with PeerMesh API keys
 
-High-level path:
+The system is split across four runtime surfaces:
+
+- the Next.js 16 app in `app/`
+- the relay process started through `run-relay.mjs`
+- the desktop provider in `desktop/`
+- the CLI provider in `cli/`
+
+At a high level:
 
 ```text
-Requester UI or extension
-  -> POST /api/session/create
-  -> Relay WebSocket session
-  -> Provider desktop/CLI slot
-  -> Target website
+Requester client
+  -> app/api/session/create
+  -> relay auth and relay WebSocket session
+  -> desktop or CLI provider slot
+  -> target website
+  -> app/api/session/end for final settlement
 ```
 
-## Business Model
+## Launch Status
 
-### Base allocation
+As of 2026-04-27:
 
-- Every user profile starts with a 5 GB monthly allocation.
-- Contribution credits are 1:1 with shared bandwidth. If a user shares 1 GB, they earn 1 GB of contribution credits.
-- Paid usage is backed by a USD wallet funded through Flutterwave.
-- Provider earnings accumulate as pending payout balance in USD.
+- `npm test` passes
+- `npm run lint` passes
+- `npm run build` passes
+- the role model is enforced in runtime access checks
+- API-key sessions are authenticated, quoted, billed, and recorded
+- contribution credits are minted 1:1 from shared bytes
+- provider earnings are accrued into pending payout balances and `provider_payouts` rows
 
-### Roles
+Operational note:
 
-PeerMesh stores three roles in `profiles.role`:
+- the repository now performs payout accounting automatically
+- bank or cash-out disbursement orchestration is still an operations concern unless you add a dedicated payout execution workflow on top of the pending payout ledger
 
-- `peer`: shares and uses the network, earns contribution credits and is intended to receive revenue share.
-- `host`: primarily shares bandwidth and is intended to receive revenue share without being a normal requester by default.
-- `client`: consumes bandwidth only and pays or spends free/credit allocation.
+## User Roles
 
-### Important implementation note
+`profiles.role` stores one of:
 
-The current code does not strongly enforce different requester rules per role.
+- `peer`: can use the network and can share the network
+- `host`: can share the network but cannot connect as a requester
+- `client`: can connect as a requester but cannot share bandwidth
 
-Requester access is enforced mostly by:
+Runtime enforcement lives in:
 
-- authenticated user
-- confirmed email
-- verified phone
-- active sharing OR wallet balance OR contribution credits OR premium
-- trust score >= 30
-- monthly bandwidth remaining
+- `lib/roles.ts`
+- `lib/account-access.ts`
+- `app/api/session/create/route.ts`
+- `app/api/relay/auth/route.ts`
+- `app/api/user/sharing/route.ts`
+- `app/api/account/role/route.ts`
 
-That means:
+Effective behavior:
 
-- The intended policy "peer must share at least one public slot to connect for free" is only partially enforced. The code checks `is_sharing`, not specifically "has at least one public slot".
-- The intended policy "host must switch to peer to consume free capacity" is not strongly enforced by role today. A host can still connect if they pass the same generic access checks.
-- The `client` role behaves closest to the current implementation: use only, with payment or free/credit access.
+- host accounts are blocked from requester sessions
+- client accounts are blocked from provider registration and sharing controls
+- peer accounts can both browse and provide capacity
+- switching to `client` is blocked while sharing is still enabled
 
-## Access Policy Before Connecting
+## Access Rules
 
-Before a requester can connect to a provider, the current code path requires:
+### Public requester access
 
-1. The user must be signed in.
-2. The user's email must be confirmed.
-3. The user's phone must be verified.
-4. The user must either:
-   - be actively sharing, or
-   - have wallet balance, or
-   - have contribution credits, or
-   - be premium.
-5. The trust score must be at least 30.
-6. The monthly bandwidth limit must not be exhausted.
+Public connections are enforced by `getConnectionAccessRequirement()` in `lib/account-access.ts`.
 
-This gate is enforced by `app/api/session/create/route.ts` together with `lib/account-access.ts`.
+Requirements:
 
-## New User Flow
+1. authenticated user, desktop session, or API key
+2. confirmed email for user-auth flows
+3. verified phone for requester flows
+4. role must allow requester use
+5. trust score must pass the traffic filter
+6. monthly bandwidth cannot exceed the effective limit unless paid access exists
 
-### 1. Authentication
+Public role behavior:
 
-- User signs up or signs in through Supabase Auth.
-- Email confirmation is required before connecting or linking a desktop/extension helper.
+- `peer`: needs either active sharing or paid access
+- `client`: needs paid access
+- `host`: denied
 
-### 2. First dashboard experience
+### Private requester access
 
-After sign-in, the dashboard shows:
+Private code sessions still require:
 
-- trust score
-- total shared bytes
-- total used bytes
-- monthly bandwidth usage
-- wallet balance
-- pending payout balance
-- contribution credits
-- country picker for public routing
-- private code input for private routing
-- helper status for desktop/CLI
+- a verified phone
+- a requester-capable role
+- an active private share code that is not owned by the requester
 
-### 3. If the user is not phone verified
+Private mode intentionally skips the public paid-access gate. That means verified `peer` and `client` accounts can use a valid private code even without wallet balance or contribution credits.
 
-- The dashboard can still load.
-- The user can still sign in.
-- When they try to connect, they are redirected to `/verify/phone`.
+## Billing Model
 
-### 4. If the user is verified but has no usage access
+PeerMesh has two enforced billing layers.
 
-- If they are not sharing and have no wallet balance, no contribution credits, and no premium access, connect attempts redirect to `/verify/payment`.
-- The UI message is effectively: enable sharing or fund the wallet.
+### User browsing
 
-### 5. If the user wants to become a provider
+User browsing is settled in `lib/wallet.ts` via `settleSessionUsage()` and `lib/billing.ts` via `settleUserUsage()`.
 
-- They need the desktop app or CLI helper.
-- They must accept provider terms.
-- Sharing can then be started from the dashboard, desktop app, or CLI.
+Settlement order:
 
-## Provider Flow
+1. free monthly allocation
+2. contribution credits
+3. USD wallet balance
 
-### Provider types
+Current defaults:
 
-PeerMesh currently supports:
+- base monthly allocation: 5 GB
+- premium bonus: +5 GB unless overridden by env
+- browse wallet pricing: `$3 / GB` unless overridden by env
+- provider revenue share on collected wallet debits: `60%` unless overridden by env
 
-- Desktop provider: Electron helper
-- CLI provider: Node CLI helper
+Important details:
 
-Both can:
+- free bytes and contribution credits are consumed before wallet debits
+- if wallet balance is lower than the final bill, PeerMesh records the collected amount plus the shortfall
+- provider revenue share is derived only from collected paid usage, not from free allocation or contribution-credit consumption
 
-- open multiple provider slots
-- register each slot independently with the relay
-- serve HTTP fetch requests
-- serve CONNECT tunnel requests for HTTPS
+### Developer/API billing
 
-### Public sharing
+API access is authenticated by PeerMesh API keys defined in `api_keys`.
 
-- A provider slot registers with the relay using `register_provider`.
-- If the slot is public and healthy, it becomes eligible for public country-based matching.
-- Public requesters do not choose individual public devices. They see country availability counts, not a raw device list.
+Implemented pieces:
 
-### Private sharing
+- key creation, listing, and revocation: `app/api/billing/api-keys/route.ts`
+- key hashing and resolution: `lib/api-keys.ts`
+- pricing engine: `lib/billing.ts`
+- quote route: `app/api/billing/quote/route.ts`
+- requester auth resolution: `lib/requester-auth.ts`
+- relay requester enforcement: `app/api/relay/auth/route.ts`
+- final usage logging: `api_usage` via `lib/wallet.ts`
 
-- Private sharing is managed through `private_share_devices`.
-- A provider can enable a 9-digit private share code.
-- Private slots are excluded from the public pool.
-- Requesters connect to those slots only by entering the code.
+API key behavior:
 
-### Multi-slot behavior
+- keys authenticate through `x-api-key` or `Authorization: Bearer pmk_live_...`
+- `session/create` stores `api_key_id`, request metadata, quoted tier data, and estimated cost on the session row
+- RPM caps, sticky-session eligibility, and verification requirements are enforced before session creation
+- API sessions require enough wallet balance to cover the estimated quote before they start
+- `session/end` logs the final row in `api_usage` and debits wallet balance from the requester's account
 
-- Each slot gets its own `device_id`.
-- A single machine can serve multiple requesters at once.
-- Daily limit checks apply at both profile and slot level.
+Supported API tiers:
 
-## Requester Flow
+- `standard`
+- `advanced`
+- `enterprise`
+- `contributor`
 
-### Public route
+Contributor keys are restricted to provider-capable accounts that have accepted provider terms.
 
-1. User picks a country in the dashboard.
-2. Frontend calls `POST /api/session/create`.
-3. Server checks auth, verification, access, trust, and monthly usage.
-4. Server looks for live public providers in that country.
-5. Server creates a pending session and returns:
-   - `sessionId`
-   - `relayEndpoint`
-   - `relayFallbackList`
-   - signed accountability receipt
-   - preferred provider hints if available
-6. Requester opens a relay WebSocket session.
-7. Relay matches a provider.
-8. Provider acknowledges with `agent_ready`.
-9. Traffic starts.
+## Contribution Credits
 
-### Private route
+Contribution credits are now an enforced 1:1 bandwidth credit.
 
-1. User enters a 9-digit code.
-2. `POST /api/session/create` resolves it to a provider user and base device.
-3. The API checks that the private share is active and not owned by the requester.
-4. The relay only allows that specific private provider/base device to satisfy the session.
+Implemented mechanics:
 
-## What the Relay Server Does
+- helper and provider share reports call `increment_bytes_shared`
+- `increment_bytes_shared` updates both `total_bytes_shared` and `contribution_credits_bytes`
+- `sharedBytesToCreditBytes()` in `lib/billing.ts` mirrors the same 1:1 conversion logic in code
 
-The relay is the live traffic coordinator.
+Net effect:
 
-It is responsible for:
+- `1 GB` shared produces `1 GB` of contribution credits
+- those credits are later consumed before wallet balance during requester settlement
 
-- authenticating providers and requesters through `/api/relay/auth`
-- keeping the live provider pool
-- matching requesters to providers
-- excluding busy slots
-- excluding private-only slots from public matching
-- checking provider trust and daily-limit eligibility
-- forwarding HTTP and tunnel traffic
-- patching session metadata back into the database
-- attempting auto-reconnect if a provider drops mid-session
+## Provider Earnings and Payout Accounting
 
-## How Requesters See Devices
+Provider earnings are accounted for during session finalization.
 
-Requesters do not browse a full public device list.
+When a paid session ends:
 
-They see:
+- wallet debit is recorded in `wallet_ledger`
+- provider revenue share is calculated from the collected debit
+- `profiles.wallet_pending_payout_usd` is incremented for the provider
+- a `provider_payouts` row is inserted for the provider
 
-- country-level public availability counts from `/api/peers/available`
-- or a private-code entry path for private devices
+Relevant code:
 
-So the requester experience is:
+- `lib/wallet.ts`
+- `app/api/session/end/route.ts`
+- `app/api/billing/wallet/route.ts`
 
-- public: "connect me to any eligible provider in this country"
-- private: "connect me to the provider behind this exact code"
+What the repo does today:
+
+- accrues payout balances automatically
+- exposes payout history and FX preview for display
+
+What is still operational:
+
+- final bank or transfer disbursement execution is not exposed as a first-class route in this tree
+
+## Sharing and Provider Control
+
+PeerMesh providers run through either:
+
+- the Electron desktop app
+- the CLI helper
+
+Sharing enforcement:
+
+- only `peer` and `host` roles can share
+- provider registration is blocked unless the account is phone verified
+- provider registration is blocked unless provider terms were accepted
+- `client` accounts cannot register provider relays or enable sharing
+
+Provider-control endpoints:
+
+- sharing state and helper sync: `app/api/user/sharing/route.ts`
+- relay registration auth: `app/api/relay/auth/route.ts`
+- role switching: `app/api/account/role/route.ts`
+
+Provider capabilities include:
+
+- multi-slot sharing
+- daily profile limits
+- daily per-slot limits
+- public country-based matching
+- private share codes per device or slot
+- desktop and relay reconnect behavior
+
+## Connection Modes
+
+### Public mode
+
+Public browsing selects any eligible provider in the requested country.
+
+Selection inputs:
+
+- country code
+- preferred provider memory from prior successful sessions
+- provider slot occupancy
+- relay availability
+- private-share exclusion
+
+Requesters do not browse a raw public provider list. They only see country-level availability.
+
+### Private mode
+
+Private browsing uses a 9-digit share code backed by `private_share_devices`.
+
+Private-mode enforcement:
+
+- the code must exist
+- the code must be active
+- the code cannot belong to the requester
+- the relay auth path must match the provider user and base device stored on the session
 
 ## Session Lifecycle
 
-### Session start
+### Session creation
 
-- `POST /api/session/create` creates a pending database row.
-- The relay authenticates the requester.
-- The relay finds a provider.
-- Provider sends `agent_ready`.
-- Relay patches `provider_id`, `provider_kind`, `provider_device_id`, `provider_base_device_id`, and observed target hosts back into the session row.
+`app/api/session/create/route.ts`:
 
-### During the session
+- resolves requester auth
+- enforces email, phone, role, trust, and billing rules
+- validates private share codes when present
+- selects relay candidates
+- inserts a pending session row
+- issues a signed accountability receipt
 
-- Desktop and CLI providers handle `proxy_request` and `open_tunnel`.
-- Providers report shared bytes separately through `/api/user/sharing`.
-- The relay tracks activity and can reconnect a requester to a new provider if the old one drops.
+Session metadata stored at creation may include:
 
-### Session end
+- `request_access_mode`
+- `request_auth_kind`
+- `api_key_id`
+- `request_id`
+- `pricing_tier`
+- `requested_bandwidth_gb`
+- `requested_rpm`
+- `requested_period_hours`
+- `requested_session_mode`
+- `estimated_cost_usd`
 
-- Relay or client can call `POST /api/session/end`.
-- The route is written to behave idempotently.
-- Requester bandwidth counters are incremented once.
-- Desktop and CLI provider bytes are not double-counted during session finalization.
+### Relay auth
 
-## Common User-Facing Errors
+`app/api/relay/auth/route.ts`:
 
-Current errors a requester can hit include:
+- validates provider vs requester role
+- rejects API keys for provider registration
+- ensures API keys can only attach to sessions they actually created
+- ensures private-route claims match the authorized session row
 
-- `Confirm your email before connecting.`
-- `Verify your phone to connect to providers.`
-- `FREE LAYER - Enable sharing to connect, or fund your USD wallet to browse without sharing.`
-- `Account suspended due to low trust score`
-- `Monthly bandwidth limit reached. Wait for reset or fund your USD wallet for higher usage.`
-- `No peers available in <country>`
-- `Private share code is invalid or expired`
-- `Private share is currently offline`
-- `Private share is offline or busy`
+### Session finalization
 
-Local desktop/proxy errors can also surface, such as:
+`app/api/session/end/route.ts`:
 
-- no active PeerMesh session
-- provider unavailable
-- tunnel timeout
+- ends the session exactly once
+- records final bytes and provider metadata
+- settles requester billing
+- increments requester monthly bandwidth
+- increments provider shared bytes when appropriate
+- updates preferred-provider memory
 
-## Billing and Payout Status
+This route is the main settlement checkpoint for both user-auth and API-key sessions.
 
-### Implemented
+## Authentication Surfaces
 
-- 5 GB monthly allocation
-- contribution credits based on bytes shared
-- USD wallet balance on profile
-- Flutterwave wallet top-up checkout
-- Flutterwave payment verification/webhook settlement
-- wallet ledger records
-- payment transaction records
-- pending provider payout balance on profile
-- payout FX preview for display
+PeerMesh currently supports:
 
-### Not fully implemented end-to-end
+- Supabase user sessions
+- device and desktop session tokens
+- PeerMesh API keys
 
-- automated Flutterwave payout disbursement
-- full per-request API-key metering and wallet debit
-- strict role-based billing enforcement beyond the generic access gate
+Relevant routes:
 
-The database schema for API keys, API usage, and provider payouts exists, but the full money-moving and per-request debit loop is not complete.
+- `app/api/extension-auth/route.ts`
+- `app/api/extension-auth/refresh/route.ts`
+- `app/api/device-token/route.ts`
+- `app/api/agent-token/route.ts`
+- `app/api/auth/*`
 
-## Security and Production Readiness
+Current auth properties:
 
-As of 2026-04-27, PeerMesh is not ready for a public production launch.
+- email confirmation is enforced
+- desktop refresh requires real refresh tokens
+- refresh sessions are stored as hashed device-session records
+- relay auth validates the session owner before allowing traffic
 
-### Launch blockers
+## Wallet and Payments
 
-- Desktop token refresh can issue a fresh desktop token from `userId` alone without proving possession of the previous token or device session.
-- Phone verification is not a real OTP verification flow yet. The API currently marks users as verified without validating an SMS code against Twilio.
+Wallet funding is handled through Flutterwave.
 
-### Other serious risks
+Implemented routes:
 
-- Session receipt signing falls back to `dev-secret` if production secrets are missing.
-- Some provider geolocation depends on an external HTTP geolocation service for relay-forwarded IPs.
-- The in-memory rate limiter comment says 100 requests per minute, but the current numeric cap is much higher than that comment implies.
-- Desktop/native-host behavior in the supplied debug log shows repeated native host starts and refresh churn, which is an operational stability concern even aside from the security issues above.
+- checkout: `app/api/billing/flutterwave/checkout/route.ts`
+- verify: `app/api/billing/flutterwave/verify/route.ts`
+- webhook: `app/api/billing/flutterwave/webhook/route.ts`
+- wallet summary: `app/api/billing/wallet/route.ts`
 
-### Practical verdict
+Settlement primitives:
 
-- Suitable for internal testing, controlled beta, and continued hardening.
-- Not suitable for open public launch until auth refresh and phone verification are fixed at minimum.
+- top-up verification credits `wallet_balance_usd`
+- wallet ledger records payment and debit events
+- payout preview can convert pending USD value into a configured payout currency estimate
 
-## Product View
+## Major Data Tables
 
-PeerMesh has a strong product thesis:
+The main persistence model lives in `supabase.sql`.
 
-- residential IP supply from real user devices
-- a share-to-earn-credit model
-- private and public routing
-- desktop and CLI provider paths
+Core tables:
 
-The weak point is not the idea. The weak point is that the security and enforcement model has to be as strong as the accountability promise.
+- `profiles`
+- `sessions`
+- `provider_devices`
+- `private_share_devices`
+- `provider_slot_limits`
+- `payment_transactions`
+- `wallet_ledger`
+- `provider_payouts`
+- `api_keys`
+- `api_usage`
+- `device_sessions`
+- `extension_auth_tokens`
+- `device_codes`
 
-Right now the product story is clearer than the implementation guarantees. The fastest path to a real launch is:
+Key RPCs and functions:
 
-1. lock down desktop auth refresh and device revocation
-2. implement real phone OTP verification
-3. remove insecure secret fallbacks
-4. finish payout disbursement and API debit logic
-5. align role policy with code, not just docs and UI copy
+- `increment_bandwidth`
+- `increment_bytes_shared`
+- `set_preferred_provider`
+- `cleanup_stale_sessions`
+
+## Operational Prerequisites
+
+For a real deployment, PeerMesh still depends on the surrounding environment being configured correctly.
+
+Important secrets and external dependencies include:
+
+- Supabase URL, anon key, and service-role credentials
+- relay secret and receipt secret
+- Flutterwave credentials
+- Twilio credentials when phone bypass is disabled
+- provider desktop and CLI distribution artifacts
 
 ## Summary
 
-PeerMesh today is a working relay-and-provider system with:
+PeerMesh now enforces the core v1 mechanics that matter for runtime correctness:
 
-- verified session creation flow
-- public and private routing
-- multi-slot desktop/CLI providers
-- contribution credit accounting
-- Flutterwave wallet funding
+- role-based requester/provider boundaries
+- metered API-key authentication and usage accounting
+- free-allocation, contribution-credit, and wallet settlement
+- provider earning accrual into payout balances
+- signed session receipts and relay-checked ownership
 
-But it is still in a hardening phase, not a public-launch phase.
+The codebase is now in a releasable state for the main product flow, with release gates passing and the previously missing request-path enforcement implemented.

@@ -1,5 +1,7 @@
 'use client'
 
+/* eslint-disable react/no-unescaped-entities */
+
 import { useState } from 'react'
 
 const mono = "'Courier New', monospace"
@@ -136,7 +138,7 @@ export default function InstallPageClient() {
           <div>
             <h1 style={{ fontSize: '26px', fontWeight: 700, lineHeight: 1.2, marginBottom: '12px', letterSpacing: '-0.02em' }}>
               Browse any site through<br />
-              <span style={{ color: 'var(--accent)' }}>a real peer's connection</span>
+              <span style={{ color: 'var(--accent)' }}>a real peer&apos;s connection</span>
             </h1>
             <p style={{ color: 'var(--muted)', fontSize: '14px', lineHeight: 1.7, marginBottom: '28px' }}>
               YouTube, Google, Netflix — everything works. Your entire browser routes through the peer's real IP.

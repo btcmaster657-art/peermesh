@@ -119,23 +119,28 @@ export async function POST(req: Request) {
   let estimatedCostUsd = 0
 
   if (auth.kind === 'api_key') {
+    const apiKey = auth.apiKey
+    if (!apiKey) {
+      return NextResponse.json({ error: 'API key metadata is missing' }, { status: 401 })
+    }
+
     const requestedMode = body.sessionMode === 'sticky' ? 'sticky' : 'rotating'
     const requestedRpmValue = Math.max(1, Math.floor(Number(body.rpm ?? 60) || 60))
     const requestedPeriodHoursValue = Math.max(1, Math.floor(Number(body.periodHours ?? 1) || 1))
     const requestedBandwidthGbValue = Math.max(0.05, Number(body.bandwidthGb ?? 1) || 1)
 
-    if (requestedRpmValue > auth.apiKey.rpmLimit) {
-      return NextResponse.json({ error: `${auth.apiKey.name} is capped at ${auth.apiKey.rpmLimit} RPM.` }, { status: 403 })
+    if (requestedRpmValue > apiKey.rpmLimit) {
+      return NextResponse.json({ error: `${apiKey.name} is capped at ${apiKey.rpmLimit} RPM.` }, { status: 403 })
     }
-    if (requestedMode === 'sticky' && auth.apiKey.sessionMode !== 'sticky') {
-      return NextResponse.json({ error: `${auth.apiKey.name} only supports rotating sessions.` }, { status: 403 })
+    if (requestedMode === 'sticky' && apiKey.sessionMode !== 'sticky') {
+      return NextResponse.json({ error: `${apiKey.name} only supports rotating sessions.` }, { status: 403 })
     }
-    if (auth.apiKey.requiresVerification && activeProfile.is_verified !== true) {
+    if (apiKey.requiresVerification && activeProfile.is_verified !== true) {
       return NextResponse.json({ error: 'This API key requires a phone-verified account before sticky usage can be activated.' }, { status: 403 })
     }
 
     const quote = quoteApiUsage({
-      tier: auth.apiKey.tier,
+      tier: apiKey.tier,
       bandwidthGb: requestedBandwidthGbValue,
       rpm: requestedRpmValue,
       periodHours: requestedPeriodHoursValue,
@@ -155,7 +160,7 @@ export async function POST(req: Request) {
       }, { status: 403 })
     }
 
-    pricingTier = auth.apiKey.tier
+    pricingTier = apiKey.tier
     requestedBandwidthGb = requestedBandwidthGbValue
     requestedRpm = requestedRpmValue
     requestedPeriodHours = requestedPeriodHoursValue

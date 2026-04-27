@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { quoteApiUsage } from '../lib/billing.ts'
+import { quoteApiUsage, settleUserUsage, sharedBytesToCreditBytes } from '../lib/billing.ts'
 
 test('quoteApiUsage returns a positive estimate for standard rotating usage', () => {
   const quote = quoteApiUsage({
@@ -41,4 +41,29 @@ test('quoteApiUsage marks advanced sticky usage as requiring verification', () =
 
   assert.ok(quote.constraints.some((constraint) => constraint.code === 'tier_sticky_required_verification'))
   assert.ok(quote.estimatedUsd > 0)
+})
+
+test('sharedBytesToCreditBytes grants a 1:1 credit floor', () => {
+  assert.equal(sharedBytesToCreditBytes(2048.9), 2048)
+  assert.equal(sharedBytesToCreditBytes(-1), 0)
+})
+
+test('settleUserUsage consumes free bytes, then credits, then wallet balance', () => {
+  const gib = 1024 ** 3
+  const settlement = settleUserUsage({
+    bytesUsed: 8 * gib,
+    bandwidthUsedMonth: 2 * gib,
+    bandwidthLimit: 5 * gib,
+    contributionCreditsBytes: 4 * gib,
+    walletBalanceUsd: 10,
+  })
+
+  assert.equal(settlement.freeBytes, 3 * gib)
+  assert.equal(settlement.creditBytes, 4 * gib)
+  assert.equal(settlement.paidBytes, 1 * gib)
+  assert.equal(settlement.grossChargeUsd, 3)
+  assert.equal(settlement.walletDebitUsd, 3)
+  assert.equal(settlement.shortfallUsd, 0)
+  assert.equal(settlement.providerPayoutUsd, 1.8)
+  assert.equal(settlement.platformRevenueUsd, 1.2)
 })

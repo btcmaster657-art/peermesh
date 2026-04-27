@@ -137,15 +137,6 @@ function mergeProfileSync(profile: Profile | null, sync: SyncState | null | unde
   }
 }
 
-function hasPrivateShareSlot(rows: Iterable<PrivateShare>, baseDeviceId: string, slotIndex: number): boolean {
-  for (const row of rows) {
-    if (row.base_device_id !== baseDeviceId) continue
-    if (row.slot_index === slotIndex) return true
-    if (slotIndex === 0 && row.device_id === baseDeviceId) return true
-  }
-  return false
-}
-
 function sortPrivateShares(rows: PrivateShare[]): PrivateShare[] {
   return [...rows].sort((a, b) => {
     if (a.base_device_id !== b.base_device_id) return a.base_device_id.localeCompare(b.base_device_id)
@@ -260,7 +251,6 @@ export default function Dashboard() {
   const [desktopChecked, setDesktopChecked] = useState(false)
   const [sharingStats, setSharingStats] = useState({ bytesServed: 0, requestsHandled: 0 })
   const [connecting, setConnecting] = useState(false)
-  const [disconnecting, setDisconnecting] = useState(false)
   const [shareToggling, setShareToggling] = useState(false)
   const [shareTarget, setShareTarget] = useState<boolean | null>(null)
   const [showDisclosure, setShowDisclosure] = useState(false)
@@ -271,7 +261,6 @@ export default function Dashboard() {
   const [privateExpiryHours, setPrivateExpiryHours] = useState('24')
   const [privateShareSaving, setPrivateShareSaving] = useState(false)
   const [privateShareAction, setPrivateShareAction] = useState<'toggle' | 'refresh' | null>(null)
-  const [privateShareStoppedSharing, setPrivateShareStoppedSharing] = useState(false)
   const [slotUpdating, setSlotUpdating] = useState(false)
   const [dailyLimitInput, setDailyLimitInput] = useState('')
   const [dailyLimitSaving, setDailyLimitSaving] = useState(false)
@@ -327,11 +316,9 @@ export default function Dashboard() {
     }
   }, [selectedCountry])
 
+  // Country availability is loaded once on entry; subsequent updates are user-driven.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { loadCountries(1, '') }, [])
-
-  function getFlagForCountry(code: string): string {
-    return countries.find(c => c.code === code)?.flag ?? '🌍'
-  }
 
   const getDesktopAuthToken = useCallback(async () => {
     if (desktopAuthTokenRef.current) return desktopAuthTokenRef.current
@@ -428,6 +415,8 @@ export default function Dashboard() {
     }
     load()
     return () => stopPolling()
+  // Initial dashboard bootstrap intentionally runs once and manages its own async lifecycle.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // ── Extension detection ─────────────────────────────────────────────────────
@@ -508,6 +497,8 @@ export default function Dashboard() {
       return
     }
     loadPrivateShare(baseDeviceId).catch(() => {})
+  // Private-share sync is keyed to the currently active helper identity.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile?.id, desktop?.baseDeviceId, desktop?.peer?.baseDeviceId, desktop?.userId])
 
   // ── Poll desktop state + refresh profile ────────────────────────────────────
@@ -983,7 +974,6 @@ export default function Dashboard() {
         setIsSharing(true)
         setShareToggling(false)
       }
-      setPrivateShareStoppedSharing(false)
       const shareStateResponse = await fetch('/api/user/sharing', {
         method: 'POST',
         headers: DASHBOARD_SHARING_HEADERS,
@@ -1119,14 +1109,10 @@ export default function Dashboard() {
   const desktopAvailable = desktop?.available ?? false
   const helperOwnedByCurrentUser = isDesktopOwnedByUser(desktop, profile.id)
   const desktopAvailableForUser = desktopAvailable && helperOwnedByCurrentUser
-  const canProvideRole = profile.role === 'peer' || profile.role === 'host'
-  const providerControlsEnabled = helperOwnedByCurrentUser && canProvideRole
-  const desktopAvailableForProvider = desktopAvailableForUser && canProvideRole
   const primaryWhere = desktop?.where ?? desktop?.source ?? null
   const isCLI = primaryWhere === 'cli'
   const isDesktopApp = primaryWhere === 'desktop'
 
-  const peerRunning = desktop?.peer?.available ?? false
   const peerWhere = desktop?.peer?.where ?? null
 
   const desktopProcessVersion = isDesktopApp ? desktop?.version : (peerWhere === 'desktop' ? desktop?.peer?.version : null)

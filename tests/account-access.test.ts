@@ -44,8 +44,19 @@ test('getConnectionAccessRequirement requires usage access after phone verificat
 })
 
 test('getConnectionAccessRequirement allows verified users with sharing or paid access', () => {
-  assert.equal(getConnectionAccessRequirement({ is_verified: true, is_sharing: true }).ok, true)
-  assert.equal(getConnectionAccessRequirement({ is_verified: true, wallet_balance_usd: 2 }).ok, true)
+  assert.equal(getConnectionAccessRequirement({ role: 'peer', is_verified: true, is_sharing: true }).ok, true)
+  assert.equal(getConnectionAccessRequirement({ role: 'client', is_verified: true, wallet_balance_usd: 2 }).ok, true)
+})
+
+test('getConnectionAccessRequirement blocks host accounts from requester access', () => {
+  const requirement = getConnectionAccessRequirement({
+    role: 'host',
+    is_verified: true,
+    is_sharing: true,
+  })
+
+  assert.equal(requirement.ok, false)
+  assert.equal(requirement.code, 'role_not_allowed')
 })
 
 test('getConnectionAccessRequirement allows verified private connections without paid access', () => {

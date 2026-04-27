@@ -19,7 +19,7 @@ const PAGE_SIZE = 50
 export default function AuthForm() {
   const searchParams = useSearchParams()
   const router       = useRouter()
-  const supabase     = createClient()
+  const [supabase]   = useState(() => createClient())
 
   const [mode, setMode]           = useState<'login' | 'signup'>('login')
   const [email, setEmail]         = useState('')
@@ -77,7 +77,7 @@ export default function AuthForm() {
       }
       await finishSignedInRoute()
     })
-  }, [buildConfirmEmailPath, finishSignedInRoute])
+  }, [buildConfirmEmailPath, finishSignedInRoute, router, supabase])
 
   const loadCountries = useCallback(async (page = 1, search = '') => {
     setCountryLoading(true)
@@ -140,7 +140,7 @@ export default function AuthForm() {
         await fetch('/api/auth/confirm-email', { method: 'POST' }).catch(() => {})
         router.push(buildConfirmEmailPath())
       } else {
-        const { data, error } = await supabase.auth.signInWithPassword({ email, password })
+        const { error } = await supabase.auth.signInWithPassword({ email, password })
         if (error) throw error
 
         // Check if email is confirmed

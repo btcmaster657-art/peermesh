@@ -407,6 +407,7 @@ returns void as $$
 begin
   update profiles set
     total_bytes_shared = total_bytes_shared + p_bytes,
+    contribution_credits_bytes = contribution_credits_bytes + greatest(p_bytes, 0),
     share_bytes_today = case
       when share_bytes_today_date = current_date then coalesce(share_bytes_today, 0) + p_bytes
       else p_bytes
@@ -608,6 +609,22 @@ alter table profiles add column if not exists has_accepted_provider_terms boolea
 alter table profiles add column if not exists daily_share_limit_mb integer default null;
 alter table profiles add column if not exists share_bytes_today bigint default 0;
 alter table profiles add column if not exists share_bytes_today_date date default current_date;
+
+create or replace function increment_bytes_shared(p_user_id uuid, p_bytes bigint)
+returns void as $$
+begin
+  update profiles set
+    total_bytes_shared = total_bytes_shared + p_bytes,
+    contribution_credits_bytes = contribution_credits_bytes + greatest(p_bytes, 0),
+    share_bytes_today = case
+      when share_bytes_today_date = current_date then coalesce(share_bytes_today, 0) + p_bytes
+      else p_bytes
+    end,
+    share_bytes_today_date = current_date,
+    updated_at = now()
+  where id = p_user_id;
+end;
+$$ language plpgsql security definer;
 
 alter table provider_devices add column if not exists relay_url text default null;
 alter table provider_devices add column if not exists connection_slots integer not null default 1;

@@ -29,12 +29,33 @@ async function requireWebSession() {
   return session ?? null
 }
 
-async function loadProfile(userId: string, select: string) {
+type ExtensionApprovalProfile = {
+  username: string | null
+  country_code: string | null
+  trust_score: number | null
+  role: string | null
+  is_verified: boolean | null
+  phone_number: string | null
+  has_accepted_provider_terms: boolean | null
+  contribution_credits_bytes: number | null
+  wallet_balance_usd: number | null
+  wallet_pending_payout_usd: number | null
+}
+
+type ExtensionLinkedProfile = ExtensionApprovalProfile & {
+  is_premium: boolean | null
+  total_bytes_shared: number | null
+  total_bytes_used: number | null
+  is_sharing: boolean | null
+  daily_share_limit_mb: number | null
+}
+
+async function loadProfile<T>(userId: string, select: string): Promise<T | null> {
   const { data } = await adminClient
     .from('profiles')
     .select(select)
     .eq('id', userId)
-    .maybeSingle()
+    .maybeSingle<T>()
 
   return data
 }
@@ -209,7 +230,7 @@ export async function GET(req: Request) {
     }
 
     if (row.status === 'approved' && row.token && row.user_id && row.refresh_token && row.device_session_id) {
-      const profile = await loadProfile(
+      const profile = await loadProfile<ExtensionApprovalProfile>(
         row.user_id,
         'username, country_code, trust_score, role, is_verified, phone_number, has_accepted_provider_terms, contribution_credits_bytes, wallet_balance_usd, wallet_pending_payout_usd',
       )
@@ -263,7 +284,7 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: 'Invalid or expired token' }, { status: 401, headers: CORS })
   }
 
-  const profile = await loadProfile(
+  const profile = await loadProfile<ExtensionLinkedProfile>(
     row.user_id,
     'username, country_code, trust_score, role, is_verified, phone_number, is_premium, total_bytes_shared, total_bytes_used, is_sharing, has_accepted_provider_terms, daily_share_limit_mb, contribution_credits_bytes, wallet_balance_usd, wallet_pending_payout_usd',
   )

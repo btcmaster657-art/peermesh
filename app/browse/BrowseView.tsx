@@ -326,6 +326,8 @@ export default function BrowseView() {
       window.removeEventListener('message', onMessage)
       if (requester) void doEndSession()
     }
+  // This effect intentionally binds a single relay session lifecycle to the launch params.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [country, dbSessionId, preferredProviderUserId, privateBaseDeviceId, privateProviderUserId, relayEndpoint, relayFallbackParam, router, userId])
 
   async function doEndSession() {

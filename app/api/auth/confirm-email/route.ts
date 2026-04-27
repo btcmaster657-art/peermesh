@@ -10,7 +10,7 @@ function generate6DigitToken(): string {
 }
 
 // POST — send confirmation token to the signed-in user's email
-export async function POST(req: Request) {
+export async function POST() {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
 

@@ -62,7 +62,7 @@ export async function GET(req: Request) {
         'Access-Control-Allow-Methods': 'GET',
       },
     })
-  } catch (err: unknown) {
+  } catch {
     return new NextResponse('Fetch failed', { status: 502 })
   }
 }

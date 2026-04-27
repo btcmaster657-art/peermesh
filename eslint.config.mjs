@@ -5,12 +5,27 @@ import nextTs from "eslint-config-next/typescript";
 const eslintConfig = defineConfig([
   ...nextVitals,
   ...nextTs,
+  {
+    files: [
+      'build-save-*.mjs',
+      'run-relay.mjs',
+      'cli/**/*.js',
+      'desktop/**/*.js',
+      'extension/**/*.cjs',
+      'extension/popup/**/*.js',
+    ],
+    rules: {
+      '@typescript-eslint/no-require-imports': 'off',
+      '@typescript-eslint/no-unused-vars': 'off',
+    },
+  },
   // Override default ignores of eslint-config-next.
   globalIgnores([
     // Default ignores of eslint-config-next:
     ".next/**",
     "out/**",
     "build/**",
+    "desktop/playwright-report/**",
     "next-env.d.ts",
   ]),
 ]);

@@ -59,7 +59,7 @@ export default function ForgotPasswordPage() {
           <>
             <div style={{ fontSize: '18px', fontWeight: 600, color: 'var(--text)', marginBottom: '8px' }}>Reset password</div>
             <p style={{ color: 'var(--muted)', fontSize: '13px', lineHeight: 1.7, marginBottom: '24px' }}>
-              Enter your email and we'll send a 6-digit code to reset your password.
+              Enter your email and we&apos;ll send a 6-digit code to reset your password.
             </p>
 
             <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>

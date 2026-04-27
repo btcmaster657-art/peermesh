@@ -175,18 +175,6 @@ function ExtIdScreen({ extId }: { extId: string }) {
 
 export default function ExtensionPageClient() {
   const searchParams = useSearchParams()
-  const [mounted, setMounted] = useState(false)
-
-  useEffect(() => { setMounted(true) }, [])
-
-  if (!mounted) {
-    return (
-      <main className="flex flex-1 items-center justify-center">
-        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
-        <span style={{ display: 'inline-block', width: '20px', height: '20px', border: '2px solid var(--border)', borderTopColor: 'var(--accent)', borderRadius: '50%', animation: 'spin 0.7s linear infinite' }} />
-      </main>
-    )
-  }
 
   const isActivate = searchParams.get('activate') === '1' || !!searchParams.get('code')
   const urlExtId = searchParams.get('ext_id') ?? ''
