@@ -1238,7 +1238,7 @@ async function connectToRelay(opts, attempt = 0, retries = 0) {
   }
 }
 
-async function connectOnce({ relayEndpoint, country, userId, dbSessionId, preferredProviderUserId, privateProviderUserId, privateBaseDeviceId }) {
+async function connectOnce({ relayEndpoint, country, userId, dbSessionId, preferredProviderUserId, privateProviderUserId, privateBaseDeviceId, token }) {
   return new Promise((resolve, reject) => {
     const wsUrl = relayEndpoint
     log('info', `[CONNECT] WS connecting to ${wsUrl} country=${country} userId=${userId?.slice(0,8)}`)
@@ -1259,6 +1259,7 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
         type: 'request_session',
         country,
         userId,
+        authToken: token || supabaseToken || desktopToken || null,
         dbSessionId: dbSessionId ?? null,
         preferredProviderUserId: preferredProviderUserId ?? null,
         privateProviderUserId: privateProviderUserId ?? null,

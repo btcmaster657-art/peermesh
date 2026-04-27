@@ -1095,12 +1095,6 @@ async function connectSession() {
     return
   }
 
-  if (!hasPaidAccess(state.user) && !state.isSharing) {
-    state.error = FREE_TIER_MESSAGE
-    render()
-    return
-  }
-
   state.connecting = true
   state.error = null
   render()
@@ -1117,6 +1111,9 @@ async function connectSession() {
 
     const data = await res.json()
     if (await handleAuthFailure(res.status, { preserveWhileSharing: true })) { state.connecting = false; return }
+    if ((!res.ok || data.error) && data.nextStep) {
+      chrome.tabs.create({ url: `${API}${data.nextStep}` }).catch(() => {})
+    }
     if (!res.ok || data.error) throw new Error(data.error ?? `Server error (${res.status})`)
 
     const response = await chrome.runtime.sendMessage({

@@ -7,6 +7,7 @@ import { createHmac } from 'crypto'
 import { isPrivateShareActive, normalizePrivateShareCode } from '@/lib/private-sharing'
 import { getRelayFallbackList, relayHttpUrl, RELAY_ENDPOINTS } from '@/lib/relay-endpoints'
 import { buildOccupiedProviderDeviceSet, filterAvailableProviderDevices } from '@/lib/provider-capacity'
+import { getConnectionAccessRequirement } from '@/lib/account-access'
 
 const RECEIPT_SECRET = process.env.RELAY_SECRET ?? process.env.RECEIPT_SECRET ?? 'dev-secret'
 
@@ -61,16 +62,32 @@ function orderRelayCandidates(
 
 export async function POST(req: Request) {
   const supabase = await createClient()
-  let userId = (await supabase.auth.getUser()).data.user?.id ?? null
+  const sessionUser = (await supabase.auth.getUser()).data.user ?? null
+  let userId = sessionUser?.id ?? null
+  let emailConfirmed = !!sessionUser?.email_confirmed_at
 
   if (!userId) {
     const auth = req.headers.get('authorization') ?? ''
     const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
     if (token) {
-      userId = (await adminClient.auth.getUser(token)).data.user?.id ?? verifyDesktopToken(token) ?? null
+      const tokenUser = (await adminClient.auth.getUser(token)).data.user ?? null
+      if (tokenUser?.id) {
+        userId = tokenUser.id
+        emailConfirmed = !!tokenUser.email_confirmed_at
+      } else {
+        userId = verifyDesktopToken(token) ?? null
+        emailConfirmed = !!userId
+      }
     }
   }
   if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (!emailConfirmed) {
+    return NextResponse.json({
+      error: 'Confirm your email before connecting.',
+      code: 'email_confirmation_required',
+      nextStep: '/auth/confirm-email',
+    }, { status: 403 })
+  }
 
   const body = await req.json().catch(() => ({}))
   const hasPrivateCode = body.privateCode !== undefined
@@ -85,33 +102,27 @@ export async function POST(req: Request) {
 
   const { data: profile } = await adminClient
     .from('profiles')
-    .select('trust_score, is_verified, phone_number, is_premium, is_sharing, bandwidth_used_month, bandwidth_limit, preferred_providers, wallet_balance_usd, contribution_credits_bytes')
+    .select('trust_score, is_verified, is_premium, is_sharing, bandwidth_used_month, bandwidth_limit, preferred_providers, wallet_balance_usd, contribution_credits_bytes')
     .eq('id', userId)
     .single()
 
-  let activeProfile = profile
-  if (!activeProfile?.is_verified && activeProfile?.phone_number) {
-    await adminClient
-      .from('profiles')
-      .update({ is_verified: true, verified_at: new Date().toISOString() })
-      .eq('id', userId)
-    activeProfile = activeProfile ? { ...activeProfile, is_verified: true } : activeProfile
+  const activeProfile = profile
+  if (!activeProfile) {
+    return NextResponse.json({ error: 'Profile not found' }, { status: 404 })
   }
-
-  if (!activeProfile?.is_verified) {
-    return NextResponse.json({ error: 'Account not verified' }, { status: 403 })
+  const accessRequirement = getConnectionAccessRequirement(activeProfile)
+  if (!accessRequirement.ok) {
+    return NextResponse.json({
+      error: accessRequirement.error,
+      code: accessRequirement.code,
+      nextStep: accessRequirement.nextStep,
+    }, { status: 403 })
   }
   if (!isUserTrusted(activeProfile.trust_score)) {
     return NextResponse.json({ error: 'Account suspended due to low trust score' }, { status: 403 })
   }
   if (activeProfile.bandwidth_used_month >= activeProfile.bandwidth_limit) {
     return NextResponse.json({ error: 'Monthly bandwidth limit reached. Wait for reset or fund your USD wallet for higher usage.' }, { status: 403 })
-  }
-  const hasPaidAccess = Number(activeProfile.wallet_balance_usd ?? 0) > 0
-    || Number(activeProfile.contribution_credits_bytes ?? 0) > 0
-    || !!activeProfile.is_premium
-  if (!hasPaidAccess && !activeProfile.is_sharing) {
-    return NextResponse.json({ error: 'FREE LAYER - Enable sharing to connect, or fund your USD wallet to browse without sharing.' }, { status: 403 })
   }
 
   // Query live provider devices for this country to build a targeted relay list.
@@ -252,6 +263,8 @@ export async function POST(req: Request) {
     .from('sessions')
     .insert({
       user_id: userId,
+      provider_id: privateProviderUserId,
+      provider_base_device_id: privateBaseDeviceId,
       target_country: country,
       relay_endpoint: relay,
       status: 'pending',

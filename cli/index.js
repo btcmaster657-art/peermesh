@@ -976,6 +976,7 @@ function attachSlotSocketHandlers(slot, limitBytes, ws, relay) {
     const reg = {
       type: 'register_provider',
       userId: config.userId,
+      authToken: config.token,
       country: config.country,
       trustScore: config.trust ?? 50,
       agentMode: true,

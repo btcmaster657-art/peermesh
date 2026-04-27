@@ -12,20 +12,15 @@ const CORS = {
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? 'https://peermesh-beta.vercel.app'
 const EXTENSION_AUTH_TTL_MS = 365 * 24 * 60 * 60 * 1000
 
-function isProfileActivated(profile: { is_verified?: boolean | null; phone_number?: string | null } | null | undefined): boolean {
-  return !!(profile?.is_verified || profile?.phone_number)
+function hasProfileRecord(profile: { id?: string | null } | null | undefined): boolean {
+  return !!profile?.id
 }
 
-async function ensureProfileActivated<T extends { is_verified?: boolean | null; phone_number?: string | null }>(
-  userId: string,
+async function keepProfileState<T>(
+  _userId: string,
   profile: T | null,
 ): Promise<T | null> {
-  if (!profile || profile.is_verified || !profile.phone_number) return profile
-  await adminClient
-    .from('profiles')
-    .update({ is_verified: true, verified_at: new Date().toISOString() })
-    .eq('id', userId)
-  return { ...profile, is_verified: true }
+  return profile
 }
 
 function generateDeviceCode(): string {
@@ -76,6 +71,9 @@ export async function POST(req: Request) {
   const supabase = await createClient()
   const { data: { session } } = await supabase.auth.getSession()
   if (!session) return NextResponse.json({ error: 'Not authenticated' }, { status: 401, headers: CORS })
+  if (!session.user.email_confirmed_at) {
+    return NextResponse.json({ error: 'Confirm your email before linking an extension.' }, { status: 403, headers: CORS })
+  }
 
   const { ext_id } = body
   if (!ext_id || typeof ext_id !== 'string' || ext_id.length < 10) {
@@ -104,6 +102,9 @@ export async function PATCH(req: Request) {
   const supabase = await createClient()
   const { data: { session } } = await supabase.auth.getSession()
   if (!session) return NextResponse.json({ error: 'Not authenticated' }, { status: 401, headers: CORS })
+  if (!session.user.email_confirmed_at) {
+    return NextResponse.json({ error: 'Confirm your email before approving a device.' }, { status: 403, headers: CORS })
+  }
 
   const { user_code, action } = await req.json().catch(() => ({}))
   if (!user_code || !['approve', 'deny'].includes(action)) {
@@ -150,8 +151,8 @@ export async function GET(req: Request) {
 
   // â”€â”€ Token refresh â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Called by desktop/CLI/extension when their token has expired mid-session.
-  // Re-issues a fresh desktop token for the userId if the user still exists and
-  // is verified. No old token required â€” the userId is the identity anchor.
+  // Re-issues a fresh desktop token for the userId if the profile still exists.
+  // No old token required â€” the userId is the identity anchor.
   if (searchParams.get('refresh') === '1') {
     // Desktop/CLI agents refresh their token using only userId â€” no old token required.
     // Refused only if the device has been explicitly revoked (status = 'revoked').
@@ -159,8 +160,8 @@ export async function GET(req: Request) {
     if (!userId) return NextResponse.json({ error: 'userId required' }, { status: 400, headers: CORS })
     const { data: rawProfile } = await adminClient
       .from('profiles').select('id, is_verified, phone_number').eq('id', userId).maybeSingle()
-    const profile = await ensureProfileActivated(userId, rawProfile)
-    if (!isProfileActivated(profile)) return NextResponse.json({ error: 'Not found or not verified' }, { status: 404, headers: CORS })
+    const profile = await keepProfileState(userId, rawProfile)
+    if (!hasProfileRecord(profile)) return NextResponse.json({ error: 'Not found' }, { status: 404, headers: CORS })
     const { data: revokedRow } = await adminClient
       .from('device_codes').select('id').eq('user_id', userId).eq('status', 'revoked').maybeSingle()
     if (revokedRow) return NextResponse.json({ revoked: true }, { status: 403, headers: CORS })
@@ -225,9 +226,9 @@ export async function GET(req: Request) {
         .eq('id', row.user_id)
         .single()
 
-      const activeProfile = await ensureProfileActivated(row.user_id, profile)
-      if (!isProfileActivated(activeProfile)) {
-        return NextResponse.json({ error: 'Account not verified' }, { status: 403, headers: CORS })
+      const activeProfile = await keepProfileState(row.user_id, profile)
+      if (!activeProfile) {
+        return NextResponse.json({ error: 'Profile not found' }, { status: 404, headers: CORS })
       }
 
       return NextResponse.json({
@@ -239,6 +240,7 @@ export async function GET(req: Request) {
           country: activeProfile?.country_code,
           trustScore: activeProfile?.trust_score,
           role: activeProfile?.role,
+          isVerified: activeProfile?.is_verified ?? false,
           walletBalanceUsd: activeProfile?.wallet_balance_usd,
           contributionCreditsBytes: activeProfile?.contribution_credits_bytes,
           walletPendingPayoutUsd: activeProfile?.wallet_pending_payout_usd,
@@ -275,9 +277,9 @@ export async function GET(req: Request) {
     .eq('id', row.user_id)
     .single()
 
-  const activeProfile = await ensureProfileActivated(row.user_id, profile)
-  if (!isProfileActivated(activeProfile)) {
-    return NextResponse.json({ error: 'Account not verified' }, { status: 403, headers: CORS })
+  const activeProfile = await keepProfileState(row.user_id, profile)
+  if (!activeProfile) {
+    return NextResponse.json({ error: 'Profile not found' }, { status: 404, headers: CORS })
   }
 
   try {
@@ -296,6 +298,7 @@ export async function GET(req: Request) {
       country: activeProfile?.country_code,
       trustScore: activeProfile?.trust_score,
       role: activeProfile?.role,
+      isVerified: activeProfile?.is_verified ?? false,
       isPremium: activeProfile?.is_premium,
       totalShared: activeProfile?.total_bytes_shared,
       totalUsed: activeProfile?.total_bytes_used,

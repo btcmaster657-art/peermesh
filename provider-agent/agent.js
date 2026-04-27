@@ -164,6 +164,7 @@ async function handleMessage(msg) {
       ws.send(JSON.stringify({
         type: 'register_provider',
         userId: config.userId,
+        authToken: config.token,
         country: config.country,
         trustScore: config.trust,
         agentMode: true,

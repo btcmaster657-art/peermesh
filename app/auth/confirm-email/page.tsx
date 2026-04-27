@@ -1,19 +1,39 @@
 'use client'
 
-import { useState, useEffect } from 'react'
-import { useRouter } from 'next/navigation'
+import { Suspense, useState, useEffect } from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
 
-export default function ConfirmEmailPage() {
+function ConfirmEmailPageClient() {
   const router = useRouter()
+  const searchParams = useSearchParams()
   const [token,   setToken]   = useState('')
   const [loading, setLoading] = useState(false)
   const [sending, setSending] = useState(false)
   const [error,   setError]   = useState('')
   const [done,    setDone]    = useState(false)
   const [resent,  setResent]  = useState(false)
+  const extId = searchParams.get('ext_id')
+  const activate = searchParams.get('activate') === '1'
 
   // Auto-send on mount
   useEffect(() => { sendCode() }, [])
+
+  async function finishConfirmedRoute() {
+    if (extId) {
+      await fetch('/api/extension-auth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ext_id: extId }),
+      }).catch(() => {})
+      router.push(`/extension?ext_id=${extId}`)
+      return
+    }
+    if (activate) {
+      router.push('/extension?activate=1')
+      return
+    }
+    router.push('/dashboard')
+  }
 
   async function sendCode() {
     setSending(true)
@@ -38,7 +58,7 @@ export default function ConfirmEmailPage() {
       const data = await res.json()
       if (!res.ok) { setError(data.error ?? 'Invalid code'); return }
       setDone(true)
-      setTimeout(() => router.push('/verify/phone'), 1500)
+      setTimeout(() => { void finishConfirmedRoute() }, 800)
     } catch {
       setError('Network error — please try again')
     } finally {
@@ -52,7 +72,7 @@ export default function ConfirmEmailPage() {
         <div style={{ textAlign: 'center' }}>
           <div style={{ fontSize: '32px', marginBottom: '16px' }}>✅</div>
           <div style={{ fontSize: '16px', fontWeight: 600, color: 'var(--text)', marginBottom: '8px' }}>Email confirmed</div>
-          <p style={{ color: 'var(--muted)', fontSize: '13px' }}>Continuing setup...</p>
+          <p style={{ color: 'var(--muted)', fontSize: '13px' }}>Opening your dashboard...</p>
         </div>
       </main>
     )
@@ -101,5 +121,19 @@ export default function ConfirmEmailPage() {
         </div>
       </div>
     </main>
+  )
+}
+
+export default function ConfirmEmailPage() {
+  return (
+    <Suspense fallback={
+      <main className="flex flex-1 items-center justify-center px-6 py-20">
+        <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '12px', color: 'var(--muted)' }}>
+          LOADING...
+        </div>
+      </main>
+    }>
+      <ConfirmEmailPageClient />
+    </Suspense>
   )
 }

@@ -1,19 +1,21 @@
 'use client'
 
-import { useState } from 'react'
-import { useRouter } from 'next/navigation'
+import { Suspense, useState } from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 
 const BYPASS = process.env.NEXT_PUBLIC_BYPASS_VERIFICATION === 'true'
 
-export default function PhoneVerifyPage() {
+function PhoneVerifyPageClient() {
   const router = useRouter()
+  const searchParams = useSearchParams()
   const supabase = createClient()
   const [phone, setPhone] = useState('')
   const [code, setCode] = useState('')
   const [step, setStep] = useState<'phone' | 'code'>('phone')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const nextPath = searchParams.get('next')?.startsWith('/') ? searchParams.get('next') : '/dashboard'
 
   async function sendCode(e: React.FormEvent) {
     e.preventDefault()
@@ -61,7 +63,7 @@ export default function PhoneVerifyPage() {
       })
       const data = await res.json()
       if (data.error) throw new Error(data.error)
-      router.push('/dashboard')
+      router.push(nextPath ?? '/dashboard')
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Invalid code')
     } finally {
@@ -101,24 +103,12 @@ export default function PhoneVerifyPage() {
           PEERMESH
         </div>
 
-        {/* Progress */}
-        <div style={{ display: 'flex', gap: '8px', marginBottom: '32px' }}>
-          {['Phone', 'Payment', 'Done'].map((label, i) => (
-            <div key={label} style={{ flex: 1, textAlign: 'center' }}>
-              <div style={{ height: '3px', borderRadius: '2px', background: i === 0 ? 'var(--accent)' : 'var(--border)', marginBottom: '6px' }} />
-              <span style={{ fontSize: '10px', fontFamily: 'var(--font-geist-mono)', color: i === 0 ? 'var(--accent)' : 'var(--muted)', letterSpacing: '0.5px' }}>
-                {label.toUpperCase()}
-              </span>
-            </div>
-          ))}
-        </div>
-
         <h2 style={{ fontSize: '20px', fontWeight: 600, marginBottom: '8px' }}>
           {step === 'phone' ? 'Verify your phone' : 'Enter the code'}
         </h2>
         <p style={{ color: 'var(--muted)', fontSize: '13px', marginBottom: '24px', lineHeight: 1.6 }}>
           {step === 'phone'
-            ? 'We\'ll send a one-time code to confirm your number.'
+            ? 'Phone verification is only checked before you connect through another provider.'
             : `Code sent to ${phone}. ${BYPASS ? 'In test mode, use 123456.' : ''}`}
         </p>
 
@@ -159,5 +149,19 @@ export default function PhoneVerifyPage() {
         )}
       </div>
     </main>
+  )
+}
+
+export default function PhoneVerifyPage() {
+  return (
+    <Suspense fallback={
+      <main className="flex flex-1 items-center justify-center px-6 py-20">
+        <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '12px', color: 'var(--muted)' }}>
+          LOADING...
+        </div>
+      </main>
+    }>
+      <PhoneVerifyPageClient />
+    </Suspense>
   )
 }

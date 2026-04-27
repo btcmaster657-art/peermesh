@@ -85,6 +85,58 @@ async function getProviderShareStatus(userId, deviceId = null, baseDeviceId = nu
   }
 }
 
+async function verifyPeerAuth({
+  token,
+  userId = null,
+  role,
+  dbSessionId = null,
+  country = null,
+  privateProviderUserId = null,
+  privateBaseDeviceId = null,
+}) {
+  if (!API_BASE || !RELAY_SECRET) {
+    return { ok: false, error: 'Relay auth is not configured' }
+  }
+  if (!token || !role) {
+    return { ok: false, error: 'Missing relay auth token' }
+  }
+
+  try {
+    const res = await fetch(`${API_BASE}/api/relay/auth`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-relay-secret': RELAY_SECRET,
+      },
+      body: JSON.stringify({
+        token,
+        userId,
+        role,
+        dbSessionId,
+        country,
+        privateProviderUserId,
+        privateBaseDeviceId,
+      }),
+      signal: AbortSignal.timeout(5000),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      return { ok: false, error: data.error || `Relay auth failed (${res.status})` }
+    }
+    return {
+      ok: true,
+      userId: data.userId ?? null,
+      trustScore: data.trustScore ?? 50,
+      country: data.country ?? null,
+      privateProviderUserId: data.privateProviderUserId ?? null,
+      privateBaseDeviceId: data.privateBaseDeviceId ?? null,
+    }
+  } catch (err) {
+    logErr('AUTH', `relay auth failed userId=${userId?.slice?.(0, 8) ?? 'unknown'} role=${role}`, err)
+    return { ok: false, error: 'Relay auth request failed' }
+  }
+}
+
 async function findProvider(country, requesterId, requestingUserId, {
   requireTunnel = false,
   preferredUserId = null,
@@ -585,10 +637,20 @@ async function handleMessage(ws, msg) {
 
     case 'register_provider': {
       log(ws.peerId.slice(0,8), `REGISTER_PROVIDER userId=${msg.userId?.slice(0,8)} country=${msg.country} deviceId=${msg.deviceId?.slice(0,8)}`)
+      const auth = await verifyPeerAuth({
+        token: msg.authToken ?? '',
+        userId: msg.userId ?? null,
+        role: 'provider',
+      })
+      if (!auth.ok || !auth.userId) {
+        send(ws, { type: 'error', message: auth.error ?? 'Unauthorized provider' })
+        ws.close(1008, 'Unauthorized provider')
+        return
+      }
       ws.deviceId = msg.deviceId ?? null
       ws.baseDeviceId = msg.baseDeviceId ?? msg.deviceId ?? null
       for (const [id, peer] of peers) {
-        if (peer.userId === msg.userId && peer.role === 'provider' && id !== ws.peerId) {
+        if (peer.userId === auth.userId && peer.role === 'provider' && id !== ws.peerId) {
           // Only evict if same device reconnecting — different devices are allowed
           if (msg.deviceId && peer.deviceId && peer.deviceId !== msg.deviceId) continue
           if (peer.sessionId) {
@@ -609,8 +671,8 @@ async function handleMessage(ws, msg) {
       }
       ws.role = 'provider'
       ws.country = msg.country
-      ws.userId = msg.userId
-      ws.trustScore = msg.trustScore ?? 50
+      ws.userId = auth.userId
+      ws.trustScore = auth.trustScore ?? 50
       ws.agentMode = msg.agentMode ?? false
       ws.providerKind = msg.providerKind ?? 'unknown'
       ws.supportsHttp = msg.supportsHttp ?? true
@@ -634,25 +696,42 @@ async function handleMessage(ws, msg) {
     }
 
     case 'request_session': {
+      const auth = await verifyPeerAuth({
+        token: msg.authToken ?? '',
+        userId: msg.userId ?? null,
+        role: 'requester',
+        dbSessionId: msg.dbSessionId ?? null,
+        country: msg.country ?? null,
+        privateProviderUserId: msg.privateProviderUserId ?? null,
+        privateBaseDeviceId: msg.privateBaseDeviceId ?? null,
+      })
+      if (!auth.ok || !auth.userId || !auth.country) {
+        send(ws, { type: 'error', message: auth.error ?? 'Unauthorized requester' })
+        ws.close(1008, 'Unauthorized requester')
+        return
+      }
+
       const requireTunnel = !!msg.requireTunnel
-      const privateBaseDeviceId = msg.privateBaseDeviceId ?? null
+      const resolvedCountry = auth.country
+      const privateBaseDeviceId = auth.privateBaseDeviceId ?? null
+      const privateProviderUserId = auth.privateProviderUserId ?? null
       const privateOnly = !!privateBaseDeviceId
-      log(ws.peerId.slice(0,8), `REQUEST_SESSION country=${msg.country} userId=${msg.userId?.slice(0,8)}`)
+      log(ws.peerId.slice(0,8), `REQUEST_SESSION country=${resolvedCountry} userId=${auth.userId?.slice(0,8)}`)
       log(ws.peerId.slice(0,8), `PEERS AT REQUEST TIME`, peersSnapshot())
 
       // Seed in-memory affinity from DB value passed by client on connect
-      if (!privateOnly && msg.preferredProviderUserId && msg.userId && msg.country) {
-        setAffinity(msg.userId, msg.country, msg.preferredProviderUserId)
-        log('AFFINITY', `SEEDED from DB requester=${msg.userId.slice(0,8)} → provider=${msg.preferredProviderUserId.slice(0,8)} country=${msg.country}`)
+      if (!privateOnly && msg.preferredProviderUserId && auth.userId && resolvedCountry) {
+        setAffinity(auth.userId, resolvedCountry, msg.preferredProviderUserId)
+        log('AFFINITY', `SEEDED from DB requester=${auth.userId.slice(0,8)} → provider=${msg.preferredProviderUserId.slice(0,8)} country=${resolvedCountry}`)
       }
 
       const preferredUserId = privateOnly
-        ? (msg.privateProviderUserId ?? msg.preferredProviderUserId ?? null)
-        : getAffinity(msg.userId, msg.country)
+        ? (privateProviderUserId ?? msg.preferredProviderUserId ?? null)
+        : getAffinity(auth.userId, resolvedCountry)
 
       ws.privateBaseDeviceId = privateBaseDeviceId
 
-      const provider = await findProvider(msg.country, ws.peerId, msg.userId, {
+      const provider = await findProvider(resolvedCountry, ws.peerId, auth.userId, {
         requireTunnel,
         preferredUserId,
         privateBaseDeviceId,
@@ -660,16 +739,16 @@ async function handleMessage(ws, msg) {
       })
 
       if (!provider) {
-        log(ws.peerId.slice(0,8), `NO_PROVIDER_FOUND country=${msg.country}`)
+        log(ws.peerId.slice(0,8), `NO_PROVIDER_FOUND country=${resolvedCountry}`)
         for (const [, peer] of peers) {
           if (peer.role === 'provider') {
             const reasons = []
-            if (peer.country !== msg.country) reasons.push(`wrong_country(${peer.country})`)
+            if (peer.country !== resolvedCountry) reasons.push(`wrong_country(${peer.country})`)
             if (peer.sessionId) reasons.push('busy')
             if (peer.readyState !== WebSocket.OPEN) reasons.push(`ws_state=${peer.readyState}`)
             if (peer.trustScore < 30) reasons.push(`low_trust(${peer.trustScore})`)
             if (peer.peerId === ws.peerId) reasons.push('same_peer')
-            if (peer.userId === msg.userId) reasons.push('same_user')
+            if (peer.userId === auth.userId) reasons.push('same_user')
             if (privateBaseDeviceId && peer.baseDeviceId !== privateBaseDeviceId) reasons.push('wrong_private_device')
             if (!privateBaseDeviceId && peer.privateOnly) reasons.push('private_only_slot')
             if (peer.supportsHttp === false) reasons.push('no_http')
@@ -679,15 +758,15 @@ async function handleMessage(ws, msg) {
             log(ws.peerId.slice(0,8), `  PROVIDER_REJECTED ${peer.peerId.slice(0,8)} | ${reasons.join(', ')}`)
           }
         }
-        send(ws, { type: 'error', message: privateOnly ? 'Private share is offline or busy' : `No peers available in ${msg.country}` })
+        send(ws, { type: 'error', message: privateOnly ? 'Private share is offline or busy' : `No peers available in ${resolvedCountry}` })
         return
       }
 
       ws.role = 'requester'
-      ws.userId = msg.userId
+      ws.userId = auth.userId
       peers.set(ws.peerId, ws)
 
-      createSession(ws, provider, msg.country, msg.dbSessionId ?? null)
+      createSession(ws, provider, resolvedCountry, msg.dbSessionId ?? null)
       break
     }
 

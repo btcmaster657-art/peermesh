@@ -223,7 +223,7 @@ function PaymentVerifyPageClient() {
 
         <div style={{ ...cardStyle, background: 'rgba(0,255,136,0.05)', border: '1px solid rgba(0,255,136,0.25)' }}>
           <div style={{ fontSize: '13px', color: 'var(--muted)', lineHeight: 1.7 }}>
-            Phone verification activates your account. Wallet funding is optional and only used for developer API usage or browsing without sharing. Contribution credits are always spent before paid balance.
+            Email confirmation is enough to sign in. Wallet funding is optional and only needed for paid usage when you are not actively sharing. Contribution credits are always spent before paid balance.
           </div>
         </div>
 

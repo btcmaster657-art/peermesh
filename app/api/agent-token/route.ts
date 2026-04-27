@@ -5,6 +5,9 @@ export async function GET() {
   const supabase = await createClient()
   const { data: { session } } = await supabase.auth.getSession()
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (!session.user.email_confirmed_at) {
+    return NextResponse.json({ error: 'Confirm your email before connecting.' }, { status: 403 })
+  }
 
   return NextResponse.json({
     token: session.access_token,

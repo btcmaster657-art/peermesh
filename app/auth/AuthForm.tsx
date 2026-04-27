@@ -40,6 +40,30 @@ export default function AuthForm() {
   const extId    = searchParams.get('ext_id')
   const activate = searchParams.get('activate') === '1' || searchParams.get('source') === 'activate'
 
+  const buildConfirmEmailPath = useCallback(() => {
+    const qs = new URLSearchParams()
+    if (extId) qs.set('ext_id', extId)
+    if (activate) qs.set('activate', '1')
+    const query = qs.toString()
+    return query ? `/auth/confirm-email?${query}` : '/auth/confirm-email'
+  }, [activate, extId])
+
+  const finishSignedInRoute = useCallback(async () => {
+    if (extId) {
+      await fetch('/api/extension-auth', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ext_id: extId }),
+      })
+      router.push(`/extension?ext_id=${extId}`)
+      return
+    }
+    if (activate) {
+      router.push('/extension?activate=1')
+      return
+    }
+    router.push('/dashboard')
+  }, [activate, extId, router])
+
   useEffect(() => {
     setMode((searchParams.get('mode') as 'login' | 'signup') || 'login')
   }, [searchParams])
@@ -47,18 +71,13 @@ export default function AuthForm() {
   useEffect(() => {
     supabase.auth.getSession().then(async ({ data: { session } }) => {
       if (!session) return
-      if (activate) { router.push('/extension?activate=1'); return }
-      if (extId) {
-        await fetch('/api/extension-auth', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ext_id: extId }),
-        })
-        router.push(`/extension?ext_id=${extId}`)
+      if (!session.user.email_confirmed_at) {
+        router.push(buildConfirmEmailPath())
         return
       }
-      router.push('/dashboard')
+      await finishSignedInRoute()
     })
-  }, [extId, activate])
+  }, [buildConfirmEmailPath, finishSignedInRoute])
 
   const loadCountries = useCallback(async (page = 1, search = '') => {
     setCountryLoading(true)
@@ -119,7 +138,7 @@ export default function AuthForm() {
 
         // Send email confirmation token
         await fetch('/api/auth/confirm-email', { method: 'POST' }).catch(() => {})
-        router.push('/auth/confirm-email')
+        router.push(buildConfirmEmailPath())
       } else {
         const { data, error } = await supabase.auth.signInWithPassword({ email, password })
         if (error) throw error
@@ -127,35 +146,12 @@ export default function AuthForm() {
         // Check if email is confirmed
         const { data: { user } } = await supabase.auth.getUser()
         if (!user?.email_confirmed_at) {
-          return router.push('/auth/confirm-email')
+          await fetch('/api/auth/confirm-email', { method: 'POST' }).catch(() => {})
+          router.push(buildConfirmEmailPath())
+          return
         }
 
-        const { data: profile } = await supabase
-          .from('profiles').select('is_verified, phone_number').eq('id', data.user.id).single()
-
-        let isVerified = !!profile?.is_verified
-        if (!isVerified && profile?.phone_number) {
-          await supabase
-            .from('profiles')
-            .update({ is_verified: true, verified_at: new Date().toISOString() })
-            .eq('id', data.user.id)
-          isVerified = true
-        }
-
-        if (!profile?.phone_number) return router.push('/verify/phone')
-        if (!isVerified) return router.push('/verify/phone')
-
-        if (extId) {
-          await fetch('/api/extension-auth', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ ext_id: extId }),
-          })
-          router.push(`/extension?ext_id=${extId}`)
-        } else if (activate) {
-          router.push('/extension?activate=1')
-        } else {
-          router.push('/dashboard')
-        }
+        await finishSignedInRoute()
       }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Something went wrong')

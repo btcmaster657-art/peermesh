@@ -259,47 +259,60 @@ export default function BrowseView() {
       return
     }
 
+    let cancelled = false
     const relayFallbackList = relayFallbackParam.split(',').filter(Boolean)
-    requester = new PeerRequester()
-    requester.connect(
-      relayEndpoint,
-      dbSessionId,
-      country,
-      userId,
-      (reason) => {
-        setConnectionState('disconnected')
-        if (contentRef.current) {
-          setNotice(reason ?? 'Peer disconnected. Refresh or retry to continue.')
-          setPageState('ready')
-        } else {
-          setPageState('error')
-          setErrorMsg(reason ?? 'Peer disconnected unexpectedly')
+
+    const start = async () => {
+      try {
+        const tokenResponse = await fetch('/api/agent-token')
+        const tokenData = await tokenResponse.json().catch(() => ({}))
+        if (!tokenResponse.ok || !tokenData.token) {
+          throw new Error(tokenData.error ?? 'Could not verify your session')
         }
-      },
-      preferredProviderUserId,
-      privateProviderUserId,
-      privateBaseDeviceId,
-      relayFallbackList,
-      (_sessionInfo: SessionInfo, attempt?: number) => {
-        setConnectionState('connected')
-        setReconnectNotice(attempt ? `Peer switched and recovered (attempt ${attempt}).` : 'Peer switched and recovered.')
-        setNotice(null)
-      }
-    )
-      .then(() => {
+        if (cancelled) return
+
+        accessTokenRef.current = tokenData.token
+        setAccessToken(tokenData.token)
+
+        requester = new PeerRequester()
+        await requester.connect(
+          relayEndpoint,
+          dbSessionId,
+          country,
+          userId,
+          tokenData.token,
+          (reason) => {
+            setConnectionState('disconnected')
+            if (contentRef.current) {
+              setNotice(reason ?? 'Peer disconnected. Refresh or retry to continue.')
+              setPageState('ready')
+            } else {
+              setPageState('error')
+              setErrorMsg(reason ?? 'Peer disconnected unexpectedly')
+            }
+          },
+          preferredProviderUserId,
+          privateProviderUserId,
+          privateBaseDeviceId,
+          relayFallbackList,
+          (_sessionInfo: SessionInfo, attempt?: number) => {
+            setConnectionState('connected')
+            setReconnectNotice(attempt ? `Peer switched and recovered (attempt ${attempt}).` : 'Peer switched and recovered.')
+            setNotice(null)
+          }
+        )
+        if (cancelled) return
         setConnectionState('connected')
         setPageState('idle')
-      })
-      .catch((error: Error) => {
+      } catch (error) {
+        if (cancelled) return
         setConnectionState('disconnected')
         setPageState('error')
-        setErrorMsg(error.message)
-      })
+        setErrorMsg(error instanceof Error ? error.message : 'Could not connect')
+      }
+    }
 
-    fetch('/api/agent-token')
-      .then(response => response.json())
-      .then(data => setAccessToken(data.token ?? ''))
-      .catch(() => {})
+    void start()
 
     const onMessage = (event: MessageEvent) => {
       if (event.data?.type === 'proxy-navigate') {
@@ -309,6 +322,7 @@ export default function BrowseView() {
     window.addEventListener('message', onMessage)
 
     return () => {
+      cancelled = true
       window.removeEventListener('message', onMessage)
       if (requester) void doEndSession()
     }

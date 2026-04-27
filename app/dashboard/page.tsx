@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 import { checkDesktop, syncDesktopAuth, startDesktopSharing, stopDesktopSharing, setDesktopConnectionSlots } from '@/lib/agent-client'
+import { hasPaidAccess as profileHasPaidAccess } from '@/lib/account-access'
 import { formatBytes } from '@/lib/utils'
 import type { Profile, PeerAvailability, PrivateShare, SyncState } from '@/lib/types'
 import type { DesktopState } from '@/lib/agent-client'
@@ -367,15 +368,7 @@ export default function Dashboard() {
 
         const { data, error: profileError } = await supabase.from('profiles').select('*').eq('id', user.id).single<Profile>()
         if (profileError) throw new Error('Could not load your profile – please refresh')
-        let nextProfile = data
-        if (!nextProfile?.is_verified && nextProfile?.phone_number) {
-          await supabase
-            .from('profiles')
-            .update({ is_verified: true, verified_at: new Date().toISOString() })
-            .eq('id', user.id)
-          nextProfile = nextProfile ? { ...nextProfile, is_verified: true, verified_at: new Date().toISOString() } : nextProfile
-        }
-        if (!nextProfile?.is_verified) { router.push('/verify/phone'); return }
+        const nextProfile = data
 
         setProfile(nextProfile)
         setLoading(false)
@@ -1004,6 +997,14 @@ export default function Dashboard() {
     const isPrivateConnect = !selectedCountry && !!trimmedPrivateCode
     if ((!selectedCountry && !trimmedPrivateCode) || !profile) return
     setConnectError(null)
+    if (!profile.is_verified) {
+      router.push('/verify/phone')
+      return
+    }
+    if (!hasPaidAccess && !displayIsSharing) {
+      router.push('/verify/payment')
+      return
+    }
     if (!navigator.onLine) {
       setConnectError('No internet connection – check your network and try again')
       return
@@ -1016,6 +1017,10 @@ export default function Dashboard() {
         body: JSON.stringify(isPrivateConnect ? { privateCode: trimmedPrivateCode } : { country: selectedCountry }),
       })
       const data = await res.json()
+      if ((!res.ok || data.error) && data.nextStep) {
+        router.push(data.nextStep)
+        return
+      }
       if (!res.ok || data.error) throw new Error(data.error ?? `Server error (${res.status})`)
       const targetCountry = data.country ?? selectedCountry
       const fallback = (data.relayFallbackList ?? [data.relayEndpoint]).join(',')
@@ -1107,7 +1112,7 @@ export default function Dashboard() {
   const walletBalanceLabel = `$${Number(profile.wallet_balance_usd ?? 0).toFixed(2)}`
   const payoutBalanceLabel = `$${Number(profile.wallet_pending_payout_usd ?? 0).toFixed(2)}`
   const contributionCreditsLabel = formatBytes(Number(profile.contribution_credits_bytes ?? 0))
-  const hasPaidAccess = profile.is_premium || Number(profile.wallet_balance_usd ?? 0) > 0 || Number(profile.contribution_credits_bytes ?? 0) > 0
+  const hasPaidAccess = profileHasPaidAccess(profile)
 
   const detectedOS: 'windows' | 'mac' | 'linux' = typeof navigator !== 'undefined'
     ? navigator.userAgent.includes('Win') ? 'windows'
@@ -1286,9 +1291,9 @@ export default function Dashboard() {
           </div>
           <button
             onClick={handleConnect}
-            disabled={connecting || !privateConnectReady || (!hasPaidAccess && !isSharing)}
-            title={selectedCountry ? 'Clear country selection to use private code' : !hasPaidAccess && !isSharing ? 'Enable sharing or fund your wallet to connect' : undefined}
-            style={{ padding: '10px 14px', background: privateConnectReady ? 'var(--accent)' : 'var(--border)', color: privateConnectReady ? '#000' : 'var(--muted)', border: 'none', borderRadius: '8px', fontFamily: 'var(--font-geist-mono)', fontSize: '10px', fontWeight: 700, letterSpacing: '0.5px', cursor: connecting || !privateConnectReady || (!hasPaidAccess && !isSharing) ? 'not-allowed' : 'pointer', opacity: (!hasPaidAccess && !isSharing) ? 0.5 : 1 }}
+            disabled={connecting || !privateConnectReady}
+            title={selectedCountry ? 'Clear country selection to use private code' : !profile.is_verified ? 'Verify your phone to connect' : !hasPaidAccess && !displayIsSharing ? 'Enable sharing or fund your wallet to connect' : undefined}
+            style={{ padding: '10px 14px', background: privateConnectReady ? 'var(--accent)' : 'var(--border)', color: privateConnectReady ? '#000' : 'var(--muted)', border: 'none', borderRadius: '8px', fontFamily: 'var(--font-geist-mono)', fontSize: '10px', fontWeight: 700, letterSpacing: '0.5px', cursor: connecting || !privateConnectReady ? 'not-allowed' : 'pointer' }}
           >
             {connecting && privateConnectReady ? 'CONNECTING...' : 'CONNECT CODE'}
           </button>
@@ -1383,15 +1388,15 @@ export default function Dashboard() {
 
           <button
             onClick={handleConnect}
-            disabled={connecting || (!hasPaidAccess && !isSharing)}
-            title={!hasPaidAccess && !isSharing ? 'Enable sharing or fund your wallet to connect' : undefined}
+            disabled={connecting}
+            title={!profile.is_verified ? 'Verify your phone to connect' : !hasPaidAccess && !displayIsSharing ? 'Enable sharing or fund your wallet to connect' : undefined}
             style={{
               display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '6px',
               padding: '14px 10px', background: 'var(--surface)',
-              color: (connecting || (!hasPaidAccess && !isSharing)) ? 'var(--muted)' : 'var(--text)',
+              color: connecting ? 'var(--muted)' : 'var(--text)',
               border: '1px solid rgba(0,255,136,0.4)',
-              borderRadius: '10px', cursor: (connecting || (!hasPaidAccess && !isSharing)) ? 'not-allowed' : 'pointer',
-              textAlign: 'center', transition: 'all 0.2s', opacity: (!hasPaidAccess && !isSharing) ? 0.5 : 1,
+              borderRadius: '10px', cursor: connecting ? 'not-allowed' : 'pointer',
+              textAlign: 'center', transition: 'all 0.2s',
             }}
           >
             {connecting
@@ -1746,7 +1751,7 @@ export default function Dashboard() {
                   ? `${publicCount} public slot${publicCount !== 1 ? 's' : ''} · ${privateCount} private slot${privateCount !== 1 ? 's' : ''}`
                   : privateCount > 0
                     ? `All ${privateCount} slot${privateCount !== 1 ? 's are' : ' is'} private – only code holders can connect`
-                    : `All ${publicCount} slot${publicCount !== 1 ? 's are' : ' is'} public – any verified user can connect`}
+                    : `All ${publicCount} slot${publicCount !== 1 ? 's are' : ' is'} public – any eligible user can connect`}
               </div>
             )
           })()}
@@ -1755,6 +1760,14 @@ export default function Dashboard() {
               Expires {new Date(privateShare.expires_at).toLocaleString()}
             </div>
           )}
+        </div>
+      )}
+
+      {!profile.is_verified && (
+        <div style={{ background: 'rgba(255,204,102,0.08)', border: '1px solid rgba(255,204,102,0.3)', borderRadius: '10px', padding: '12px 16px', marginBottom: '12px', fontSize: '12px', color: '#ffcc66' }}>
+          <span style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', letterSpacing: '0.5px' }}>PHONE CHECK - </span>
+          Email confirmation is enough to sign in. Phone verification is only required before you connect through another provider.{' '}
+          <a href="/verify/phone" style={{ color: 'var(--accent)', textDecoration: 'underline' }}>Verify phone</a>.
         </div>
       )}
 

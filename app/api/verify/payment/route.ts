@@ -27,13 +27,8 @@ export async function POST(req: Request) {
   const { bypass } = body
 
   if (bypass && BYPASS) {
-    await adminClient
-      .from('profiles')
-      .update({ is_verified: true, verified_at: new Date().toISOString() })
-      .eq('id', user.id)
     return NextResponse.json({ success: true, bypass: true })
   }
 
-  // TODO: real Stripe flow
-  return NextResponse.json({ error: 'Stripe not configured yet' }, { status: 501 })
+  return NextResponse.json({ error: 'Use /api/billing/flutterwave/checkout for wallet funding.' }, { status: 410 })
 }
