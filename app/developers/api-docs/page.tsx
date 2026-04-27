@@ -24,11 +24,11 @@ const endpointCards = [
   }'`,
   },
   {
-    label: 'SESSION END',
+    label: 'RELAY FINALIZATION',
     path: 'POST /api/session/end',
-    detail: 'Finalize usage for billing and provider payout accrual. Send the final bytes used plus any observed target hosts.',
+    detail: 'Relay-side finalization endpoint. PeerMesh meters traffic at the relay and uses those observed bytes for billing and provider payouts. Client-reported bytes are ignored.',
     code: `curl -X POST https://your-peermesh-domain/api/session/end \\
-  -H "Authorization: Bearer <api-key-or-user-token>" \\
+  -H "x-relay-secret: <relay-secret>" \\
   -H "Content-Type: application/json" \\
   -d '{
     "sessionId": "<session-id>",
@@ -59,7 +59,8 @@ const usageFlow = `1. Create or rotate an API key from the Keys page.
 3. Fund the USD wallet with POST /api/billing/flutterwave/checkout.
 4. Create a session with POST /api/session/create.
 5. Route traffic through the returned relay endpoint.
-6. End the session with POST /api/session/end so usage, wallet debits, and provider payouts settle correctly.`
+6. Close the relay connection or tunnel when work is complete.
+7. PeerMesh finalizes billing from relay-observed traffic, not developer-reported byte counts.`
 
 const nodeExample = `const baseUrl = 'https://your-peermesh-domain'
 const apiKey = process.env.PEERMESH_API_KEY
@@ -84,21 +85,8 @@ const session = await create.json()
 if (!create.ok) throw new Error(session.error)
 
 // Route your HTTP workload through session.relayEndpoint here.
-
-await fetch(\`\${baseUrl}/api/session/end\`, {
-  method: 'POST',
-  headers: {
-    Authorization: \`Bearer \${apiKey}\`,
-    'Content-Type': 'application/json',
-  },
-  body: JSON.stringify({
-    sessionId: session.sessionId,
-    bytesUsed: 52428800,
-    targetHost: 'api.example.com',
-    targetHosts: ['api.example.com'],
-    disconnectReason: 'completed',
-  }),
-})`
+// When work is complete, close the relay connection.
+// PeerMesh meters usage at the relay and settles billing from observed bytes.`
 
 const errorCodes = `401 Unauthorized
 403 Confirm your email before connecting.

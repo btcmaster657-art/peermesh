@@ -119,6 +119,13 @@ export async function POST(req: Request) {
     logSession('error', 'POST lookup failed', { sessionId, error: lookupError.message })
     return NextResponse.json({ error: 'Session not found' }, { status: 404 })
   }
+  if (!existing) {
+    return NextResponse.json({ error: 'Session not found' }, { status: 404 })
+  }
+  if (!isRelay && existing.user_id !== userId) {
+    logSession('warn', 'POST forbidden for non-owner', { sessionId, userId, ownerUserId: existing.user_id })
+    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  }
 
   const finalProviderId = providerUserId ?? existing?.provider_id ?? null
   const finalRequesterId = isRelay ? (requesterUserId ?? existing?.user_id ?? null) : userId
@@ -129,7 +136,11 @@ export async function POST(req: Request) {
   const finalRelayEndpoint = relayEndpoint ?? existing?.relay_endpoint ?? null
   const finalTargetHost = targetHost ?? existing?.target_host ?? null
   const finalDisconnectReason = disconnectReason ?? existing?.disconnect_reason ?? null
-  const finalBytes = Math.max(Number(bytesUsed) || 0, Number(existing?.bytes_used) || 0)
+  const relayObservedBytes = Math.max(0, Number(existing?.bytes_used) || 0)
+  const clientReportedBytes = Math.max(0, Number(bytesUsed) || 0)
+  const finalBytes = isRelay
+    ? Math.max(clientReportedBytes, relayObservedBytes)
+    : relayObservedBytes
   const finalDurationMinutes = existing?.started_at
     ? Math.max(0, Math.ceil((Date.now() - new Date(existing.started_at).getTime()) / 60_000))
     : Math.max(0, Math.floor(Number(existing?.requested_period_hours ?? 0) * 60))
@@ -138,6 +149,47 @@ export async function POST(req: Request) {
   const existingHosts: string[] = (existing as { target_hosts?: string[] | null } | null)?.target_hosts ?? []
   const incomingHosts: string[] = Array.isArray(targetHosts) ? targetHosts : []
   const mergedHosts = [...new Set([...existingHosts, ...incomingHosts, ...(finalTargetHost ? [finalTargetHost] : [])])]
+
+  // Non-relay callers are not authoritative for byte usage or final session
+  // closure. The relay meters traffic and submits the billable byte count.
+  if (!isRelay) {
+    const { error: advisoryError } = await adminClient
+      .from('sessions')
+      .update({
+        provider_id: finalProviderId,
+        provider_kind: finalProviderKind,
+        provider_device_id: finalProviderDeviceId,
+        provider_base_device_id: finalProviderBaseDeviceId,
+        relay_endpoint: finalRelayEndpoint,
+        target_host: finalTargetHost,
+        target_hosts: mergedHosts,
+        disconnect_reason: finalDisconnectReason,
+      })
+      .eq('id', sessionId)
+      .in('status', ['pending', 'active', 'ended'])
+
+    if (advisoryError) {
+      logSession('error', 'POST advisory update failed', { sessionId, error: advisoryError.message })
+      return NextResponse.json({ error: 'Could not update session metadata' }, { status: 500 })
+    }
+
+    if (clientReportedBytes > 0) {
+      logSession('warn', 'Ignored client-reported bytesUsed; relay metering is authoritative', {
+        sessionId,
+        userId,
+        clientReportedBytes,
+        relayObservedBytes,
+      })
+    }
+
+    return NextResponse.json({
+      success: true,
+      authoritativeMetering: 'relay',
+      bytesUsedAccepted: false,
+      bytesUsedObserved: relayObservedBytes,
+      awaitingRelayFinalization: existing.status !== 'ended',
+    }, { status: 202 })
+  }
 
   // End the session - update all fields in one write.
   const { error: endError, count } = await adminClient

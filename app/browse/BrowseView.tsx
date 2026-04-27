@@ -334,13 +334,12 @@ export default function BrowseView() {
     if (!requester) return
     const activeRequester = requester
     requester = null
-    const bytes = bytesUsedRef.current
     activeRequester.disconnect()
     if (dbSessionId) {
       await fetch('/api/session/end', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId: dbSessionId, bytesUsed: bytes }),
+        body: JSON.stringify({ sessionId: dbSessionId, disconnectReason: 'completed' }),
       }).catch(() => {})
     }
   }
