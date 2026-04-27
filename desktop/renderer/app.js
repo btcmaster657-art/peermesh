@@ -17,7 +17,7 @@ let privateShareDeviceId = null
 let privateShareSelectionLocked = false
 let privateShareSaving = false
 let privateShareAction = null
-let privateShareExpiry = '24'
+let privateShareExpiry = 'none'
 let slotLimits = {}
 let slotDailyLimitInput = ''
 let slotDailyLimitSaving = false
@@ -25,6 +25,18 @@ let dailyLimitSaving = false
 let slotUpdating = false
 let lastPrivateShareLoadAt = 0
 const PRIVATE_SHARE_REFRESH_TTL = 2500
+
+// Pending edits: user changes not yet saved. Polls skip overwriting these fields.
+const PENDING_EDIT_TTL = 30_000
+const _pendingEdits = {}
+function setPendingEdit(key, value) { _pendingEdits[key] = { value, ts: Date.now() } }
+function clearPendingEdit(key) { delete _pendingEdits[key] }
+function getPendingEdit(key) {
+  const entry = _pendingEdits[key]
+  if (!entry) return null
+  if (Date.now() - entry.ts > PENDING_EDIT_TTL) { delete _pendingEdits[key]; return null }
+  return entry.value
+}
 
 function invoke(name, ...args) {
   const fn = api[name]
@@ -353,20 +365,24 @@ async function loadPrivateShare(force = false) {
   const nextShares = mergePrivateShareRows(privateShares, Array.isArray(result.privateShares) ? result.privateShares : [])
   privateShares = nextShares
   slotLimits = mapSlotLimits([...(result.slotLimits ?? []), ...Object.values(slotLimits)])
-  const preferredDeviceId = privateShareSelectionLocked
-    ? privateShareDeviceId
+  const pendingSlot = getPendingEdit('selectedSlotDeviceId')
+  const preferredDeviceId = (pendingSlot || privateShareSelectionLocked)
+    ? (pendingSlot || privateShareDeviceId)
     : (result.privateShareDeviceId ?? privateShareDeviceId)
   if (preferredDeviceId && nextShares.some(row => row.device_id === preferredDeviceId)) {
     privateShareDeviceId = preferredDeviceId
   } else {
     privateShareDeviceId = result.privateShare?.device_id ?? nextShares[0]?.device_id ?? null
     privateShareSelectionLocked = false
+    clearPendingEdit('selectedSlotDeviceId')
   }
   privateShare = preferLatestSync(
     nextShares.find(row => row.device_id === privateShareDeviceId) ?? nextShares[0] ?? null,
     result.privateShare ?? null,
   )
-  privateShareExpiry = result.expiryPreset ?? getPrivateShareExpiryPreset(privateShare?.expires_at ?? null)
+  if (!getPendingEdit('expiryHours')) {
+    privateShareExpiry = result.expiryPreset ?? getPrivateShareExpiryPreset(privateShare?.expires_at ?? null)
+  }
   syncSlotDailyLimitInput()
   renderPrivateShare()
 }
@@ -395,6 +411,8 @@ async function savePrivateShare(payload) {
       result.privateShare ?? null,
     )
     privateShareExpiry = result.expiryPreset ?? getPrivateShareExpiryPreset(privateShare?.expires_at ?? null)
+    clearPendingEdit('expiryHours')
+    clearPendingEdit('selectedSlotDeviceId')
     syncSlotDailyLimitInput()
     await pollState()
   } catch (error) {
@@ -839,8 +857,6 @@ async function doToggleSharing(isSharing) {
 function updateUI(state) {
   window.__lastPeerMeshState = state
   privateShares = mergePrivateShareRows(privateShares, Array.isArray(state?.privateShares) ? state.privateShares : [])
-  if (!privateShareSelectionLocked && state?.privateShareDeviceId) privateShareDeviceId = state.privateShareDeviceId
-  if (!privateShareSelectionLocked && state?.privateShare?.device_id) privateShareDeviceId = state.privateShare.device_id
   const running = !!state?.running
   const config = state?.config ?? {}
   const stats = state?.stats ?? { requestsHandled: 0, bytesServed: 0 }
@@ -881,7 +897,13 @@ function updateUI(state) {
 
   if (state.privateShare !== undefined) {
     privateShare = preferLatestSync(privateShare, state.privateShare ?? null)
-    privateShareExpiry = getPrivateShareExpiryPreset(privateShare?.expires_at ?? null)
+    if (!getPendingEdit('expiryHours')) {
+      privateShareExpiry = getPrivateShareExpiryPreset(privateShare?.expires_at ?? null)
+    }
+  }
+  if (!getPendingEdit('selectedSlotDeviceId') && !privateShareSelectionLocked) {
+    if (state?.privateShareDeviceId) privateShareDeviceId = state.privateShareDeviceId
+    else if (state?.privateShare?.device_id) privateShareDeviceId = state.privateShare.device_id
   }
 
   renderPrivateShare()
@@ -1096,7 +1118,9 @@ document.getElementById('btn-signout').addEventListener('click', async () => {
   privateShares = []
   privateShareDeviceId = null
   privateShareSelectionLocked = false
-  privateShareExpiry = '24'
+  privateShareExpiry = 'none'
+  clearPendingEdit('expiryHours')
+  clearPendingEdit('selectedSlotDeviceId')
   slotLimits = {}
   slotDailyLimitInput = ''
   renderPrivateShare()
@@ -1110,9 +1134,11 @@ document.getElementById('btn-signout').addEventListener('click', async () => {
 document.getElementById('private-share-device').addEventListener('change', (event) => {
   privateShareDeviceId = event.target.value || null
   privateShareSelectionLocked = !!privateShareDeviceId
+  setPendingEdit('selectedSlotDeviceId', privateShareDeviceId)
   const rows = getPrivateShareRows(window.__lastPeerMeshState || null)
   privateShare = rows.find(row => row.device_id === privateShareDeviceId) ?? rows[0] ?? null
   privateShareExpiry = getPrivateShareExpiryPreset(privateShare?.expires_at ?? null)
+  clearPendingEdit('expiryHours')
   syncSlotDailyLimitInput()
   renderPrivateShare()
 })
@@ -1130,6 +1156,7 @@ document.getElementById('copy-private-share').addEventListener('click', async ()
 
 document.getElementById('private-share-expiry').addEventListener('change', async (event) => {
   privateShareExpiry = event.target.value
+  setPendingEdit('expiryHours', event.target.value)
   renderPrivateShare()
   if (privateShare?.enabled && !privateShareSaving) {
     await savePrivateShare({ enabled: true, expiryHours: privateShareExpiry })

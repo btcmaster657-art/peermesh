@@ -4,16 +4,16 @@ import { createClient } from '@/lib/supabase/server'
 
 export async function GET() {
   const supabase = await createClient()
-  const { data: { session } } = await supabase.auth.getSession()
-  if (!session) {
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
-  if (!session.user.email_confirmed_at) {
+  if (!user.email_confirmed_at) {
     return NextResponse.json({ error: 'Confirm your email before issuing a desktop token.' }, { status: 403 })
   }
 
   const issued = await createDeviceSession({
-    userId: session.user.id,
+    userId: user.id,
     actor: 'dashboard',
   })
 
@@ -22,6 +22,6 @@ export async function GET() {
     refreshToken: issued.refreshToken,
     deviceSessionId: issued.deviceSessionId,
     refreshExpiresAt: issued.refreshExpiresAt,
-    userId: session.user.id,
+    userId: user.id,
   })
 }

@@ -254,6 +254,7 @@ function isMatchingSlotKey(deviceKey: string, baseDeviceId: string): boolean {
 }
 
 async function loadSlotLimitDevices(userId: string, baseDeviceId: string): Promise<SlotLimitRow[]> {
+  const t0 = Date.now()
   const { data, error } = await adminClient
     .from('provider_slot_limits')
     .select('device_id, base_device_id, slot_index, daily_limit_mb, bytes_today, bytes_today_date, state_actor, state_changed_at')
@@ -262,6 +263,7 @@ async function loadSlotLimitDevices(userId: string, baseDeviceId: string): Promi
   if (error) throw error
 
   const filtered = (data ?? []).filter((row) => isMatchingSlotKey(row.device_id, baseDeviceId))
+  console.log(`[slot] loadSlotLimitDevices user=${userId} base=${baseDeviceId} total=${data?.length ?? 0} matched=${filtered.length} ms=${Date.now() - t0}`)
   return filtered.sort((a, b) => {
     const aSlot = Number.isInteger(a.slot_index) ? (a.slot_index as number) : getSlotIndex(a.device_id, baseDeviceId) ?? -1
     const bSlot = Number.isInteger(b.slot_index) ? (b.slot_index as number) : getSlotIndex(b.device_id, baseDeviceId) ?? -1
@@ -312,6 +314,7 @@ async function cleanupStaleSlotLimits(
   baseDeviceId: string,
   maxSlots: number,
 ): Promise<{ deletedCount: number }> {
+  const t0 = Date.now()
   try {
     const allSlots = await loadSlotLimitDevices(userId, baseDeviceId)
     const staleDeviceIds = allSlots
@@ -321,7 +324,10 @@ async function cleanupStaleSlotLimits(
       })
       .map((row) => row.device_id)
 
-    if (staleDeviceIds.length === 0) return { deletedCount: 0 }
+    if (staleDeviceIds.length === 0) {
+      console.log(`[slot] cleanupStaleSlotLimits user=${userId} base=${baseDeviceId} maxSlots=${maxSlots} stale=0 ms=${Date.now() - t0}`)
+      return { deletedCount: 0 }
+    }
 
     const { error } = await adminClient
       .from('provider_slot_limits')
@@ -330,24 +336,28 @@ async function cleanupStaleSlotLimits(
       .in('device_id', staleDeviceIds)
 
     if (error) {
-      console.error('cleanupStaleSlotLimits delete error:', error)
+      console.error(`[slot] cleanupStaleSlotLimits delete error user=${userId} base=${baseDeviceId}:`, error)
       return { deletedCount: 0 }
     }
+    console.log(`[slot] cleanupStaleSlotLimits user=${userId} base=${baseDeviceId} maxSlots=${maxSlots} deleted=${staleDeviceIds.length} stale=${JSON.stringify(staleDeviceIds)} ms=${Date.now() - t0}`)
     return { deletedCount: staleDeviceIds.length }
   } catch (error) {
-    console.error('cleanupStaleSlotLimits error:', error)
+    console.error(`[slot] cleanupStaleSlotLimits error user=${userId} base=${baseDeviceId}:`, error)
     return { deletedCount: 0 }
   }
 }
 
 async function loadPrivateShareDevices(userId: string, baseDeviceId: string): Promise<PrivateShareRow[]> {
+  const t0 = Date.now()
   const { data, error } = await adminClient
     .from('private_share_devices')
     .select('base_device_id, share_code, enabled, expires_at, state_actor, state_changed_at')
     .eq('user_id', userId)
 
   if (error) throw error
-  return sortPrivateShareRows((data ?? []).filter(row => isMatchingPrivateShareKey(row.base_device_id, baseDeviceId)))
+  const filtered = sortPrivateShareRows((data ?? []).filter(row => isMatchingPrivateShareKey(row.base_device_id, baseDeviceId)))
+  console.log(`[slot] loadPrivateShareDevices user=${userId} base=${baseDeviceId} total=${data?.length ?? 0} matched=${filtered.length} ms=${Date.now() - t0}`)
+  return filtered
 }
 
 function selectConnectionSlotState(
@@ -388,40 +398,38 @@ async function cleanupStalePrivateShareSlots(
   baseDeviceId: string,
   maxSlots?: number,
 ): Promise<{ deletedCount: number }> {
+  const t0 = Date.now()
   try {
     const configuredSlots = Math.max(1, Number.parseInt(String(maxSlots ?? 1), 10) || 1)
-
-    // Load all private share slots for this base device
     const allSlots = await loadPrivateShareDevices(userId, baseDeviceId)
-
-    // Identify stale slots: those with slot_index >= configuredSlots
     const staleSlots = allSlots.filter(row => {
       const slotIndex = getSlotIndex(row.base_device_id, baseDeviceId)
       return slotIndex !== null && slotIndex >= configuredSlots
     })
 
-    // Delete stale slots from DB
+    console.log(`[slot] cleanupStalePrivateShareSlots user=${userId} base=${baseDeviceId} configuredSlots=${configuredSlots} total=${allSlots.length} stale=${staleSlots.length}`)
+
     if (staleSlots.length > 0) {
       const staleDeviceIds = staleSlots.map(row => row.base_device_id)
+      console.log(`[slot] cleanupStalePrivateShareSlots deleting stale=${JSON.stringify(staleDeviceIds)}`)
       const { error } = await adminClient
         .from('private_share_devices')
         .delete()
         .eq('user_id', userId)
         .in('base_device_id', staleDeviceIds)
-      
+
       if (error) {
-        console.error('cleanupStalePrivateShareSlots delete error:', error)
+        console.error(`[slot] cleanupStalePrivateShareSlots delete error user=${userId} base=${baseDeviceId}:`, error)
         return { deletedCount: 0 }
       }
-      
-      console.log(`cleanupStalePrivateShareSlots: deleted ${staleSlots.length} stale slots for user ${userId}, base ${baseDeviceId}`)
+      console.log(`[slot] cleanupStalePrivateShareSlots deleted=${staleSlots.length} ms=${Date.now() - t0}`)
       return { deletedCount: staleSlots.length }
     }
-    
+
+    console.log(`[slot] cleanupStalePrivateShareSlots nothing to delete ms=${Date.now() - t0}`)
     return { deletedCount: 0 }
   } catch (error) {
-    // Log but don't fail the request if cleanup fails
-    console.error('cleanupStalePrivateShareSlots error:', error)
+    console.error(`[slot] cleanupStalePrivateShareSlots error user=${userId} base=${baseDeviceId}:`, error)
     return { deletedCount: 0 }
   }
 }
@@ -501,15 +509,11 @@ export async function GET(req: Request) {
     let connection_slots_sync = null
     const resolvedBaseDeviceId = baseDeviceId || (deviceId ? toBaseDeviceId(deviceId) : null)
     if (deviceId || resolvedBaseDeviceId) {
-      const rows = resolvedBaseDeviceId
-        ? await loadPrivateShareDevices(relayProviderUserId, resolvedBaseDeviceId)
-        : []
-      const slotRows = resolvedBaseDeviceId
-        ? await loadSlotLimitDevices(relayProviderUserId, resolvedBaseDeviceId)
-        : []
-      const providerRows = resolvedBaseDeviceId
-        ? await loadProviderDeviceStates(relayProviderUserId, resolvedBaseDeviceId)
-        : []
+      const [rows, slotRows, providerRows] = await Promise.all([
+        resolvedBaseDeviceId ? loadPrivateShareDevices(relayProviderUserId, resolvedBaseDeviceId) : Promise.resolve([]),
+        resolvedBaseDeviceId ? loadSlotLimitDevices(relayProviderUserId, resolvedBaseDeviceId) : Promise.resolve([]),
+        resolvedBaseDeviceId ? loadProviderDeviceStates(relayProviderUserId, resolvedBaseDeviceId) : Promise.resolve([]),
+      ])
       const selectedProviderRow = selectConnectionSlotState(providerRows, deviceId, resolvedBaseDeviceId)
       private_share = serializePrivateShare(selectPrivateShareRow(rows, deviceId, resolvedBaseDeviceId))
       private_shares = rows.map(serializePrivateShare)
@@ -551,15 +555,11 @@ export async function GET(req: Request) {
 
   if (error || !data) return NextResponse.json({ error: 'Not found' }, { status: 404 })
   const resolvedBaseDeviceId = baseDeviceId || (deviceId ? toBaseDeviceId(deviceId) : null)
-  const privateShareRows = resolvedBaseDeviceId
-    ? await loadPrivateShareDevices(userId, resolvedBaseDeviceId)
-    : []
-  const slotLimitRows = resolvedBaseDeviceId
-    ? await loadSlotLimitDevices(userId, resolvedBaseDeviceId)
-    : []
-  const providerRows = resolvedBaseDeviceId
-    ? await loadProviderDeviceStates(userId, resolvedBaseDeviceId)
-    : []
+  const [privateShareRows, slotLimitRows, providerRows] = await Promise.all([
+    resolvedBaseDeviceId ? loadPrivateShareDevices(userId, resolvedBaseDeviceId) : Promise.resolve([]),
+    resolvedBaseDeviceId ? loadSlotLimitDevices(userId, resolvedBaseDeviceId) : Promise.resolve([]),
+    resolvedBaseDeviceId ? loadProviderDeviceStates(userId, resolvedBaseDeviceId) : Promise.resolve([]),
+  ])
   const privateShare = serializePrivateShare(selectPrivateShareRow(privateShareRows, deviceId, resolvedBaseDeviceId))
   const privateShares = privateShareRows.map(serializePrivateShare)
   const selectedSlotLimit = selectSlotLimitRow(slotLimitRows, deviceId, resolvedBaseDeviceId)
@@ -611,7 +611,7 @@ export async function POST(req: Request) {
       const slotIndex = getSlotIndex(slotDeviceId, baseDeviceId)
       const { data: current } = await adminClient
         .from('provider_slot_limits')
-        .select('bytes_today, bytes_today_date')
+        .select('bytes_today, bytes_today_date, daily_limit_mb')
         .eq('user_id', userId)
         .eq('device_id', slotDeviceId)
         .maybeSingle()
@@ -627,6 +627,7 @@ export async function POST(req: Request) {
           device_id: slotDeviceId,
           base_device_id: baseDeviceId,
           slot_index: slotIndex,
+          daily_limit_mb: current?.daily_limit_mb ?? null,
           bytes_today: nextBytesToday,
           bytes_today_date: today,
           state_changed_at: stateChangedAt,
@@ -662,7 +663,10 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'deviceId or baseDeviceId is required' }, { status: 400 })
     }
 
+    console.log(`[slot] privateSharing POST user=${userId} deviceId=${requestedDeviceId} baseDeviceId=${baseDeviceId} enabled=${body.privateSharing.enabled} refresh=${body.privateSharing.refresh} expiryHours=${body.privateSharing.expiryHours}`)
+
     const existingShares = baseDeviceId ? await loadPrivateShareDevices(userId, baseDeviceId) : []
+    console.log(`[slot] privateSharing existing shares=${existingShares.length}:`, existingShares.map(r => ({ id: r.base_device_id, enabled: r.enabled, expires_at: r.expires_at })))
     const fallbackDeviceId = requestedBaseDeviceId
       ? (requestedBaseDeviceId.includes('_slot_')
           ? requestedBaseDeviceId
@@ -722,13 +726,22 @@ export async function POST(req: Request) {
       .single()
 
     if (error || !data) {
+      console.error(`[slot] privateSharing write error user=${userId} deviceId=${deviceId}:`, error)
       return NextResponse.json({ error: error?.message ?? 'Could not update private sharing' }, { status: 500 })
     }
 
-    // Clean up stale slots that no longer match the current slot configuration.
+    console.log(`[slot] privateSharing write ok deviceId=${data.base_device_id} enabled=${data.enabled} expires_at=${data.expires_at}`)
+
+    // Clean up stale slots only when we have live provider state to determine the real slot count.
+    // If providerRows is empty (desktop offline), skip cleanup to avoid deleting freshly-written rows.
     const providerRows = await loadProviderDeviceStates(userId, baseDeviceId)
     const configuredSlots = resolveConfiguredSlots(providerRows)
-    await cleanupStalePrivateShareSlots(userId, baseDeviceId, configuredSlots)
+    console.log(`[slot] privateSharing post-write cleanup configuredSlots=${configuredSlots} providerRows=${providerRows.length}`)
+    if (providerRows.length > 0) {
+      await cleanupStalePrivateShareSlots(userId, baseDeviceId, configuredSlots)
+    } else {
+      console.log(`[slot] privateSharing post-write cleanup SKIPPED — no live provider rows, cannot determine safe slot count`)
+    }
 
     const privateShareRows = await loadPrivateShareDevices(userId, baseDeviceId)
     const slotLimitRows = await loadSlotLimitDevices(userId, baseDeviceId)
@@ -789,6 +802,7 @@ export async function POST(req: Request) {
 
     const baseDeviceId = slotBaseDeviceIdInput || toBaseDeviceId(slotDeviceId)
     const slotIndex = getSlotIndex(slotDeviceId, baseDeviceId)
+    console.log(`[slot] slotDailyLimitMb POST user=${userId} slotDeviceId=${slotDeviceId} base=${baseDeviceId} slotIndex=${slotIndex} limitMb=${limitMb}`)
     const { data: existing, error: existingError } = await adminClient
       .from('provider_slot_limits')
       .select('id')
@@ -849,6 +863,7 @@ export async function POST(req: Request) {
     const baseDeviceId = body.baseDeviceId ? String(body.baseDeviceId).trim() : null
     if (baseDeviceId) {
       const normalizedSlots = Math.max(1, Math.min(32, Number.parseInt(String(body.connectionSlots), 10) || 1))
+      console.log(`[slot] connectionSlots POST user=${userId} base=${baseDeviceId} requested=${body.connectionSlots} normalized=${normalizedSlots}`)
       await adminClient
         .from('provider_devices')
         .update({ connection_slots: normalizedSlots, state_actor: stateActor, state_changed_at: stateChangedAt })
@@ -857,7 +872,7 @@ export async function POST(req: Request) {
 
       const resultPrivate = await cleanupStalePrivateShareSlots(userId, baseDeviceId, body.connectionSlots)
       const resultLimits = await cleanupStaleSlotLimits(userId, baseDeviceId, body.connectionSlots)
-      console.log(`Slot cleanup for ${userId}/${baseDeviceId}: private=${resultPrivate.deletedCount} slotLimits=${resultLimits.deletedCount}`)
+      console.log(`[slot] connectionSlots cleanup done user=${userId} base=${baseDeviceId} private=${resultPrivate.deletedCount} slotLimits=${resultLimits.deletedCount}`)
 
       const providerRows = await loadProviderDeviceStates(userId, baseDeviceId)
       const selectedProviderRow = selectConnectionSlotState(providerRows, `${baseDeviceId}_slot_0`, baseDeviceId)

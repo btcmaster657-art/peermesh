@@ -628,21 +628,9 @@ function applySharingProfileData(data, { source = 'remote' } = {}) {
 
   const nextPrivateShare = data.private_share ?? null
   const nextPrivateShares = hydratePrivateShareRows([
-    ...config.privateShares,
     ...(data.private_shares ?? (nextPrivateShare ? [nextPrivateShare] : [])),
+    ...config.privateShares,
   ])
-  const selectedPrivateShare = selectPrivateShareRow(nextPrivateShares, data.private_share?.device_id ?? config.privateShareDeviceId ?? nextPrivateShare?.device_id ?? null)
-  const nextPrivateShareEnabled = !!selectedPrivateShare?.enabled
-  const nextPrivateShareActive = !!(selectedPrivateShare?.enabled && selectedPrivateShare?.active)
-  const nextPrivateShareCode = selectedPrivateShare?.code ?? null
-  const resolvedProfileSync = preferLatestSync(previousProfileSync, data.profile_sync ?? null)
-  const shouldApplyProfileState = !previousProfileSync || resolvedProfileSync !== previousProfileSync || !data.profile_sync
-  const resolvedConnectionSlotsSync = preferLatestSync(previousConnectionSlotsSync, data.connection_slots_sync ?? null)
-  const shouldApplyConnectionSlots = !previousConnectionSlotsSync || resolvedConnectionSlotsSync !== previousConnectionSlotsSync || !data.connection_slots_sync
-  if (data.daily_limit_bytes != null) _controlLimitBytes = data.daily_limit_bytes
-  else if (data.daily_share_limit_mb != null) _controlLimitBytes = data.daily_share_limit_mb * 1024 * 1024
-
-  if (shouldApplyProfileState) config.todaySharedBytes = data.total_bytes_today ?? 0
   config.profileSync = resolvedProfileSync
   config.connectionSlotsSync = resolvedConnectionSlotsSync
   config.privateShares = nextPrivateShares
@@ -811,15 +799,9 @@ async function updatePrivateShareState({ enabled, refresh = false, expiryHours, 
   if (!res.ok || data.error) throw new Error(data.error || 'Could not update private sharing')
 
   config.privateShares = hydratePrivateShareRows([
-    ...config.privateShares,
     ...(data.private_shares ?? (data.private_share ? [data.private_share] : [])),
+    ...config.privateShares,
   ])
-  config.privateShare = selectPrivateShareRow(config.privateShares, targetDeviceId) ?? data.private_share ?? null
-  config.privateShareDeviceId = config.privateShare?.device_id ?? targetDeviceId
-  config.privateShareActive = !!(config.privateShare?.enabled && config.privateShare?.active)
-  saveConfig(config)
-
-  if (config.shareEnabled && isRunning() && previousEnabled !== !!config.privateShare?.enabled) {
     clog.info('PRIVATE', 'private sharing mode changed locally - reconnecting provider', {
       from: previousEnabled,
       to: !!config.privateShare?.enabled,

@@ -75,7 +75,7 @@ let state = {
   privateShare: null,
   privateShares: [],
   selectedPrivateSlot: null,
-  privateExpiryHours: '24',
+  privateExpiryHours: 'none',
   privateShareSaving: false,
   privateShareAction: null,
   privateShareRestartRequired: false,
@@ -85,8 +85,20 @@ let state = {
   slotLimits: {},
   slotDailyLimitInput: '',
   slotDailyLimitSaving: false,
-  connectionType: 'public', // 'public' | 'private'
+  connectionType: 'public',
   profileSync: null,
+}
+
+// Pending edits: user changes not yet saved. Polls skip overwriting these fields.
+const PENDING_EDIT_TTL = 30_000
+const _pendingEdits = {}
+function setPendingEdit(key, value) { _pendingEdits[key] = { value, ts: Date.now() } }
+function clearPendingEdit(key) { delete _pendingEdits[key] }
+function getPendingEdit(key) {
+  const entry = _pendingEdits[key]
+  if (!entry) return null
+  if (Date.now() - entry.ts > PENDING_EDIT_TTL) { delete _pendingEdits[key]; return null }
+  return entry.value
 }
 
 window.addEventListener('online', () => { state.isOnline = true; render() })
@@ -231,13 +243,19 @@ function applyPrivateShareRows(rows, baseDeviceId, preferredDeviceId = null) {
     state.slotLimits = {}
     state.slotDailyLimitInput = ''
     state.slotDailyLimitSaving = false
+    clearPendingEdit('expiryHours')
+    clearPendingEdit('selectedSlotDeviceId')
     return
   }
   state.privateShares = mergePrivateShares(rows, baseDeviceId)
-  const preferredSelection = state.selectedPrivateSlot || preferredDeviceId
+  const pendingSlot = getPendingEdit('selectedSlotDeviceId')
+  const preferredSelection = pendingSlot || state.selectedPrivateSlot || preferredDeviceId
   state.privateShare = selectPrivateShare(state.privateShares, preferredSelection, baseDeviceId)
   state.selectedPrivateSlot = state.privateShare?.device_id ?? preferredSelection ?? null
-  state.privateExpiryHours = getPrivateShareExpiryPreset(state.privateShare?.expires_at ?? null)
+  // Only update expiry if user has no pending unsaved change
+  if (!getPendingEdit('expiryHours')) {
+    state.privateExpiryHours = getPrivateShareExpiryPreset(state.privateShare?.expires_at ?? null)
+  }
   syncSlotDailyLimitInput()
 }
 
@@ -478,7 +496,11 @@ async function savePrivateShareState(input) {
     if (!res.ok || data.error) throw new Error(data.error || 'Could not update private sharing')
     state.slotLimits = mapSlotLimits([...(data.slot_limits ?? []), ...Object.values(state.slotLimits ?? {})])
     applyPrivateShareRows(data.private_shares ?? (data.private_share ? [data.private_share] : state.privateShares), baseDeviceId, data.private_share?.device_id ?? state.selectedPrivateSlot)
-    if (input.expiryHours !== undefined && state.privateShare) state.privateExpiryHours = input.expiryHours
+    if (input.expiryHours !== undefined && state.privateShare) {
+      state.privateExpiryHours = input.expiryHours
+      clearPendingEdit('expiryHours')
+    }
+    clearPendingEdit('selectedSlotDeviceId')
     const enabledChanged = input.enabled !== undefined && previousEnabled !== !!state.privateShare?.enabled
     if (enabledChanged && state.isSharing) {
       state.shareToggling = true
@@ -951,11 +973,14 @@ function renderDashboard(app) {
     state.selectedPrivateSlot = e.target.value
     state.privateShare = selectPrivateShare(state.privateShares, e.target.value, ownedHelper()?.baseDeviceId ?? null)
     state.privateExpiryHours = getPrivateShareExpiryPreset(state.privateShare?.expires_at ?? null)
+    setPendingEdit('selectedSlotDeviceId', e.target.value)
+    clearPendingEdit('expiryHours')
     syncSlotDailyLimitInput()
     render()
   })
   document.getElementById('privateExpirySelect')?.addEventListener('change', (e) => {
     state.privateExpiryHours = e.target.value
+    setPendingEdit('expiryHours', e.target.value)
   })
   document.getElementById('togglePrivateShareBtn')?.addEventListener('click', () => {
     savePrivateShareState({ enabled: !(state.privateShare?.enabled ?? false), expiryHours: state.privateExpiryHours })

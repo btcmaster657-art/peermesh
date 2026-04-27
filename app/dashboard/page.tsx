@@ -181,17 +181,7 @@ function mergePrivateShares(rows: PrivateShare[] | null | undefined, baseDeviceI
     for (let index = 0; index < configuredSlots; index++) {
       const slotDeviceId = `${baseDeviceId}_slot_${index}`
       if (!merged.has(slotDeviceId)) {
-        if (hasBaseShareWithCode) {
-          // Clone the base share to this slot
-          merged.set(slotDeviceId, {
-            ...baseShare,
-            device_id: slotDeviceId,
-            slot_index: index,
-          })
-        } else {
-          // Create empty placeholder
-          merged.set(slotDeviceId, createDisabledPrivateShare(slotDeviceId, baseDeviceId, index))
-        }
+        merged.set(slotDeviceId, createDisabledPrivateShare(slotDeviceId, baseDeviceId, index))
       }
     }
   }
@@ -242,6 +232,39 @@ export default function Dashboard() {
   // FIX: tracks the explicit user slot selection — survives polls and stale closures
   const userSelectedSlotRef = useRef<string | null>(null)
   const privateShareReqSeqRef = useRef(0)
+  // Pending edits: user changes that haven't been saved yet.
+  // Polls skip overwriting these fields until the edit is saved or expires (30s).
+  const pendingEditsRef = useRef<{
+    expiryHours?: { value: string; ts: number }
+    selectedSlotDeviceId?: { value: string; ts: number }
+  }>({})
+
+  const PENDING_EDIT_TTL = 30_000
+
+  function setPendingEdit<K extends keyof typeof pendingEditsRef.current>(
+    key: K,
+    value: NonNullable<typeof pendingEditsRef.current[K]>['value'],
+  ) {
+    pendingEditsRef.current = { ...pendingEditsRef.current, [key]: { value, ts: Date.now() } }
+  }
+
+  function clearPendingEdit(key: keyof typeof pendingEditsRef.current) {
+    const next = { ...pendingEditsRef.current }
+    delete next[key]
+    pendingEditsRef.current = next
+  }
+
+  function getPendingEdit<K extends keyof typeof pendingEditsRef.current>(
+    key: K,
+  ): NonNullable<typeof pendingEditsRef.current[K]>['value'] | null {
+    const entry = pendingEditsRef.current[key]
+    if (!entry) return null
+    if (Date.now() - entry.ts > PENDING_EDIT_TTL) {
+      clearPendingEdit(key)
+      return null
+    }
+    return entry.value as NonNullable<typeof pendingEditsRef.current[K]>['value']
+  }
 
   const [profile, setProfile] = useState<Profile | null>(null)
   const [peerCounts, setPeerCounts] = useState<Record<string, number>>({})
@@ -258,7 +281,8 @@ export default function Dashboard() {
   const [privateShare, setPrivateShare] = useState<PrivateShareState>(null)
   const [privateShares, setPrivateShares] = useState<PrivateShare[]>([])
   const [privateShareDeviceId, setPrivateShareDeviceId] = useState<string | null>(null)
-  const [privateExpiryHours, setPrivateExpiryHours] = useState('24')
+  const [privateExpiryHours, setPrivateExpiryHours] = useState('none')
+  const [savedPrivateExpiryHours, setSavedPrivateExpiryHours] = useState('none')
   const [privateShareSaving, setPrivateShareSaving] = useState(false)
   const [privateShareAction, setPrivateShareAction] = useState<'toggle' | 'refresh' | null>(null)
   const [slotUpdating, setSlotUpdating] = useState(false)
@@ -494,6 +518,7 @@ export default function Dashboard() {
       setPrivateShares([])
       setPrivateShareDeviceId(null)
       userSelectedSlotRef.current = null
+      pendingEditsRef.current = {}
       return
     }
     loadPrivateShare(baseDeviceId).catch(() => {})
@@ -628,6 +653,7 @@ export default function Dashboard() {
     )
 
     const requestedDeviceId = userSelectedSlotRef.current
+      ?? getPendingEdit('selectedSlotDeviceId')
       ?? preferredDeviceId
       ?? desktopState?.privateShareDeviceId
       ?? desktopState?.peer?.privateShareDeviceId
@@ -659,7 +685,14 @@ export default function Dashboard() {
       userSelectedSlotRef.current = resolvedDeviceId
     }
     setPrivateShareDeviceId(userSelectedSlotRef.current ?? resolvedDeviceId)
-    setPrivateExpiryHours(getExpiryPreset(nextSelected?.expires_at ?? null))
+
+    // Only update expiry display if user has no pending (unsaved) expiry edit
+    const pendingExpiry = getPendingEdit('expiryHours')
+    if (!pendingExpiry) {
+      const preset = getExpiryPreset(nextSelected?.expires_at ?? null)
+      setPrivateExpiryHours(preset)
+      setSavedPrivateExpiryHours(preset)
+    }
     
     log('applyPrivateShareRows AFTER STATE UPDATE',
       'privateShare.device_id=' + (nextSelected?.device_id ?? 'null'),
@@ -757,11 +790,16 @@ export default function Dashboard() {
         log('savePrivateShare SET REF', 'userSelectedSlotRef=' + returnedId)
         userSelectedSlotRef.current = returnedId
         setPrivateShareDeviceId(returnedId)
+        clearPendingEdit('selectedSlotDeviceId')
       }
 
       setSlotLimits(mapSlotLimits(data.slot_limits ?? []))
       applyPrivateShareRows(apiShares, baseDeviceId, returnedId)
-      if (input.expiryHours !== undefined && data.private_share) setPrivateExpiryHours(input.expiryHours)
+      if (input.expiryHours !== undefined && data.private_share) {
+        setPrivateExpiryHours(input.expiryHours)
+        setSavedPrivateExpiryHours(input.expiryHours)
+        clearPendingEdit('expiryHours')
+      }
     } catch (err: unknown) {
       log('savePrivateShare ERROR', String(err))
       setShareError(err instanceof Error ? err.message : 'Could not update private sharing')
@@ -1685,9 +1723,12 @@ export default function Dashboard() {
                   )
                   // FIX: write to ref so polls respect this selection and don't override it
                   userSelectedSlotRef.current = nextDeviceId
+                  setPendingEdit('selectedSlotDeviceId', nextDeviceId)
                   setPrivateShareDeviceId(nextDeviceId)
                   setPrivateShare(nextShare)
                   setPrivateExpiryHours(getExpiryPreset(nextShare?.expires_at ?? null))
+                  setSavedPrivateExpiryHours(getExpiryPreset(nextShare?.expires_at ?? null))
+                  clearPendingEdit('expiryHours')
                 }}
                 style={{ width: '100%', background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: '8px', padding: '8px 10px', fontFamily: 'var(--font-geist-mono)', fontSize: '10px', cursor: 'pointer' }}
               >
@@ -1775,7 +1816,10 @@ export default function Dashboard() {
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px', flexWrap: 'wrap' }}>
             <select
               value={privateExpiryHours}
-              onChange={(e) => setPrivateExpiryHours(e.target.value)}
+              onChange={(e) => {
+                setPrivateExpiryHours(e.target.value)
+                setPendingEdit('expiryHours', e.target.value)
+              }}
               style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: '6px', padding: '6px 8px', fontFamily: 'var(--font-geist-mono)', fontSize: '10px', cursor: 'pointer' }}
             >
               <option value='none'>No expiry</option>
@@ -1784,6 +1828,15 @@ export default function Dashboard() {
               <option value='168'>7 days</option>
             </select>
             <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+              {privateShare?.code && privateExpiryHours !== savedPrivateExpiryHours && (
+                <button
+                  onClick={() => savePrivateShare({ expiryHours: privateExpiryHours })}
+                  disabled={privateShareSaving}
+                  style={{ padding: '7px 12px', background: 'var(--accent)', color: '#000', border: 'none', borderRadius: '7px', fontFamily: 'var(--font-geist-mono)', fontSize: '10px', fontWeight: 700, cursor: privateShareSaving ? 'not-allowed' : 'pointer', opacity: privateShareSaving ? 0.6 : 1 }}
+                >
+                  {privateShareSaving ? 'SAVING...' : 'APPLY EXPIRY'}
+                </button>
+              )}
               <button
                 onClick={() => savePrivateShare({ enabled: !(privateShare?.enabled ?? false), expiryHours: privateExpiryHours })}
                 disabled={privateShareSaving}
