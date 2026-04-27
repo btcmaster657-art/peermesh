@@ -43,7 +43,7 @@ function getHelperMismatchError(helper = state.helper) {
   const source = helper?.source === 'cli' ? 'CLI' : 'desktop app'
   return `This ${source} is signed in as a different user. Sign out of the ${source} first.`
 }
-const FREE_TIER_MESSAGE = 'FREE TIER â€” Enable sharing above to connect, or upgrade to premium to browse without sharing.'
+const FREE_TIER_MESSAGE = 'FREE LAYER â€” Enable sharing above to connect, or fund your USD wallet to browse without sharing.'
 const DAILY_LIMIT_MIN_MB = 1024
 
 function withSharingHeaders(token, contentType = true) {
@@ -106,6 +106,10 @@ function helperSharingActive(helper = ownedHelper()) {
 
 function helperSharingPending(helper = ownedHelper()) {
   return !!(helper?.available && !helper?.running && helper?.shareEnabled)
+}
+
+function hasPaidAccess(user = state.user) {
+  return Number(user?.walletBalanceUsd ?? 0) > 0 || Number(user?.contributionCreditsBytes ?? 0) > 0 || !!user?.isPremium
 }
 
 function getUserSharingToken() {
@@ -178,11 +182,21 @@ function mergePrivateShares(rows, baseDeviceId, helper = ownedHelper()) {
   if (helper?.privateShare?.base_device_id === baseDeviceId) add(helper.privateShare)
 
   const configuredSlots = Math.max(1, helper?.slots?.configured ?? helper?.connectionSlots ?? 1)
+  const baseShare = merged.get(baseDeviceId)
+  const hasBaseShareWithCode = baseShare && !Number.isInteger(baseShare.slot_index) && baseShare.code
   const currentRows = () => [...merged.values()]
   for (let index = 0; index < configuredSlots; index++) {
     if (!hasPrivateShareSlot(currentRows(), baseDeviceId, index)) {
       const deviceId = `${baseDeviceId}_slot_${index}`
-      merged.set(deviceId, createDisabledPrivateShare(deviceId, baseDeviceId, index))
+      if (hasBaseShareWithCode) {
+        merged.set(deviceId, {
+          ...baseShare,
+          device_id: deviceId,
+          slot_index: index,
+        })
+      } else {
+        merged.set(deviceId, createDisabledPrivateShare(deviceId, baseDeviceId, index))
+      }
     }
   }
 
@@ -338,6 +352,10 @@ async function init() {
           state.user = {
             ...state.user,
             isPremium: data.is_premium ?? state.user.isPremium ?? false,
+            role: data.role ?? state.user.role ?? 'client',
+            walletBalanceUsd: data.wallet_balance_usd ?? state.user.walletBalanceUsd ?? 0,
+            contributionCreditsBytes: data.contribution_credits_bytes ?? state.user.contributionCreditsBytes ?? 0,
+            walletPendingPayoutUsd: data.wallet_pending_payout_usd ?? state.user.walletPendingPayoutUsd ?? 0,
             dailyLimitMb: data.daily_share_limit_mb ?? state.user.dailyLimitMb ?? null,
           }
         }
@@ -532,6 +550,10 @@ function startPeerPolling() {
           totalUsed: data.total_bytes_used ?? state.user.totalUsed,
           trustScore: data.trust_score ?? state.user.trustScore,
           isPremium: data.is_premium ?? state.user.isPremium ?? false,
+          role: data.role ?? state.user.role ?? 'client',
+          walletBalanceUsd: data.wallet_balance_usd ?? state.user.walletBalanceUsd ?? 0,
+          contributionCreditsBytes: data.contribution_credits_bytes ?? state.user.contributionCreditsBytes ?? 0,
+          walletPendingPayoutUsd: data.wallet_pending_payout_usd ?? state.user.walletPendingPayoutUsd ?? 0,
           dailyLimitMb: data.daily_share_limit_mb ?? state.user.dailyLimitMb ?? null,
         }
       }
@@ -633,7 +655,7 @@ function renderDashboard(app) {
     return `<span style="width:8px;height:8px;border-radius:999px;background:${running ? 'var(--accent)' : 'var(--border)'};box-shadow:${running ? '0 0 8px rgba(0,255,136,0.35)' : 'none'}"></span>`
   }).join('')
   const helperSource = standaloneHelper ? 'Extension' : activeHelper?.source === 'cli' ? 'CLI' : helperReady ? 'Desktop' : 'PeerMesh'
-  const freeTierBlocked = !user?.isPremium && !isSharing
+  const freeTierBlocked = !hasPaidAccess(user) && !isSharing
   const helperLabel = helperMismatch
     ? 'Local desktop helper belongs to another user. Sign out there first.'
     : standaloneHelper
@@ -1073,7 +1095,7 @@ async function connectSession() {
     return
   }
 
-  if (!state.user?.isPremium && !state.isSharing) {
+  if (!hasPaidAccess(state.user) && !state.isSharing) {
     state.error = FREE_TIER_MESSAGE
     render()
     return
@@ -1458,7 +1480,9 @@ chrome.runtime.onMessage.addListener((msg) => {
   // Provider dropped and relay gave up finding a replacement
   if (msg.type === 'SESSION_ENDED') {
     state.session = null
-    state.error = 'Connection lost â€” your peer disconnected. Select a country to reconnect.'
+    state.error = msg.reason
+      ? `Connection lost â€” ${msg.reason}. Select a country to reconnect.`
+      : 'Connection lost â€” your peer disconnected. Select a country to reconnect.'
     chrome.storage.local.set({ session: null })
     render()
   }

@@ -125,7 +125,39 @@ function getPrivateShareRows(state = window.__lastPeerMeshState || null) {
     privateShare ? [privateShare] : [],
     state?.privateShare ? [state.privateShare] : [],
   )
-  return merged
+  const baseDeviceId = state?.baseDeviceId ?? state?.config?.baseDeviceId ?? null
+  const configuredSlots = Math.max(1, state?.slots?.configured ?? state?.connectionSlots ?? 1)
+  if (!baseDeviceId) return merged
+
+  const next = new Map(merged.map((row) => [row.device_id, row]))
+  const baseShare = next.get(baseDeviceId)
+  const hasBaseShareWithCode = baseShare && !Number.isInteger(baseShare.slot_index) && baseShare.code
+
+  for (let index = 0; index < configuredSlots; index++) {
+    const slotDeviceId = `${baseDeviceId}_slot_${index}`
+    if (next.has(slotDeviceId)) continue
+    if (hasBaseShareWithCode) {
+      next.set(slotDeviceId, {
+        ...baseShare,
+        device_id: slotDeviceId,
+        slot_index: index,
+      })
+    } else {
+      next.set(slotDeviceId, {
+        device_id: slotDeviceId,
+        base_device_id: baseDeviceId,
+        slot_index: index,
+        code: '',
+        enabled: false,
+        expires_at: null,
+        active: false,
+        state_actor: null,
+        state_changed_at: null,
+      })
+    }
+  }
+
+  return sortPrivateShares([...next.values()])
 }
 
 function getPrivateShareLabel(row, fallbackIndex = 0) {
@@ -621,16 +653,20 @@ async function startDeviceFlow() {
   if (copyBtn) {
     copyBtn.style.display = 'inline-block'
     copyBtn.onclick = () => {
-      navigator.clipboard.writeText(userCode).then(() => {
+      const authUrl = `${verificationUri}?activate=1&code=${encodeURIComponent(userCode)}`
+      navigator.clipboard.writeText(userCode).then(async () => {
         copyBtn.textContent = 'COPIED!'
         copyBtn.style.color = 'var(--accent)'
         copyBtn.style.borderColor = 'var(--accent)'
+        await invoke('openAuth', authUrl)
         setTimeout(() => {
           copyBtn.textContent = 'COPY CODE'
           copyBtn.style.color = 'var(--text)'
           copyBtn.style.borderColor = ''
         }, 2000)
-      }).catch(() => {})
+      }).catch(async () => {
+        await invoke('openAuth', authUrl)
+      })
     }
   }
   if (btn) {

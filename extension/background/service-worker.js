@@ -261,6 +261,18 @@ function log(level, ...args) {
 
 function getLogs() { return [..._logs] }
 
+async function broadcastSessionEnded(reason = 'Peer connection dropped') {
+  await chrome.runtime.sendMessage({ type: 'SESSION_ENDED', reason }).catch(() => {})
+  try {
+    const tabs = await chrome.tabs.query({})
+    await Promise.all(
+      tabs
+        .filter((tab) => typeof tab.id === 'number')
+        .map((tab) => chrome.tabs.sendMessage(tab.id, { type: 'PEERMESH_SESSION_ENDED', reason }).catch(() => {})),
+    )
+  } catch {}
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   ;(async () => {
     try {
@@ -1338,7 +1350,7 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
         currentSession = null
         relayWs = null
         agentSessionId = null
-        chrome.runtime.sendMessage({ type: 'SESSION_ENDED' }).catch(() => {})
+        broadcastSessionEnded(msg.reason || 'Peer connection dropped').catch(() => {})
       }
     }
 
@@ -1355,7 +1367,7 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
         currentSession = null
         relayWs = null
         agentSessionId = null
-        chrome.runtime.sendMessage({ type: 'SESSION_ENDED' }).catch(() => {})
+        broadcastSessionEnded(e.reason || 'Peer connection dropped').catch(() => {})
       }
       settle(reject, new Error('Connection closed before session was ready'))
     }

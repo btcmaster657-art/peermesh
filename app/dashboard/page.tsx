@@ -367,9 +367,17 @@ export default function Dashboard() {
 
         const { data, error: profileError } = await supabase.from('profiles').select('*').eq('id', user.id).single<Profile>()
         if (profileError) throw new Error('Could not load your profile – please refresh')
-        if (!data?.is_verified) { router.push('/verify/payment'); return }
+        let nextProfile = data
+        if (!nextProfile?.is_verified && nextProfile?.phone_number) {
+          await supabase
+            .from('profiles')
+            .update({ is_verified: true, verified_at: new Date().toISOString() })
+            .eq('id', user.id)
+          nextProfile = nextProfile ? { ...nextProfile, is_verified: true, verified_at: new Date().toISOString() } : nextProfile
+        }
+        if (!nextProfile?.is_verified) { router.push('/verify/phone'); return }
 
-        setProfile(data)
+        setProfile(nextProfile)
         setLoading(false)
 
         fetch('/api/version').then(r => r.json()).then(v => {
@@ -390,15 +398,15 @@ export default function Dashboard() {
             const authResult = await syncDesktopAuth({
               token: await getDesktopAuthToken(),
               userId: user.id,
-              country: data.country_code,
-              trust: data.trust_score,
+              country: nextProfile.country_code,
+              trust: nextProfile.trust_score,
             })
             if (!authResult.ok && authResult.error) {
               setShareError(authResult.error)
             }
             setShareError(prev => prev != null && prev.includes('signed in as a different user') ? null : prev)
           }
-        } else if (data.is_sharing) {
+        } else if (nextProfile.is_sharing) {
           const shareStateResponse = await fetch('/api/user/sharing', {
             method: 'POST',
             headers: DASHBOARD_SHARING_HEADERS,
@@ -1096,6 +1104,10 @@ export default function Dashboard() {
   const displayIsSharing = shareTarget ?? isSharing
   const helperStarting = isDesktopSharePending(desktop)
   const privateConnectReady = !selectedCountry && !!privateCodeInput.trim()
+  const walletBalanceLabel = `$${Number(profile.wallet_balance_usd ?? 0).toFixed(2)}`
+  const payoutBalanceLabel = `$${Number(profile.wallet_pending_payout_usd ?? 0).toFixed(2)}`
+  const contributionCreditsLabel = formatBytes(Number(profile.contribution_credits_bytes ?? 0))
+  const hasPaidAccess = profile.is_premium || Number(profile.wallet_balance_usd ?? 0) > 0 || Number(profile.contribution_credits_bytes ?? 0) > 0
 
   const detectedOS: 'windows' | 'mac' | 'linux' = typeof navigator !== 'undefined'
     ? navigator.userAgent.includes('Win') ? 'windows'
@@ -1217,6 +1229,34 @@ export default function Dashboard() {
         </div>
       </div>
 
+      <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '12px', padding: '16px', marginBottom: '20px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', alignItems: 'flex-start', flexWrap: 'wrap', marginBottom: '12px' }}>
+          <div>
+            <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--accent)', letterSpacing: '1px', marginBottom: '6px' }}>WALLET AND CREDITS</div>
+            <div style={{ fontSize: '12px', color: 'var(--muted)', lineHeight: 1.6 }}>
+              Free monthly allocation and contribution credits are consumed before paid API balance.
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+            <a href="/verify/payment" style={{ padding: '9px 12px', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text)', textDecoration: 'none', fontFamily: 'var(--font-geist-mono)', fontSize: '11px' }}>BILLING</a>
+            <a href="/provider/sessions" style={{ padding: '9px 12px', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text)', textDecoration: 'none', fontFamily: 'var(--font-geist-mono)', fontSize: '11px' }}>PROVIDER SESSIONS</a>
+            <a href="/api-docs" style={{ padding: '9px 12px', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text)', textDecoration: 'none', fontFamily: 'var(--font-geist-mono)', fontSize: '11px' }}>API DOCS</a>
+          </div>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '10px' }}>
+          {[
+            { label: 'USD WALLET', value: walletBalanceLabel },
+            { label: 'CREDITS', value: contributionCreditsLabel },
+            { label: 'PAYOUT', value: payoutBalanceLabel },
+          ].map(({ label, value }) => (
+            <div key={label} style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '10px', padding: '14px' }}>
+              <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '16px', color: 'var(--accent)', marginBottom: '4px' }}>{value}</div>
+              <div style={{ fontSize: '10px', color: 'var(--muted)', letterSpacing: '1px' }}>{label}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
       {/* Mobile: only show stats + bandwidth + free tier enforcement */}
       {!isMobile && (<div style={{ display: 'contents' }}>
 
@@ -1246,9 +1286,9 @@ export default function Dashboard() {
           </div>
           <button
             onClick={handleConnect}
-            disabled={connecting || !privateConnectReady || (!profile.is_premium && !isSharing)}
-            title={selectedCountry ? 'Clear country selection to use private code' : !profile.is_premium && !isSharing ? 'Enable sharing or upgrade to connect' : undefined}
-            style={{ padding: '10px 14px', background: privateConnectReady ? 'var(--accent)' : 'var(--border)', color: privateConnectReady ? '#000' : 'var(--muted)', border: 'none', borderRadius: '8px', fontFamily: 'var(--font-geist-mono)', fontSize: '10px', fontWeight: 700, letterSpacing: '0.5px', cursor: connecting || !privateConnectReady || (!profile.is_premium && !isSharing) ? 'not-allowed' : 'pointer', opacity: (!profile.is_premium && !isSharing) ? 0.5 : 1 }}
+            disabled={connecting || !privateConnectReady || (!hasPaidAccess && !isSharing)}
+            title={selectedCountry ? 'Clear country selection to use private code' : !hasPaidAccess && !isSharing ? 'Enable sharing or fund your wallet to connect' : undefined}
+            style={{ padding: '10px 14px', background: privateConnectReady ? 'var(--accent)' : 'var(--border)', color: privateConnectReady ? '#000' : 'var(--muted)', border: 'none', borderRadius: '8px', fontFamily: 'var(--font-geist-mono)', fontSize: '10px', fontWeight: 700, letterSpacing: '0.5px', cursor: connecting || !privateConnectReady || (!hasPaidAccess && !isSharing) ? 'not-allowed' : 'pointer', opacity: (!hasPaidAccess && !isSharing) ? 0.5 : 1 }}
           >
             {connecting && privateConnectReady ? 'CONNECTING...' : 'CONNECT CODE'}
           </button>
@@ -1343,15 +1383,15 @@ export default function Dashboard() {
 
           <button
             onClick={handleConnect}
-            disabled={connecting || (!profile.is_premium && !isSharing)}
-            title={!profile.is_premium && !isSharing ? 'Enable sharing or upgrade to connect' : undefined}
+            disabled={connecting || (!hasPaidAccess && !isSharing)}
+            title={!hasPaidAccess && !isSharing ? 'Enable sharing or fund your wallet to connect' : undefined}
             style={{
               display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '6px',
               padding: '14px 10px', background: 'var(--surface)',
-              color: (connecting || (!profile.is_premium && !isSharing)) ? 'var(--muted)' : 'var(--text)',
+              color: (connecting || (!hasPaidAccess && !isSharing)) ? 'var(--muted)' : 'var(--text)',
               border: '1px solid rgba(0,255,136,0.4)',
-              borderRadius: '10px', cursor: (connecting || (!profile.is_premium && !isSharing)) ? 'not-allowed' : 'pointer',
-              textAlign: 'center', transition: 'all 0.2s', opacity: (!profile.is_premium && !isSharing) ? 0.5 : 1,
+              borderRadius: '10px', cursor: (connecting || (!hasPaidAccess && !isSharing)) ? 'not-allowed' : 'pointer',
+              textAlign: 'center', transition: 'all 0.2s', opacity: (!hasPaidAccess && !isSharing) ? 0.5 : 1,
             }}
           >
             {connecting
@@ -1719,26 +1759,26 @@ export default function Dashboard() {
       )}
 
       {/* Free tier enforcement – shown on all screen sizes */}
-      {!profile.is_premium && !isSharing && (selectedCountry || privateConnectReady) && !isMobile && (
+      {!hasPaidAccess && !isSharing && (selectedCountry || privateConnectReady) && !isMobile && (
         <div style={{ background: 'rgba(255,80,80,0.07)', border: '1px solid rgba(255,80,80,0.3)', borderRadius: '10px', padding: '12px 16px', marginBottom: '16px', fontSize: '12px', color: '#ff9090' }}>
-          <span style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', letterSpacing: '0.5px' }}>FREE TIER – </span>
+          <span style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', letterSpacing: '0.5px' }}>FREE LAYER – </span>
           Enable sharing above to connect, or{' '}
-          <a href="/verify/payment" style={{ color: 'var(--accent)', textDecoration: 'underline' }}>upgrade to premium</a> to browse without sharing.
+          <a href="/verify/payment" style={{ color: 'var(--accent)', textDecoration: 'underline' }}>fund your wallet</a> to browse without sharing.
         </div>
       )}
 
       {/* Close desktop-only wrapper */}
       </div>)}
 
-      {/* Upgrade banner – always visible so mobile users can upgrade */}
-      {!profile.is_premium && (
+      {/* Wallet banner – always visible so mobile users can fund access */}
+      {!hasPaidAccess && (
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 16px', background: 'var(--accent-dim)', border: '1px solid rgba(0,255,136,0.2)', borderRadius: '10px', marginBottom: '12px' }}>
           <div>
-            <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '11px', color: 'var(--accent)', letterSpacing: '0.5px', marginBottom: '2px' }}>FREE TIER</div>
-            <div style={{ fontSize: '12px', color: 'var(--muted)' }}>Upgrade to browse without sharing your IP</div>
+            <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '11px', color: 'var(--accent)', letterSpacing: '0.5px', marginBottom: '2px' }}>FREE LAYER</div>
+            <div style={{ fontSize: '12px', color: 'var(--muted)' }}>Fund your wallet to browse without sharing your IP</div>
           </div>
-          <a href="/upgrade" style={{ padding: '8px 14px', background: 'var(--accent)', color: '#000', borderRadius: '7px', fontSize: '11px', fontFamily: 'var(--font-geist-mono)', fontWeight: 700, textDecoration: 'none', letterSpacing: '0.5px', whiteSpace: 'nowrap' }}>
-            UPGRADE $7
+          <a href="/verify/payment" style={{ padding: '8px 14px', background: 'var(--accent)', color: '#000', borderRadius: '7px', fontSize: '11px', fontFamily: 'var(--font-geist-mono)', fontWeight: 700, textDecoration: 'none', letterSpacing: '0.5px', whiteSpace: 'nowrap' }}>
+            FUND WALLET
           </a>
         </div>
       )}

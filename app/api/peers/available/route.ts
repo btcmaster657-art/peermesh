@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { adminClient } from '@/lib/supabase/admin'
 import { createClient } from '@/lib/supabase/server'
+import { buildOccupiedProviderDeviceSet, filterAvailableProviderDevices } from '@/lib/provider-capacity'
 
 export async function GET(req: Request) {
   // Try cookie-based auth first, then Bearer token - both optional.
@@ -24,6 +25,17 @@ export async function GET(req: Request) {
 
   if (error || !data) return NextResponse.json({ peers: [] })
 
+  const candidateDeviceIds = data.map((row) => row.device_id).filter(Boolean)
+  const { data: activeSessions } = candidateDeviceIds.length > 0
+    ? await adminClient
+        .from('sessions')
+        .select('provider_device_id')
+        .eq('status', 'active')
+        .in('provider_device_id', candidateDeviceIds)
+    : { data: [] as Array<{ provider_device_id: string | null }> }
+  const occupiedDevices = buildOccupiedProviderDeviceSet(activeSessions)
+  const availableDevices = filterAvailableProviderDevices(data, occupiedDevices)
+
   // New rows are keyed by the exact slot deviceId. Legacy rows keyed by the base
   // device still hide every slot under that base device.
   const { data: privateDevices } = await adminClient
@@ -46,7 +58,7 @@ export async function GET(req: Request) {
   // Each provider_devices row is already a slot row for desktop, CLI, and extension providers.
   const counts: Record<string, number> = {}
   const relayUrls: Record<string, Set<string>> = {}
-  for (const row of data) {
+  for (const row of availableDevices) {
     if (user && row.user_id === user.id) continue
     if (isPrivateSlot(row.user_id, row.device_id)) continue
     counts[row.country_code] = (counts[row.country_code] ?? 0) + 1

@@ -27,14 +27,18 @@ export async function PATCH(req: Request) {
     status,
     providerUserId,
     providerKind,
+    providerDeviceId,
+    providerBaseDeviceId,
     relayEndpoint,
     targetHost,
     targetHosts,
+    disconnectReason,
   } = await req.json().catch(() => ({}))
 
   const resolvedId = dbSessionId ?? sessionId ?? null
-  const hasPatchField = !!providerUserId || !!providerKind || !!relayEndpoint || !!targetHost
+  const hasPatchField = !!providerUserId || !!providerKind || !!providerDeviceId || !!providerBaseDeviceId || !!relayEndpoint || !!targetHost
     || (Array.isArray(targetHosts) && targetHosts.length > 0)
+    || !!disconnectReason
     || typeof status === 'string'
 
   if (!resolvedId || !hasPatchField) {
@@ -47,9 +51,12 @@ export async function PATCH(req: Request) {
   const patch: Record<string, unknown> = {}
   if (providerUserId) patch.provider_id = providerUserId
   if (providerKind) patch.provider_kind = providerKind
+  if (providerDeviceId) patch.provider_device_id = providerDeviceId
+  if (providerBaseDeviceId) patch.provider_base_device_id = providerBaseDeviceId
   if (relayEndpoint) patch.relay_endpoint = relayEndpoint
   if (targetHost) patch.target_host = targetHost
   if (Array.isArray(targetHosts) && targetHosts.length > 0) patch.target_hosts = targetHosts
+  if (disconnectReason) patch.disconnect_reason = disconnectReason
   if (typeof status === 'string') patch.status = status
 
   const { error, count } = await adminClient
@@ -100,7 +107,10 @@ export async function POST(req: Request) {
     targetHost,
     targetHosts,
     providerKind,
+    providerDeviceId,
+    providerBaseDeviceId,
     relayEndpoint,
+    disconnectReason,
   } = await req.json().catch(() => ({}))
 
   if (!sessionId) return NextResponse.json({ error: 'sessionId is required' }, { status: 400 })
@@ -108,7 +118,7 @@ export async function POST(req: Request) {
   // Load current session to fill in any fields the caller did not provide.
   const { data: existing, error: lookupError } = await adminClient
     .from('sessions')
-    .select('provider_id, provider_kind, relay_endpoint, target_country, target_host, target_hosts, user_id, status, bytes_used')
+    .select('provider_id, provider_kind, provider_device_id, provider_base_device_id, relay_endpoint, target_country, target_host, target_hosts, user_id, status, bytes_used, disconnect_reason')
     .eq('id', sessionId)
     .maybeSingle()
 
@@ -121,8 +131,11 @@ export async function POST(req: Request) {
   const finalRequesterId = isRelay ? (requesterUserId ?? existing?.user_id ?? null) : userId
   const finalCountry = country ?? existing?.target_country ?? null
   const finalProviderKind = providerKind ?? existing?.provider_kind ?? null
+  const finalProviderDeviceId = providerDeviceId ?? existing?.provider_device_id ?? null
+  const finalProviderBaseDeviceId = providerBaseDeviceId ?? existing?.provider_base_device_id ?? null
   const finalRelayEndpoint = relayEndpoint ?? existing?.relay_endpoint ?? null
   const finalTargetHost = targetHost ?? existing?.target_host ?? null
+  const finalDisconnectReason = disconnectReason ?? existing?.disconnect_reason ?? null
   const finalBytes = Math.max(Number(bytesUsed) || 0, Number(existing?.bytes_used) || 0)
 
   // Merge incoming target_hosts with any already stored on the row.
@@ -139,9 +152,12 @@ export async function POST(req: Request) {
       bytes_used: finalBytes,
       provider_id: finalProviderId,
       provider_kind: finalProviderKind,
+      provider_device_id: finalProviderDeviceId,
+      provider_base_device_id: finalProviderBaseDeviceId,
       relay_endpoint: finalRelayEndpoint,
       target_host: finalTargetHost,
       target_hosts: mergedHosts,
+      disconnect_reason: finalDisconnectReason,
     }, { count: 'exact' })
     .eq('id', sessionId)
     .in('status', ['pending', 'active'])
@@ -158,10 +174,13 @@ export async function POST(req: Request) {
       .update({
         provider_id: finalProviderId,
         provider_kind: finalProviderKind,
+        provider_device_id: finalProviderDeviceId,
+        provider_base_device_id: finalProviderBaseDeviceId,
         relay_endpoint: finalRelayEndpoint,
         target_host: finalTargetHost,
         target_hosts: mergedHosts,
         bytes_used: finalBytes,
+        disconnect_reason: finalDisconnectReason,
       })
       .eq('id', sessionId)
   }
@@ -196,8 +215,10 @@ export async function POST(req: Request) {
     finalRequesterId,
     finalCountry,
     finalProviderKind,
+    finalProviderDeviceId,
     finalRelayEndpoint,
     finalTargetHost,
+    finalDisconnectReason,
     finalBytes,
     endedActiveRow: count ?? 0,
   })

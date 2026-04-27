@@ -1449,6 +1449,10 @@ function getProviderRelay(relays) {
 
 function connectSlot(slot) {
   if (!config.token || !config.userId) return
+  if (slot.reconnectTimer) {
+    clearTimeout(slot.reconnectTimer)
+    slot.reconnectTimer = null
+  }
   if (slot.ws && (slot.ws.readyState === WebSocket.OPEN || slot.ws.readyState === WebSocket.CONNECTING)) return
   getLiveRelays().then(relays => {
     const relay = getProviderRelay(relays)
@@ -1456,6 +1460,10 @@ function connectSlot(slot) {
     slot.ws = new WebSocket(relay)
 
     slot.ws.on('open', () => {
+    if (slot.reconnectTimer) {
+      clearTimeout(slot.reconnectTimer)
+      slot.reconnectTimer = null
+    }
     slot.reconnectDelay = 2000
     if (!config.shareEnabled) {
       log.warn('RELAY', `${slotPrefix(slot)} shareEnabled=false after open`)
@@ -1572,6 +1580,7 @@ function connectSlot(slot) {
     // It will be restored when session_reconnected arrives via the extension.
     if (proxySession) { proxySession = null; log.debug('RELAY', `${slotPrefix(slot)} cleared proxySession on WS close`) }
     if (code !== 1000 && !_userStopped && config.shareEnabled) {
+      if (slot.reconnectTimer) clearTimeout(slot.reconnectTimer)
       slot.reconnectTimer = setTimeout(() => connectSlot(slot), slot.reconnectDelay)
       slot.reconnectDelay = Math.min(slot.reconnectDelay * 2, 30000)
     } else {
@@ -1580,7 +1589,13 @@ function connectSlot(slot) {
   })
 
     slot.ws.on('error', (e) => log.error('RELAY', `${slotPrefix(slot)} WebSocket error`, { code: e.code, err: e.message }))
-  }).catch(e => log.error('RELAY', `${slotPrefix(slot)} getLiveRelays failed`, { err: e.message }))
+  }).catch(e => {
+    log.error('RELAY', `${slotPrefix(slot)} getLiveRelays failed`, { err: e.message })
+    if (!_userStopped && config.shareEnabled && !slot.reconnectTimer) {
+      slot.reconnectTimer = setTimeout(() => connectSlot(slot), slot.reconnectDelay)
+      slot.reconnectDelay = Math.min(slot.reconnectDelay * 2, 30000)
+    }
+  })
 }
 
 function connectRelay() {
@@ -2106,7 +2121,7 @@ function showWindow() {
   settingsWindow.on('close', (e) => {
     if (_quitRequested) return
     e.preventDefault()
-    settingsWindow.hide()
+    setTimeout(() => requestAppQuit('window-close'), 0)
   })
   settingsWindow.on('closed', () => {
     settingsWindow = null

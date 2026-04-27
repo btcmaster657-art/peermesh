@@ -326,6 +326,49 @@ function syncProfile(session) {
   })
 }
 
+function showDisconnectOverlay(reason) {
+  try {
+    if (window !== window.top) return
+  } catch {
+    return
+  }
+
+  const root = document.documentElement
+  const body = document.body
+  if (!root || !body) return
+
+  const existing = document.getElementById('peermesh-disconnect-overlay')
+  if (existing) existing.remove()
+
+  const overlay = document.createElement('div')
+  overlay.id = 'peermesh-disconnect-overlay'
+  overlay.style.cssText = [
+    'position:fixed',
+    'top:16px',
+    'right:16px',
+    'z-index:2147483647',
+    'max-width:360px',
+    'padding:14px 16px',
+    'background:rgba(10,10,15,0.96)',
+    'border:1px solid rgba(255,96,96,0.35)',
+    'border-radius:10px',
+    'box-shadow:0 10px 30px rgba(0,0,0,0.3)',
+    'font-family:ui-monospace,SFMono-Regular,Menlo,monospace',
+    'color:#f5f5f8',
+  ].join(';')
+  overlay.innerHTML = `
+    <div style="font-size:10px;letter-spacing:1px;color:#ff8080;margin-bottom:8px">PEERMESH DISCONNECTED</div>
+    <div style="font-size:12px;line-height:1.6;color:#cfd3dc">${String(reason || 'Your routed connection dropped. Reconnect from the extension and reload this tab.')}</div>
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button id="peermesh-disconnect-reload" style="padding:8px 10px;border-radius:8px;border:none;background:#00ff88;color:#000;cursor:pointer;font:inherit;font-size:11px">RELOAD</button>
+      <button id="peermesh-disconnect-close" style="padding:8px 10px;border-radius:8px;border:1px solid rgba(255,255,255,0.14);background:transparent;color:#f5f5f8;cursor:pointer;font:inherit;font-size:11px">DISMISS</button>
+    </div>
+  `
+  body.appendChild(overlay)
+  document.getElementById('peermesh-disconnect-reload')?.addEventListener('click', () => window.location.reload())
+  document.getElementById('peermesh-disconnect-close')?.addEventListener('click', () => overlay.remove())
+}
+
 withDocumentRoot(markExtensionPresence)
 
 chrome.storage.local.get(['session'], ({ session }) => {
@@ -335,4 +378,10 @@ chrome.storage.local.get(['session'], ({ session }) => {
 chrome.storage.onChanged?.addListener((changes, areaName) => {
   if (areaName !== 'local' || !changes.session) return
   syncProfile(changes.session.newValue ?? null)
+})
+
+chrome.runtime.onMessage?.addListener((message) => {
+  if (message?.type === 'PEERMESH_SESSION_ENDED') {
+    showDisconnectOverlay(message.reason)
+  }
 })

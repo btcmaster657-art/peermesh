@@ -160,8 +160,10 @@ function createSession(requesterWs, provider, country, dbSessionId, {
     country,
     status: 'active',
     requesterUserId: requesterWs.userId,
-    providerUserId: null,
-    providerKind: null,
+    providerUserId: provider.userId ?? null,
+    providerKind: provider.providerKind ?? null,
+    providerDeviceId: provider.deviceId ?? null,
+    providerBaseDeviceId: provider.baseDeviceId ?? null,
     startTime: Date.now(),
     bytesRequester: 0,
     bytesProvider: 0,
@@ -211,9 +213,12 @@ function syncSessionMetadata(session, reason = 'update') {
     status:         session.status ?? null,
     providerUserId: session.providerUserId ?? null,
     providerKind:   session.providerKind ?? null,
+    providerDeviceId: session.providerDeviceId ?? null,
+    providerBaseDeviceId: session.providerBaseDeviceId ?? null,
     relayEndpoint:  session.relayEndpoint ?? null,
     targetHost:     session.targetHost ?? null,
     targetHosts:    session.targetHosts ? [...session.targetHosts] : [],
+    disconnectReason: session.disconnectReason ?? null,
   }
 
   fetch(`${API_BASE}/api/session/end`, {
@@ -714,8 +719,11 @@ async function handleMessage(ws, msg) {
       }
       agentSession.agentReady = true
       agentSession.providerUserId = ws.userId
-      agentSession.providerKind    = ws.providerKind ?? agentSession.providerKind ?? null
-      agentSession.relayEndpoint   = requester?.relayUrl ?? agentSession.relayEndpoint ?? null
+      agentSession.providerKind = ws.providerKind ?? agentSession.providerKind ?? null
+      agentSession.providerDeviceId = ws.deviceId ?? agentSession.providerDeviceId ?? null
+      agentSession.providerBaseDeviceId = ws.baseDeviceId ?? agentSession.providerBaseDeviceId ?? null
+      agentSession.relayEndpoint = requester?.relayUrl ?? agentSession.relayEndpoint ?? null
+      agentSession.disconnectReason = null
       syncSessionMetadata(agentSession, 'provider_assign')
       break
     }
@@ -854,7 +862,10 @@ function reportSessionEnd(session, sessionId) {
       targetHost,
       targetHosts,
       providerKind,
+      providerDeviceId: session.providerDeviceId ?? null,
+      providerBaseDeviceId: session.providerBaseDeviceId ?? null,
       relayEndpoint:   session.relayEndpoint ?? null,
+      disconnectReason: session.disconnectReason ?? null,
     }),
   })
     .then(async (r) => {
@@ -902,9 +913,11 @@ function cleanupSession(ws) {
 
   // Auto-reconnect — only when provider dropped and requester is still connected
   if (ws.role === 'provider' && other.readyState === WebSocket.OPEN) {
+    session.disconnectReason = 'provider_disconnected'
     log(other.peerId.slice(0,8), `PROVIDER_DROPPED — attempting auto-reconnect country=${session.country}`)
     attemptReconnect(other, session)
   } else {
+    session.disconnectReason = 'peer_disconnected'
     send(other, { type: 'session_ended', reason: 'peer_disconnected' })
   }
 }

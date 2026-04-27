@@ -61,7 +61,7 @@ export default function PhoneVerifyPage() {
       })
       const data = await res.json()
       if (data.error) throw new Error(data.error)
-      router.push('/verify/payment')
+      router.push('/dashboard')
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Invalid code')
     } finally {

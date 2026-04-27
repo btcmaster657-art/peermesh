@@ -41,9 +41,17 @@ export async function POST(req: Request) {
   if (action === 'verify') {
     if (BYPASS) {
       if (code !== '123456') return NextResponse.json({ error: 'Use 123456 in test mode' }, { status: 400 })
+      await adminClient
+        .from('profiles')
+        .update({ is_verified: true, verified_at: new Date().toISOString() })
+        .eq('id', user.id)
       return NextResponse.json({ success: true, bypass: true })
     }
     // TODO: check Twilio verification
+    await adminClient
+      .from('profiles')
+      .update({ is_verified: true, verified_at: new Date().toISOString() })
+      .eq('id', user.id)
     return NextResponse.json({ success: true })
   }
 

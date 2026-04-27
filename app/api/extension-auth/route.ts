@@ -12,6 +12,22 @@ const CORS = {
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? 'https://peermesh-beta.vercel.app'
 const EXTENSION_AUTH_TTL_MS = 365 * 24 * 60 * 60 * 1000
 
+function isProfileActivated(profile: { is_verified?: boolean | null; phone_number?: string | null } | null | undefined): boolean {
+  return !!(profile?.is_verified || profile?.phone_number)
+}
+
+async function ensureProfileActivated<T extends { is_verified?: boolean | null; phone_number?: string | null }>(
+  userId: string,
+  profile: T | null,
+): Promise<T | null> {
+  if (!profile || profile.is_verified || !profile.phone_number) return profile
+  await adminClient
+    .from('profiles')
+    .update({ is_verified: true, verified_at: new Date().toISOString() })
+    .eq('id', userId)
+  return { ...profile, is_verified: true }
+}
+
 function generateDeviceCode(): string {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
   return Array.from({ length: 32 }, () => chars[Math.floor(Math.random() * chars.length)]).join('')
@@ -141,9 +157,10 @@ export async function GET(req: Request) {
     // Refused only if the device has been explicitly revoked (status = 'revoked').
     const userId = searchParams.get('userId') ?? ''
     if (!userId) return NextResponse.json({ error: 'userId required' }, { status: 400, headers: CORS })
-    const { data: profile } = await adminClient
-      .from('profiles').select('id, is_verified').eq('id', userId).maybeSingle()
-    if (!profile?.is_verified) return NextResponse.json({ error: 'Not found or not verified' }, { status: 404, headers: CORS })
+    const { data: rawProfile } = await adminClient
+      .from('profiles').select('id, is_verified, phone_number').eq('id', userId).maybeSingle()
+    const profile = await ensureProfileActivated(userId, rawProfile)
+    if (!isProfileActivated(profile)) return NextResponse.json({ error: 'Not found or not verified' }, { status: 404, headers: CORS })
     const { data: revokedRow } = await adminClient
       .from('device_codes').select('id').eq('user_id', userId).eq('status', 'revoked').maybeSingle()
     if (revokedRow) return NextResponse.json({ revoked: true }, { status: 403, headers: CORS })
@@ -204,11 +221,12 @@ export async function GET(req: Request) {
     if (row.status === 'approved' && row.token && row.user_id) {
       const { data: profile } = await adminClient
         .from('profiles')
-        .select('username, country_code, trust_score, is_verified, has_accepted_provider_terms')
+        .select('username, country_code, trust_score, role, is_verified, phone_number, has_accepted_provider_terms, contribution_credits_bytes, wallet_balance_usd, wallet_pending_payout_usd')
         .eq('id', row.user_id)
         .single()
 
-      if (!profile?.is_verified) {
+      const activeProfile = await ensureProfileActivated(row.user_id, profile)
+      if (!isProfileActivated(activeProfile)) {
         return NextResponse.json({ error: 'Account not verified' }, { status: 403, headers: CORS })
       }
 
@@ -217,10 +235,14 @@ export async function GET(req: Request) {
         user: {
           id: row.user_id,
           token: row.token,
-          username: profile.username,
-          country: profile.country_code,
-          trustScore: profile.trust_score,
-          hasAcceptedProviderTerms: profile.has_accepted_provider_terms ?? false,
+          username: activeProfile?.username,
+          country: activeProfile?.country_code,
+          trustScore: activeProfile?.trust_score,
+          role: activeProfile?.role,
+          walletBalanceUsd: activeProfile?.wallet_balance_usd,
+          contributionCreditsBytes: activeProfile?.contribution_credits_bytes,
+          walletPendingPayoutUsd: activeProfile?.wallet_pending_payout_usd,
+          hasAcceptedProviderTerms: activeProfile?.has_accepted_provider_terms ?? false,
         },
       }, { headers: CORS })
     }
@@ -249,11 +271,12 @@ export async function GET(req: Request) {
 
   const { data: profile } = await adminClient
     .from('profiles')
-    .select('username, country_code, trust_score, is_verified, is_premium, total_bytes_shared, total_bytes_used, is_sharing, has_accepted_provider_terms, daily_share_limit_mb')
+    .select('username, country_code, trust_score, role, is_verified, phone_number, is_premium, total_bytes_shared, total_bytes_used, is_sharing, has_accepted_provider_terms, daily_share_limit_mb, contribution_credits_bytes, wallet_balance_usd, wallet_pending_payout_usd')
     .eq('id', row.user_id)
     .single()
 
-  if (!profile?.is_verified) {
+  const activeProfile = await ensureProfileActivated(row.user_id, profile)
+  if (!isProfileActivated(activeProfile)) {
     return NextResponse.json({ error: 'Account not verified' }, { status: 403, headers: CORS })
   }
 
@@ -269,15 +292,19 @@ export async function GET(req: Request) {
       id: row.user_id,
       token: row.token,
       supabaseToken: row.supabase_token,
-      username: profile.username,
-      country: profile.country_code,
-      trustScore: profile.trust_score,
-      isPremium: profile.is_premium,
-      totalShared: profile.total_bytes_shared,
-      totalUsed: profile.total_bytes_used,
-      isSharing: profile.is_sharing,
-      hasAcceptedProviderTerms: profile.has_accepted_provider_terms ?? false,
-      dailyLimitMb: profile.daily_share_limit_mb,
+      username: activeProfile?.username,
+      country: activeProfile?.country_code,
+      trustScore: activeProfile?.trust_score,
+      role: activeProfile?.role,
+      isPremium: activeProfile?.is_premium,
+      totalShared: activeProfile?.total_bytes_shared,
+      totalUsed: activeProfile?.total_bytes_used,
+      isSharing: activeProfile?.is_sharing,
+      contributionCreditsBytes: activeProfile?.contribution_credits_bytes,
+      walletBalanceUsd: activeProfile?.wallet_balance_usd,
+      walletPendingPayoutUsd: activeProfile?.wallet_pending_payout_usd,
+      hasAcceptedProviderTerms: activeProfile?.has_accepted_provider_terms ?? false,
+      dailyLimitMb: activeProfile?.daily_share_limit_mb,
     },
   }, { headers: CORS })
 }

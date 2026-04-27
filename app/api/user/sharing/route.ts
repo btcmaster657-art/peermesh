@@ -117,6 +117,7 @@ type ProviderDeviceStateRow = {
 }
 
 type ProfileStateRow = {
+  role: string | null
   total_bytes_shared: number | null
   total_bytes_used: number | null
   bandwidth_used_month: number | null
@@ -126,6 +127,10 @@ type ProfileStateRow = {
   is_premium: boolean | null
   daily_share_limit_mb: number | null
   has_accepted_provider_terms: boolean | null
+  contribution_credits_bytes: number | null
+  wallet_balance_usd: number | null
+  wallet_pending_payout_usd: number | null
+  payout_currency: string | null
   share_bytes_today: number | null
   share_bytes_today_date: string | null
   state_actor: string | null
@@ -226,6 +231,15 @@ function selectPrivateShareRow(
     if (slotZero) return slotZero
   }
   return rows[0] ?? null
+}
+
+function resolveConfiguredSlots(rows: ProviderDeviceStateRow[], fallback = 1): number {
+  const highest = rows.reduce((max, row) => {
+    const value = Number.parseInt(String(row.connection_slots ?? ''), 10)
+    if (!Number.isInteger(value) || value < 1) return max
+    return Math.max(max, value)
+  }, 0)
+  return Math.max(1, highest || fallback)
 }
 
 function isMatchingPrivateShareKey(deviceKey: string, baseDeviceId: string): boolean {
@@ -496,7 +510,7 @@ export async function GET(req: Request) {
 
   const { data, error } = await adminClient
     .from('profiles')
-    .select('total_bytes_shared, total_bytes_used, bandwidth_used_month, bandwidth_limit, trust_score, is_sharing, is_premium, daily_share_limit_mb, has_accepted_provider_terms, share_bytes_today, share_bytes_today_date, state_actor, state_changed_at')
+    .select('role, total_bytes_shared, total_bytes_used, bandwidth_used_month, bandwidth_limit, trust_score, is_sharing, is_premium, daily_share_limit_mb, has_accepted_provider_terms, contribution_credits_bytes, wallet_balance_usd, wallet_pending_payout_usd, payout_currency, share_bytes_today, share_bytes_today_date, state_actor, state_changed_at')
     .eq('id', userId)
     .single<ProfileStateRow>()
 
@@ -518,6 +532,7 @@ export async function GET(req: Request) {
   const slotLimits = slotLimitRows.map(serializeSlotLimit)
   const selectedProviderRow = selectConnectionSlotState(providerRows, deviceId, resolvedBaseDeviceId)
   return NextResponse.json({
+    role: data.role,
     total_bytes_shared: data.total_bytes_shared,
     total_bytes_used: data.total_bytes_used,
     bandwidth_used_month: data.bandwidth_used_month,
@@ -527,6 +542,10 @@ export async function GET(req: Request) {
     is_premium: data.is_premium,
     daily_share_limit_mb: data.daily_share_limit_mb,
     has_accepted_provider_terms: data.has_accepted_provider_terms,
+    contribution_credits_bytes: data.contribution_credits_bytes,
+    wallet_balance_usd: data.wallet_balance_usd,
+    wallet_pending_payout_usd: data.wallet_pending_payout_usd,
+    payout_currency: data.payout_currency,
     profile_sync: serializeSyncState(data),
     private_share: privateShare,
     private_shares: privateShares,
@@ -542,6 +561,7 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   const body = await req.json().catch(() => ({}))
   const stateActor = getRequestStateActor(req)
+  const stateChangedAt = new Date().toISOString()
 
   // Desktop bandwidth report: { bytes: number }
   if (typeof body.bytes === 'number' && body.bytes > 0) {
@@ -574,6 +594,7 @@ export async function POST(req: Request) {
           slot_index: slotIndex,
           bytes_today: nextBytesToday,
           bytes_today_date: today,
+          state_changed_at: stateChangedAt,
           updated_at: new Date().toISOString(),
         }, { onConflict: 'user_id,device_id' })
 
@@ -645,6 +666,7 @@ export async function POST(req: Request) {
       enabled,
       expires_at: expiresAt,
       state_actor: stateActor,
+      state_changed_at: stateChangedAt,
       updated_at: new Date().toISOString(),
     }
 
@@ -666,8 +688,10 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: error?.message ?? 'Could not update private sharing' }, { status: 500 })
     }
 
-    // Clean up stale slots that no longer match the current slot configuration
-    await cleanupStalePrivateShareSlots(userId, baseDeviceId)
+    // Clean up stale slots that no longer match the current slot configuration.
+    const providerRows = await loadProviderDeviceStates(userId, baseDeviceId)
+    const configuredSlots = resolveConfiguredSlots(providerRows)
+    await cleanupStalePrivateShareSlots(userId, baseDeviceId, configuredSlots)
 
     const privateShareRows = await loadPrivateShareDevices(userId, baseDeviceId)
     const slotLimitRows = await loadSlotLimitDevices(userId, baseDeviceId)
@@ -693,7 +717,7 @@ export async function POST(req: Request) {
     }
     const { data: updatedProfile, error: updateError } = await adminClient
       .from('profiles')
-      .update({ daily_share_limit_mb: limitMb ?? null, state_actor: stateActor })
+      .update({ daily_share_limit_mb: limitMb ?? null, state_actor: stateActor, state_changed_at: stateChangedAt })
       .eq('id', userId)
       .select('daily_share_limit_mb, state_actor, state_changed_at')
       .single()
@@ -744,6 +768,7 @@ export async function POST(req: Request) {
           base_device_id: baseDeviceId,
           slot_index: slotIndex,
           state_actor: stateActor,
+          state_changed_at: stateChangedAt,
           updated_at: nowIso,
         })
         .eq('id', existing.id)
@@ -759,6 +784,7 @@ export async function POST(req: Request) {
           slot_index: slotIndex,
           daily_limit_mb: limitMb ?? null,
           state_actor: stateActor,
+          state_changed_at: stateChangedAt,
           bytes_today: 0,
           bytes_today_date: new Date().toISOString().slice(0, 10),
           updated_at: nowIso,
@@ -782,7 +808,7 @@ export async function POST(req: Request) {
       const normalizedSlots = Math.max(1, Math.min(32, Number.parseInt(String(body.connectionSlots), 10) || 1))
       await adminClient
         .from('provider_devices')
-        .update({ connection_slots: normalizedSlots, state_actor: stateActor })
+        .update({ connection_slots: normalizedSlots, state_actor: stateActor, state_changed_at: stateChangedAt })
         .eq('user_id', userId)
         .like('device_id', `${baseDeviceId}_slot_%`)
 
@@ -807,7 +833,7 @@ export async function POST(req: Request) {
 
   const { data: updatedProfile, error: updateError } = await adminClient
     .from('profiles')
-    .update({ is_sharing: body.isSharing, state_actor: stateActor })
+    .update({ is_sharing: body.isSharing, state_actor: stateActor, state_changed_at: stateChangedAt })
     .eq('id', userId)
     .select('is_sharing, state_actor, state_changed_at')
     .single()
@@ -828,6 +854,7 @@ export async function PUT(req: Request) {
   const body = await req.json().catch(() => ({}))
   const { device_id, user_id } = body
   const stateActor = getRequestStateActor(req)
+  const stateChangedAt = new Date().toISOString()
 
   if (!device_id) {
     return NextResponse.json({ error: 'device_id required' }, { status: 400 })
@@ -888,13 +915,13 @@ export async function PUT(req: Request) {
 
   await adminClient
     .from('provider_devices')
-    .update(providerUpdate)
+    .update({ ...providerUpdate, state_changed_at: stateChangedAt })
     .eq('user_id', userId)
     .eq('device_id', device_id)
 
   await adminClient
     .from('profiles')
-    .update({ state_actor: stateActor })
+    .update({ state_actor: stateActor, state_changed_at: stateChangedAt })
     .eq('id', userId)
 
   return NextResponse.json({ ok: true })
@@ -905,6 +932,7 @@ export async function DELETE(req: Request) {
   const body = await req.json().catch(() => ({}))
   const { device_id, user_id } = body
   const stateActor = getRequestStateActor(req)
+  const stateChangedAt = new Date().toISOString()
 
   if (!device_id) return NextResponse.json({ error: 'device_id required' }, { status: 400 })
 
@@ -913,7 +941,7 @@ export async function DELETE(req: Request) {
 
   await adminClient
     .from('provider_devices')
-    .update({ state_actor: stateActor })
+    .update({ state_actor: stateActor, state_changed_at: stateChangedAt })
     .eq('user_id', userId)
     .eq('device_id', device_id)
 
@@ -924,7 +952,7 @@ export async function DELETE(req: Request) {
 
   await adminClient
     .from('profiles')
-    .update({ state_actor: stateActor })
+    .update({ state_actor: stateActor, state_changed_at: stateChangedAt })
     .eq('id', userId)
 
   // Clean up any other stale devices so is_sharing never stays stale

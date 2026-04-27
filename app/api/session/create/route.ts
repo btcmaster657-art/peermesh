@@ -6,6 +6,7 @@ import { verifyDesktopToken } from '@/lib/desktop-token'
 import { createHmac } from 'crypto'
 import { isPrivateShareActive, normalizePrivateShareCode } from '@/lib/private-sharing'
 import { getRelayFallbackList, relayHttpUrl, RELAY_ENDPOINTS } from '@/lib/relay-endpoints'
+import { buildOccupiedProviderDeviceSet, filterAvailableProviderDevices } from '@/lib/provider-capacity'
 
 const RECEIPT_SECRET = process.env.RELAY_SECRET ?? process.env.RECEIPT_SECRET ?? 'dev-secret'
 
@@ -84,21 +85,33 @@ export async function POST(req: Request) {
 
   const { data: profile } = await adminClient
     .from('profiles')
-    .select('trust_score, is_verified, is_premium, is_sharing, bandwidth_used_month, bandwidth_limit, preferred_providers')
+    .select('trust_score, is_verified, phone_number, is_premium, is_sharing, bandwidth_used_month, bandwidth_limit, preferred_providers, wallet_balance_usd, contribution_credits_bytes')
     .eq('id', userId)
     .single()
 
-  if (!profile?.is_verified) {
+  let activeProfile = profile
+  if (!activeProfile?.is_verified && activeProfile?.phone_number) {
+    await adminClient
+      .from('profiles')
+      .update({ is_verified: true, verified_at: new Date().toISOString() })
+      .eq('id', userId)
+    activeProfile = activeProfile ? { ...activeProfile, is_verified: true } : activeProfile
+  }
+
+  if (!activeProfile?.is_verified) {
     return NextResponse.json({ error: 'Account not verified' }, { status: 403 })
   }
-  if (!isUserTrusted(profile.trust_score)) {
+  if (!isUserTrusted(activeProfile.trust_score)) {
     return NextResponse.json({ error: 'Account suspended due to low trust score' }, { status: 403 })
   }
-  if (profile.bandwidth_used_month >= profile.bandwidth_limit) {
-    return NextResponse.json({ error: 'Monthly bandwidth limit reached. Upgrade to premium.' }, { status: 403 })
+  if (activeProfile.bandwidth_used_month >= activeProfile.bandwidth_limit) {
+    return NextResponse.json({ error: 'Monthly bandwidth limit reached. Wait for reset or fund your USD wallet for higher usage.' }, { status: 403 })
   }
-  if (!profile.is_premium && !profile.is_sharing) {
-    return NextResponse.json({ error: 'FREE TIER - Enable sharing above to connect, or upgrade to premium to browse without sharing.' }, { status: 403 })
+  const hasPaidAccess = Number(activeProfile.wallet_balance_usd ?? 0) > 0
+    || Number(activeProfile.contribution_credits_bytes ?? 0) > 0
+    || !!activeProfile.is_premium
+  if (!hasPaidAccess && !activeProfile.is_sharing) {
+    return NextResponse.json({ error: 'FREE LAYER - Enable sharing to connect, or fund your USD wallet to browse without sharing.' }, { status: 403 })
   }
 
   // Query live provider devices for this country to build a targeted relay list.
@@ -108,14 +121,14 @@ export async function POST(req: Request) {
   const orderedRelays = await getRelayFallbackList()
 
   let providerRelayUrls: string[] = []
-  let preferredProviderUserId = (profile.preferred_providers as Record<string, string>)?.[country] ?? null
+  let preferredProviderUserId = (activeProfile.preferred_providers as Record<string, string>)?.[country] ?? null
   let privateProviderUserId: string | null = null
   let privateBaseDeviceId: string | null = null
 
   if (!hasPrivateCode) {
     const { data: liveProviders } = await adminClient
       .from('provider_devices')
-      .select('user_id, relay_url, device_id')
+      .select('user_id, relay_url, device_id, country_code')
       .eq('country_code', country)
       .neq('user_id', userId)
       .gt('last_heartbeat', cutoff)
@@ -142,6 +155,17 @@ export async function POST(req: Request) {
             && row.device_id?.startsWith(`${privateRow.base_device_id}_slot_`)
         })
       })
+    }
+
+    const publicDeviceIds = publicProviders.map((row) => row.device_id).filter(Boolean)
+    if (publicDeviceIds.length > 0) {
+      const { data: activeSessions } = await adminClient
+        .from('sessions')
+        .select('provider_device_id')
+        .eq('status', 'active')
+        .in('provider_device_id', publicDeviceIds)
+      const occupiedDevices = buildOccupiedProviderDeviceSet(activeSessions)
+      publicProviders = filterAvailableProviderDevices(publicProviders, occupiedDevices)
     }
 
     const rawRelayUrls = [...new Set(publicProviders.map(row => row.relay_url).filter(Boolean) as string[])]

@@ -1,137 +1,376 @@
 'use client'
 
-import { useState } from 'react'
-import { useRouter } from 'next/navigation'
+import { Suspense, useCallback, useEffect, useMemo, useState } from 'react'
+import Link from 'next/link'
+import { useSearchParams } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
+import { formatBytes } from '@/lib/utils'
 
-const BYPASS = process.env.NEXT_PUBLIC_BYPASS_VERIFICATION === 'true'
+type WalletSummary = {
+  profile: {
+    role: string
+    contribution_credits_bytes: number
+    wallet_balance_usd: number
+    wallet_pending_payout_usd: number
+    payout_currency: string | null
+  }
+  ledger: Array<{
+    id: string
+    kind: string
+    amount_usd: number
+    currency: string
+    reference: string | null
+    created_at: string
+  }>
+  payments: Array<{
+    id: string
+    tx_ref: string
+    status: string
+    amount_usd: number
+    local_amount: number | null
+    local_currency: string | null
+    created_at: string
+    verified_at: string | null
+  }>
+  payoutPreview?: {
+    destination_currency: string
+    rate?: number
+    destination_amount?: number
+    error?: string
+  } | null
+}
 
-export default function PaymentVerifyPage() {
-  const router = useRouter()
+type QuoteResponse = {
+  quote: {
+    estimatedUsd: number
+    constraints: Array<{ code: string; message: string }>
+    tier: string
+    bandwidthGb: number
+    rpm: number
+    periodHours: number
+    sessionMode: string
+  }
+}
+
+const cardStyle: React.CSSProperties = {
+  background: 'var(--surface)',
+  border: '1px solid var(--border)',
+  borderRadius: '12px',
+  padding: '16px',
+}
+
+function PaymentVerifyPageClient() {
   const supabase = createClient()
+  const searchParams = useSearchParams()
+  const [summary, setSummary] = useState<WalletSummary | null>(null)
+  const [quote, setQuote] = useState<QuoteResponse['quote'] | null>(null)
+  const [amountUsd, setAmountUsd] = useState('10')
+  const [tier, setTier] = useState('standard')
+  const [bandwidthGb, setBandwidthGb] = useState(1)
+  const [rpm, setRpm] = useState(60)
+  const [periodHours, setPeriodHours] = useState(1)
+  const [sessionMode, setSessionMode] = useState<'rotating' | 'sticky'>('rotating')
+  const [loading, setLoading] = useState(true)
+  const [funding, setFunding] = useState(false)
+  const [verifying, setVerifying] = useState(false)
   const [error, setError] = useState('')
-  const [loading, setLoading] = useState(false)
+  const [notice, setNotice] = useState('')
 
-  async function handleVerify(bypass = false) {
-    setError('')
+  const callbackStatus = searchParams.get('status')
+  const callbackTransactionId = searchParams.get('transaction_id') ?? searchParams.get('transactionId')
+  const callbackTxRef = searchParams.get('tx_ref') ?? searchParams.get('txRef')
+
+  const contributionLabel = useMemo(() => {
+    const bytes = Number(summary?.profile.contribution_credits_bytes ?? 0)
+    return formatBytes(bytes)
+  }, [summary?.profile.contribution_credits_bytes])
+
+  const getAccessToken = useCallback(async () => {
+    const { data: { session } } = await supabase.auth.getSession()
+    return session?.access_token ?? null
+  }, [supabase])
+
+  const loadSummary = useCallback(async () => {
     setLoading(true)
+    setError('')
     try {
-      const { data: { session } } = await supabase.auth.getSession()
-      const res = await fetch('/api/verify/payment', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(session ? { 'Authorization': `Bearer ${session.access_token}` } : {}),
-        },
-        body: JSON.stringify({ bypass }),
+      const token = await getAccessToken()
+      const res = await fetch('/api/billing/wallet', {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
       })
       const data = await res.json()
-      if (data.error) throw new Error(data.error)
-      router.push('/dashboard')
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Payment failed')
+      if (!res.ok) throw new Error(data.error || 'Could not load wallet')
+      setSummary(data)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not load wallet')
     } finally {
       setLoading(false)
     }
+  }, [getAccessToken])
+
+  const loadQuote = useCallback(async () => {
+    try {
+      const token = await getAccessToken()
+      const res = await fetch('/api/billing/quote', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ tier, bandwidthGb, rpm, periodHours, sessionMode }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Could not calculate quote')
+      setQuote(data.quote)
+    } catch (err) {
+      setQuote(null)
+      setError(err instanceof Error ? err.message : 'Could not calculate quote')
+    }
+  }, [bandwidthGb, getAccessToken, periodHours, rpm, sessionMode, tier])
+
+  const verifyReturnedPayment = useCallback(async () => {
+    if (!callbackTransactionId || verifying) return
+    setVerifying(true)
+    setError('')
+    setNotice('Verifying wallet top-up...')
+    try {
+      const token = await getAccessToken()
+      const res = await fetch('/api/billing/flutterwave/verify', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          transactionId: callbackTransactionId,
+          txRef: callbackTxRef,
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Payment verification failed')
+      setNotice(`Wallet funded successfully. New balance: $${Number(data.walletBalanceUsd ?? 0).toFixed(2)}`)
+      await loadSummary()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Payment verification failed')
+      setNotice('')
+    } finally {
+      setVerifying(false)
+    }
+  }, [callbackTransactionId, callbackTxRef, getAccessToken, loadSummary, verifying])
+
+  async function handleFundWallet() {
+    setFunding(true)
+    setError('')
+    setNotice('')
+    try {
+      const numericAmount = Math.round((Number(amountUsd) || 0) * 100) / 100
+      const token = await getAccessToken()
+      const res = await fetch('/api/billing/flutterwave/checkout', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ amountUsd: numericAmount }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Could not start checkout')
+      if (!data.checkoutUrl) throw new Error('Flutterwave did not return a checkout URL')
+      window.location.href = data.checkoutUrl
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not start checkout')
+      setFunding(false)
+    }
   }
 
+  useEffect(() => {
+    loadSummary()
+  }, [loadSummary])
+
+  useEffect(() => {
+    loadQuote()
+  }, [loadQuote])
+
+  useEffect(() => {
+    if (callbackStatus === 'successful' && callbackTransactionId) {
+      verifyReturnedPayment()
+      return
+    }
+    if (callbackStatus === 'cancelled') {
+      setNotice('Flutterwave checkout was cancelled before payment completed.')
+    }
+  }, [callbackStatus, callbackTransactionId, callbackTxRef, verifyReturnedPayment])
+
   return (
-    <main className="flex flex-1 items-center justify-center px-6 py-20">
-      <div style={{ width: '100%', maxWidth: '400px' }}>
-        <div style={{ fontFamily: 'var(--font-geist-mono)', color: 'var(--accent)', fontSize: '13px', letterSpacing: '4px', marginBottom: '32px', textAlign: 'center' }}>
-          PEERMESH
+    <main className="flex flex-1 justify-center px-6 py-16">
+      <div style={{ width: '100%', maxWidth: '760px', display: 'grid', gap: '16px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
+          <div>
+            <div style={{ fontFamily: 'var(--font-geist-mono)', color: 'var(--accent)', fontSize: '12px', letterSpacing: '3px', marginBottom: '6px' }}>
+              PEERMESH BILLING
+            </div>
+            <h1 style={{ fontSize: '24px', fontWeight: 600, margin: 0 }}>Wallet and API usage</h1>
+          </div>
+          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+            <Link href="/dashboard" style={{ padding: '9px 12px', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text)', textDecoration: 'none', fontFamily: 'var(--font-geist-mono)', fontSize: '11px' }}>
+              DASHBOARD
+            </Link>
+            <Link href="/api-docs" style={{ padding: '9px 12px', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text)', textDecoration: 'none', fontFamily: 'var(--font-geist-mono)', fontSize: '11px' }}>
+              API DOCS
+            </Link>
+          </div>
         </div>
 
-        {/* Progress */}
-        <div style={{ display: 'flex', gap: '8px', marginBottom: '32px' }}>
-          {['Phone', 'Payment', 'Done'].map((label, i) => (
-            <div key={label} style={{ flex: 1, textAlign: 'center' }}>
-              <div style={{ height: '3px', borderRadius: '2px', background: i <= 1 ? 'var(--accent)' : 'var(--border)', marginBottom: '6px' }} />
-              <span style={{ fontSize: '10px', fontFamily: 'var(--font-geist-mono)', color: i <= 1 ? 'var(--accent)' : 'var(--muted)', letterSpacing: '0.5px' }}>
-                {label.toUpperCase()}
-              </span>
-            </div>
-          ))}
-        </div>
-
-        <h2 style={{ fontSize: '20px', fontWeight: 600, marginBottom: '8px' }}>One-time verification</h2>
-        <p style={{ color: 'var(--muted)', fontSize: '13px', marginBottom: '28px', lineHeight: 1.6 }}>
-          A $1 charge confirms your identity and protects every peer in the network.
-          Your card is saved for optional premium upgrades — no auto-charges.
-        </p>
-
-        {/* What you get */}
-        <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '10px', padding: '16px', marginBottom: '24px' }}>
-          {[
-            ['✓', 'Full access to peer network'],
-            ['✓', 'Browse from 20+ countries'],
-            ['✓', '5GB free bandwidth/month'],
-            ['✓', 'Accountability receipt — your IP is protected'],
-          ].map(([icon, text]) => (
-            <div key={text} style={{ display: 'flex', gap: '10px', marginBottom: '10px', fontSize: '13px' }}>
-              <span style={{ color: 'var(--accent)', fontFamily: 'var(--font-geist-mono)' }}>{icon}</span>
-              <span style={{ color: 'var(--text)' }}>{text}</span>
-            </div>
-          ))}
+        <div style={{ ...cardStyle, background: 'rgba(0,255,136,0.05)', border: '1px solid rgba(0,255,136,0.25)' }}>
+          <div style={{ fontSize: '13px', color: 'var(--muted)', lineHeight: 1.7 }}>
+            Phone verification activates your account. Wallet funding is optional and only used for developer API usage or browsing without sharing. Contribution credits are always spent before paid balance.
+          </div>
         </div>
 
         {error && (
-          <p style={{ color: 'var(--danger)', fontSize: '13px', marginBottom: '16px', padding: '10px 14px', background: 'rgba(255,68,102,0.1)', borderRadius: '8px', border: '1px solid rgba(255,68,102,0.2)' }}>
+          <div style={{ ...cardStyle, borderColor: 'rgba(255,96,96,0.35)', background: 'rgba(255,96,96,0.08)', color: '#ff8080', fontSize: '13px' }}>
             {error}
-          </p>
-        )}
-
-        {BYPASS ? (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-            <div style={{ padding: '10px 14px', background: 'rgba(255,170,0,0.1)', border: '1px solid rgba(255,170,0,0.3)', borderRadius: '8px', fontSize: '12px', color: '#ffaa00', fontFamily: 'var(--font-geist-mono)', textAlign: 'center' }}>
-              TEST MODE — no real charge
-            </div>
-            <button
-              onClick={() => handleVerify(true)}
-              disabled={loading}
-              style={{
-                width: '100%',
-                padding: '14px',
-                background: loading ? 'var(--muted)' : 'var(--accent)',
-                color: '#000',
-                border: 'none',
-                borderRadius: '10px',
-                fontFamily: 'var(--font-geist-mono)',
-                fontSize: '13px',
-                fontWeight: 700,
-                letterSpacing: '0.5px',
-                cursor: loading ? 'not-allowed' : 'pointer',
-              }}
-            >
-              {loading ? 'ACTIVATING...' : 'SKIP — ACTIVATE TEST ACCOUNT'}
-            </button>
           </div>
-        ) : (
-          <button
-            onClick={() => handleVerify(false)}
-            disabled={loading}
-            style={{
-              width: '100%',
-              padding: '14px',
-              background: loading ? 'var(--muted)' : 'var(--accent)',
-              color: '#000',
-              border: 'none',
-              borderRadius: '10px',
-              fontFamily: 'var(--font-geist-mono)',
-              fontSize: '13px',
-              fontWeight: 700,
-              letterSpacing: '0.5px',
-              cursor: loading ? 'not-allowed' : 'pointer',
-            }}
-          >
-            {loading ? 'PROCESSING...' : 'PAY $1 AND ACTIVATE'}
-          </button>
         )}
 
-        <p style={{ marginTop: '16px', color: 'var(--muted)', fontSize: '11px', textAlign: 'center', lineHeight: 1.6 }}>
-          Secured by Stripe. Cancel premium anytime. $1 is non-refundable.
-        </p>
+        {notice && (
+          <div style={{ ...cardStyle, borderColor: 'rgba(0,255,136,0.35)', background: 'rgba(0,255,136,0.08)', color: 'var(--accent)', fontSize: '13px' }}>
+            {notice}
+          </div>
+        )}
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '12px' }}>
+          <div style={cardStyle}>
+            <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--muted)', letterSpacing: '1px', marginBottom: '8px' }}>USD WALLET</div>
+            <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '28px', color: 'var(--accent)' }}>
+              {loading ? '...' : `$${Number(summary?.profile.wallet_balance_usd ?? 0).toFixed(2)}`}
+            </div>
+          </div>
+          <div style={cardStyle}>
+            <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--muted)', letterSpacing: '1px', marginBottom: '8px' }}>CONTRIBUTION CREDITS</div>
+            <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '20px', color: 'var(--accent)' }}>{loading ? '...' : contributionLabel}</div>
+          </div>
+          <div style={cardStyle}>
+            <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--muted)', letterSpacing: '1px', marginBottom: '8px' }}>PENDING PAYOUT</div>
+            <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '20px', color: 'var(--accent)' }}>
+              {loading ? '...' : `$${Number(summary?.profile.wallet_pending_payout_usd ?? 0).toFixed(2)}`}
+            </div>
+            {summary?.payoutPreview?.destination_amount != null && (
+              <div style={{ fontSize: '12px', color: 'var(--muted)', marginTop: '8px' }}>
+                ≈ {summary.payoutPreview.destination_amount.toFixed(2)} {summary.payoutPreview.destination_currency}
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.2fr) minmax(0, 1fr)', gap: '16px' }}>
+          <div style={cardStyle}>
+            <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--accent)', letterSpacing: '1px', marginBottom: '12px' }}>FUND WALLET</div>
+            <div style={{ display: 'grid', gap: '10px' }}>
+              <label style={{ fontSize: '12px', color: 'var(--muted)' }}>
+                Amount in USD
+                <input
+                  value={amountUsd}
+                  onChange={(e) => setAmountUsd(e.target.value.replace(/[^\d.]/g, ''))}
+                  style={{ width: '100%', marginTop: '6px', padding: '10px 12px', borderRadius: '8px', border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)', fontFamily: 'var(--font-geist-mono)', boxSizing: 'border-box' }}
+                />
+              </label>
+              <button
+                onClick={handleFundWallet}
+                disabled={funding || verifying}
+                style={{ padding: '12px 14px', borderRadius: '8px', border: 'none', background: 'var(--accent)', color: '#000', fontFamily: 'var(--font-geist-mono)', fontWeight: 700, cursor: funding || verifying ? 'not-allowed' : 'pointer', opacity: funding || verifying ? 0.7 : 1 }}
+              >
+                {funding ? 'OPENING FLUTTERWAVE...' : 'PAY WITH FLUTTERWAVE'}
+              </button>
+              <div style={{ fontSize: '12px', color: 'var(--muted)', lineHeight: 1.7 }}>
+                All top-ups settle into your PeerMesh USD wallet. Provider payouts stay in USD internally and can be converted to your payout currency when disbursed.
+              </div>
+            </div>
+          </div>
+
+          <div style={cardStyle}>
+            <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--accent)', letterSpacing: '1px', marginBottom: '12px' }}>API USAGE ESTIMATE</div>
+            <div style={{ display: 'grid', gap: '10px' }}>
+              <label style={{ fontSize: '12px', color: 'var(--muted)' }}>
+                Tier
+                <select value={tier} onChange={(e) => setTier(e.target.value)} style={{ width: '100%', marginTop: '6px', padding: '10px 12px', borderRadius: '8px', border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)' }}>
+                  <option value="standard">Standard</option>
+                  <option value="advanced">Advanced</option>
+                  <option value="enterprise">Enterprise</option>
+                  <option value="contributor">Contributor</option>
+                </select>
+              </label>
+              <label style={{ fontSize: '12px', color: 'var(--muted)' }}>
+                Bandwidth (GB)
+                <input type="number" min={0.05} max={1000} step={0.05} value={bandwidthGb} onChange={(e) => setBandwidthGb(Number(e.target.value) || 1)} style={{ width: '100%', marginTop: '6px', padding: '10px 12px', borderRadius: '8px', border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)' }} />
+              </label>
+              <label style={{ fontSize: '12px', color: 'var(--muted)' }}>
+                RPM
+                <input type="number" min={1} max={2400} step={1} value={rpm} onChange={(e) => setRpm(Number(e.target.value) || 60)} style={{ width: '100%', marginTop: '6px', padding: '10px 12px', borderRadius: '8px', border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)' }} />
+              </label>
+              <label style={{ fontSize: '12px', color: 'var(--muted)' }}>
+                Duration (hours)
+                <input type="number" min={1} max={720} step={1} value={periodHours} onChange={(e) => setPeriodHours(Number(e.target.value) || 1)} style={{ width: '100%', marginTop: '6px', padding: '10px 12px', borderRadius: '8px', border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)' }} />
+              </label>
+              <label style={{ fontSize: '12px', color: 'var(--muted)' }}>
+                Session mode
+                <select value={sessionMode} onChange={(e) => setSessionMode(e.target.value === 'sticky' ? 'sticky' : 'rotating')} style={{ width: '100%', marginTop: '6px', padding: '10px 12px', borderRadius: '8px', border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)' }}>
+                  <option value="rotating">Rotating</option>
+                  <option value="sticky">Sticky</option>
+                </select>
+              </label>
+              <div style={{ paddingTop: '6px', borderTop: '1px solid var(--border)' }}>
+                <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '22px', color: 'var(--accent)' }}>
+                  {quote ? `$${quote.estimatedUsd.toFixed(2)}` : '...'}
+                </div>
+                <div style={{ fontSize: '12px', color: 'var(--muted)', marginTop: '4px' }}>
+                  Estimated cost for {quote?.tier ?? tier} usage.
+                </div>
+                {(quote?.constraints ?? []).length > 0 && (
+                  <div style={{ marginTop: '8px', display: 'grid', gap: '6px' }}>
+                    {quote?.constraints.map((constraint) => (
+                      <div key={constraint.code} style={{ fontSize: '12px', color: constraint.code.includes('verification') ? '#ffcc66' : '#ff8080' }}>
+                        {constraint.message}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div style={cardStyle}>
+          <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--accent)', letterSpacing: '1px', marginBottom: '12px' }}>RECENT PAYMENTS</div>
+          <div style={{ display: 'grid', gap: '8px' }}>
+            {(summary?.payments ?? []).length === 0 && (
+              <div style={{ fontSize: '12px', color: 'var(--muted)' }}>No wallet top-ups yet.</div>
+            )}
+            {(summary?.payments ?? []).map((payment) => (
+              <div key={payment.id} style={{ display: 'grid', gridTemplateColumns: '1fr auto auto', gap: '10px', alignItems: 'center', padding: '10px 0', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
+                <div>
+                  <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '11px', color: 'var(--text)' }}>{payment.tx_ref}</div>
+                  <div style={{ fontSize: '11px', color: 'var(--muted)', marginTop: '4px' }}>{new Date(payment.created_at).toLocaleString()}</div>
+                </div>
+                <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '11px', color: payment.status === 'successful' ? 'var(--accent)' : '#ffcc66' }}>
+                  {payment.status.toUpperCase()}
+                </div>
+                <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '11px', color: 'var(--text)' }}>
+                  ${Number(payment.amount_usd ?? 0).toFixed(2)}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
       </div>
     </main>
+  )
+}
+
+export default function PaymentVerifyPage() {
+  return (
+    <Suspense fallback={<main className="flex flex-1 items-center justify-center px-6 py-20"><div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '11px', color: 'var(--muted)' }}>LOADING BILLING...</div></main>}>
+      <PaymentVerifyPageClient />
+    </Suspense>
   )
 }

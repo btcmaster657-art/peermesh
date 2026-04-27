@@ -133,8 +133,17 @@ export default function AuthForm() {
         const { data: profile } = await supabase
           .from('profiles').select('is_verified, phone_number').eq('id', data.user.id).single()
 
+        let isVerified = !!profile?.is_verified
+        if (!isVerified && profile?.phone_number) {
+          await supabase
+            .from('profiles')
+            .update({ is_verified: true, verified_at: new Date().toISOString() })
+            .eq('id', data.user.id)
+          isVerified = true
+        }
+
         if (!profile?.phone_number) return router.push('/verify/phone')
-        if (!profile?.is_verified)  return router.push('/verify/payment')
+        if (!isVerified) return router.push('/verify/phone')
 
         if (extId) {
           await fetch('/api/extension-auth', {
