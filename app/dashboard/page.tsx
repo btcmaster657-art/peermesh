@@ -47,6 +47,12 @@ type SlotLimitEntry = {
   can_accept_sessions: boolean
 } & SyncState
 
+type DesktopAuthBundle = {
+  token: string
+  refreshToken: string
+  deviceSessionId: string
+}
+
 const DASHBOARD_SHARING_HEADERS = {
   'Content-Type': 'application/json',
   'x-peermesh-actor': 'dashboard',
@@ -241,7 +247,7 @@ export default function Dashboard() {
   const supabase = createClient()
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const pendingShareTargetRef = useRef<boolean | null>(null)
-  const desktopAuthTokenRef = useRef('')
+  const desktopAuthTokenRef = useRef<DesktopAuthBundle | null>(null)
   // FIX: tracks the explicit user slot selection — survives polls and stale closures
   const userSelectedSlotRef = useRef<string | null>(null)
   const privateShareReqSeqRef = useRef(0)
@@ -330,11 +336,15 @@ export default function Dashboard() {
     if (desktopAuthTokenRef.current) return desktopAuthTokenRef.current
     const response = await fetch('/api/device-token', { signal: AbortSignal.timeout(5000) })
     const data = await response.json().catch(() => ({}))
-    if (!response.ok || !data.token) {
+    if (!response.ok || !data.token || !data.refreshToken || !data.deviceSessionId) {
       throw new Error(data.error ?? 'Could not issue a desktop auth token')
     }
-    desktopAuthTokenRef.current = data.token
-    return data.token as string
+    desktopAuthTokenRef.current = {
+      token: data.token as string,
+      refreshToken: data.refreshToken as string,
+      deviceSessionId: data.deviceSessionId as string,
+    }
+    return desktopAuthTokenRef.current
   }, [])
 
   // ── Mobile detection ────────────────────────────────────────────────────────
@@ -389,7 +399,7 @@ export default function Dashboard() {
             setShareError(getHelperMismatchError(dt.where))
           } else {
             const authResult = await syncDesktopAuth({
-              token: await getDesktopAuthToken(),
+              ...(await getDesktopAuthToken()),
               userId: user.id,
               country: nextProfile.country_code,
               trust: nextProfile.trust_score,
@@ -950,7 +960,7 @@ export default function Dashboard() {
       pendingShareTargetRef.current = true
       setShareTarget(true)
       const result = await startDesktopSharing({
-        token: await getDesktopAuthToken(),
+        ...(await getDesktopAuthToken()),
         userId: profile!.id,
         country: profile!.country_code,
         trust: profile!.trust_score,

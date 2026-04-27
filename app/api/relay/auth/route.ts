@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { verifyDesktopToken } from '@/lib/desktop-token'
+import { resolveBearerUser } from '@/lib/device-sessions'
 import { adminClient } from '@/lib/supabase/admin'
 
 const RELAY_SECRET = process.env.RELAY_SECRET ?? ''
@@ -14,8 +14,10 @@ type RequesterSessionRow = {
 }
 
 async function resolveTokenUserId(token: string): Promise<{ userId: string | null; tokenKind: 'supabase' | 'desktop' | null }> {
-  const desktopUserId = verifyDesktopToken(token)
-  if (desktopUserId) return { userId: desktopUserId, tokenKind: 'desktop' }
+  const desktop = await resolveBearerUser(token)
+  if (desktop.authKind === 'desktop' && desktop.userId) {
+    return { userId: desktop.userId, tokenKind: 'desktop' }
+  }
 
   try {
     const { data } = await adminClient.auth.getUser(token)

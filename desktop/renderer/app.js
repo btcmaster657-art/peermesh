@@ -697,6 +697,8 @@ async function startDeviceFlow() {
       signingIn = true
       const signInResult = await invoke('signIn', {
         token: poll.user.token,
+        refreshToken: poll.user.refreshToken,
+        deviceSessionId: poll.user.deviceSessionId,
         userId: poll.user.id,
         country: poll.user.country || 'RW',
         trust: poll.user.trustScore || 50,

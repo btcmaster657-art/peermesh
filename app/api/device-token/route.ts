@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
+import { createDeviceSession } from '@/lib/device-sessions'
 import { createClient } from '@/lib/supabase/server'
-import { issueDesktopToken } from '@/lib/desktop-token'
 
 export async function GET() {
   const supabase = await createClient()
@@ -12,8 +12,16 @@ export async function GET() {
     return NextResponse.json({ error: 'Confirm your email before issuing a desktop token.' }, { status: 403 })
   }
 
+  const issued = await createDeviceSession({
+    userId: session.user.id,
+    actor: 'dashboard',
+  })
+
   return NextResponse.json({
-    token: issueDesktopToken(session.user.id),
+    token: issued.token,
+    refreshToken: issued.refreshToken,
+    deviceSessionId: issued.deviceSessionId,
+    refreshExpiresAt: issued.refreshExpiresAt,
     userId: session.user.id,
   })
 }

@@ -26,6 +26,7 @@ drop function if exists set_preferred_provider(uuid, text, uuid) cascade;
 
 drop view if exists peer_availability cascade;
 
+drop table if exists device_sessions cascade;
 drop table if exists extension_auth_tokens cascade;
 drop table if exists abuse_reports cascade;
 drop table if exists session_accountability cascade;
@@ -134,6 +135,8 @@ create table extension_auth_tokens (
   ext_id text not null unique,
   user_id uuid references profiles(id) on delete cascade not null,
   token text not null,
+  refresh_token text,
+  device_session_id uuid,
   supabase_token text,
   used boolean default false,
   expires_at timestamptz not null default (now() + interval '5 minutes'),
@@ -207,12 +210,36 @@ create table device_codes (
   user_code text not null unique,
   user_id uuid references profiles(id) on delete cascade,
   token text,
+  refresh_token text,
+  device_session_id uuid,
   status text default 'pending' check (status in ('pending','approved','expired','denied','revoked')),
   expires_at timestamptz not null default (now() + interval '10 minutes'),
   created_at timestamptz default now()
 );
 
+create table device_sessions (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid references profiles(id) on delete cascade not null,
+  device_code_id uuid references device_codes(id) on delete set null,
+  actor text not null default 'device_flow',
+  refresh_token_hash text not null unique,
+  refresh_expires_at timestamptz not null,
+  revoked_at timestamptz,
+  last_used_at timestamptz default now(),
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+alter table extension_auth_tokens
+  add constraint extension_auth_tokens_device_session_id_fkey
+  foreign key (device_session_id) references device_sessions(id) on delete set null;
+
+alter table device_codes
+  add constraint device_codes_device_session_id_fkey
+  foreign key (device_session_id) references device_sessions(id) on delete set null;
+
 create index on extension_auth_tokens (ext_id) where used = false;
+create index on device_sessions (user_id, created_at desc);
 create index on device_codes (device_code) where status = 'pending';
 create index on device_codes (user_code) where status = 'pending';
 
@@ -522,6 +549,9 @@ create policy "Service role only provider devices" on provider_devices for all u
 alter table device_codes enable row level security;
 create policy "Service role only device codes" on device_codes for all using (false);
 
+alter table device_sessions enable row level security;
+create policy "Service role only device sessions" on device_sessions for all using (false);
+
 alter table countries enable row level security;
 create policy "Anyone can read active countries" on countries for select using (active = true);
 
@@ -583,6 +613,57 @@ alter table sessions add column if not exists disconnect_reason text;
 
 alter table abuse_reports add column if not exists reported_user_id uuid references profiles(id) on delete set null;
 alter table abuse_reports add column if not exists report_subject text not null default 'provider';
+
+alter table extension_auth_tokens add column if not exists refresh_token text;
+alter table extension_auth_tokens add column if not exists device_session_id uuid;
+
+alter table device_codes add column if not exists refresh_token text;
+alter table device_codes add column if not exists device_session_id uuid;
+
+create table if not exists device_sessions (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid references profiles(id) on delete cascade not null,
+  device_code_id uuid references device_codes(id) on delete set null,
+  actor text not null default 'device_flow',
+  refresh_token_hash text not null unique,
+  refresh_expires_at timestamptz not null,
+  revoked_at timestamptz,
+  last_used_at timestamptz default now(),
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+create index if not exists device_sessions_user_created_idx on device_sessions (user_id, created_at desc);
+alter table device_sessions enable row level security;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'extension_auth_tokens_device_session_id_fkey'
+  ) then
+    alter table extension_auth_tokens
+      add constraint extension_auth_tokens_device_session_id_fkey
+      foreign key (device_session_id) references device_sessions(id) on delete set null;
+  end if;
+
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'device_codes_device_session_id_fkey'
+  ) then
+    alter table device_codes
+      add constraint device_codes_device_session_id_fkey
+      foreign key (device_session_id) references device_sessions(id) on delete set null;
+  end if;
+
+  if not exists (
+    select 1 from pg_policies
+    where schemaname = 'public'
+      and tablename = 'device_sessions'
+      and policyname = 'Service role only device sessions'
+  ) then
+    create policy "Service role only device sessions" on device_sessions for all using (false);
+  end if;
+end $$;
 
 create table if not exists provider_slot_limits (
   id uuid primary key default gen_random_uuid(),

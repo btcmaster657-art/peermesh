@@ -179,7 +179,16 @@ export async function setDesktopConnectionSlots(
   return { ok: true, state: await checkDesktop() }
 }
 
-export async function syncDesktopAuth(payload: { token: string; userId: string; country: string; trust: number }): Promise<{ ok: boolean; error?: string }> {
+export type DesktopAuthPayload = {
+  token: string
+  refreshToken: string
+  deviceSessionId: string
+  userId: string
+  country: string
+  trust: number
+}
+
+export async function syncDesktopAuth(payload: DesktopAuthPayload): Promise<{ ok: boolean; error?: string }> {
   try {
     const res = await fetch(`${AGENT_URL}/native/auth`, {
       method: 'POST',
@@ -197,7 +206,7 @@ export async function syncDesktopAuth(payload: { token: string; userId: string; 
   }
 }
 
-export async function startDesktopSharing(payload: { token: string; userId: string; country: string; trust: number }): Promise<{ ok: boolean; error?: string; state?: DesktopState }> {
+export async function startDesktopSharing(payload: DesktopAuthPayload): Promise<{ ok: boolean; error?: string; state?: DesktopState }> {
   try {
     const res = await fetch(`${AGENT_URL}/native/share/start`, {
       method: 'POST',

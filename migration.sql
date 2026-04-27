@@ -34,6 +34,46 @@ alter table private_share_devices add column if not exists updated_at timestampt
 alter table abuse_reports add column if not exists reported_user_id uuid references profiles(id) on delete set null;
 alter table abuse_reports add column if not exists report_subject text not null default 'provider';
 
+alter table extension_auth_tokens add column if not exists refresh_token text;
+alter table extension_auth_tokens add column if not exists device_session_id uuid;
+
+alter table device_codes add column if not exists refresh_token text;
+alter table device_codes add column if not exists device_session_id uuid;
+
+create table if not exists device_sessions (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid references profiles(id) on delete cascade not null,
+  device_code_id uuid references device_codes(id) on delete set null,
+  actor text not null default 'device_flow',
+  refresh_token_hash text not null unique,
+  refresh_expires_at timestamptz not null,
+  revoked_at timestamptz,
+  last_used_at timestamptz default now(),
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'extension_auth_tokens_device_session_id_fkey'
+  ) then
+    alter table extension_auth_tokens
+      add constraint extension_auth_tokens_device_session_id_fkey
+      foreign key (device_session_id) references device_sessions(id) on delete set null;
+  end if;
+
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'device_codes_device_session_id_fkey'
+  ) then
+    alter table device_codes
+      add constraint device_codes_device_session_id_fkey
+      foreign key (device_session_id) references device_sessions(id) on delete set null;
+  end if;
+end $$;
+
 create table if not exists wallet_ledger (
   id uuid primary key default gen_random_uuid(),
   user_id uuid references profiles(id) on delete cascade not null,
@@ -114,6 +154,7 @@ create unique index if not exists wallet_ledger_reference_uidx on wallet_ledger 
 create index if not exists payment_transactions_user_created_idx on payment_transactions (user_id, created_at desc);
 create index if not exists payment_transactions_status_idx on payment_transactions (status);
 create index if not exists provider_payouts_user_created_idx on provider_payouts (user_id, created_at desc);
+create index if not exists device_sessions_user_created_idx on device_sessions (user_id, created_at desc);
 create index if not exists api_keys_user_created_idx on api_keys (user_id, created_at desc);
 create index if not exists api_keys_key_prefix_idx on api_keys (key_prefix);
 create index if not exists api_usage_user_created_idx on api_usage (user_id, created_at desc);
@@ -126,6 +167,7 @@ create index if not exists provider_devices_country_hb_idx on provider_devices (
 alter table wallet_ledger enable row level security;
 alter table payment_transactions enable row level security;
 alter table provider_payouts enable row level security;
+alter table device_sessions enable row level security;
 alter table api_keys enable row level security;
 alter table api_usage enable row level security;
 
@@ -147,6 +189,15 @@ begin
       and policyname = 'Users can view own payment transactions'
   ) then
     create policy "Users can view own payment transactions" on payment_transactions for select using (auth.uid() = user_id);
+  end if;
+
+  if not exists (
+    select 1 from pg_policies
+    where schemaname = 'public'
+      and tablename = 'device_sessions'
+      and policyname = 'Service role only device sessions'
+  ) then
+    create policy "Service role only device sessions" on device_sessions for all using (false);
   end if;
 
   if not exists (

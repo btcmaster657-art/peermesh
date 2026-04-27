@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { adminClient } from '@/lib/supabase/admin'
-import { verifyDesktopToken } from '@/lib/desktop-token'
+import { resolveBearerUser } from '@/lib/device-sessions'
 
 const RELAY_SECRET = process.env.RELAY_SECRET ?? ''
 
@@ -92,7 +92,7 @@ export async function POST(req: Request) {
       const auth = req.headers.get('authorization') ?? ''
       const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
       if (token) {
-        userId = (await adminClient.auth.getUser(token)).data.user?.id ?? verifyDesktopToken(token) ?? null
+        userId = (await resolveBearerUser(token)).userId
       }
     }
     if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })

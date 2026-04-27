@@ -280,6 +280,8 @@ async function clearCliCredentials(reason, { rotateIdentity = false } = {}) {
   stopProfileSync()
   stopRelay()
   config.token = null
+  config.refreshToken = null
+  config.deviceSessionId = null
   config.userId = null
   config.username = null
   config.country = 'RW'
@@ -302,9 +304,15 @@ async function clearCliCredentials(reason, { rotateIdentity = false } = {}) {
 }
 
 async function tryRefreshCliToken() {
-  if (!config.userId) return false
+  if (!config.userId || !config.refreshToken || !config.deviceSessionId) return false
   try {
-    const res = await fetch(`${API_BASE}/api/extension-auth?refresh=1&userId=${encodeURIComponent(config.userId)}`, {
+    const res = await fetch(`${API_BASE}/api/extension-auth/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        deviceSessionId: config.deviceSessionId,
+        refreshToken: config.refreshToken,
+      }),
       signal: AbortSignal.timeout(5000),
     })
     if (res.status === 403) {
@@ -317,7 +325,14 @@ async function tryRefreshCliToken() {
     }
     if (!res.ok) return false
     const data = await res.json()
-    if (data.token) { config.token = data.token; saveConfig(config); clog.info('AUTH', 'cli token refreshed', { userId: config.userId }); return true }
+    if (data.token && data.refreshToken && data.deviceSessionId) {
+      config.token = data.token
+      config.refreshToken = data.refreshToken
+      config.deviceSessionId = data.deviceSessionId
+      saveConfig(config)
+      clog.info('AUTH', 'cli token refreshed', { userId: config.userId, deviceSessionId: config.deviceSessionId })
+      return true
+    }
   } catch {}
   return false
 }
@@ -1287,6 +1302,8 @@ function buildHandler(port) {
             return
           }
           if (data.token) config.token = data.token
+          if (data.refreshToken) config.refreshToken = data.refreshToken
+          if (data.deviceSessionId) config.deviceSessionId = data.deviceSessionId
           if (data.userId) config.userId = data.userId
           if (data.trust) config.trust = data.trust
           if (data.country) config.country = data.country
@@ -1564,7 +1581,7 @@ async function main() {
         await fetch(`${API_BASE}/api/extension-auth/revoke`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
-          body: JSON.stringify({ userId: config.userId }),
+          body: JSON.stringify({ userId: config.userId, deviceSessionId: config.deviceSessionId ?? null }),
           signal: AbortSignal.timeout(4000),
         })
         clog.info('AUTH', 'cli --reset: device revoked on server', { userId: config.userId })
@@ -1616,6 +1633,8 @@ async function main() {
   config.privateShares = hydratePrivateShareRows(config.privateShares)
   config.privateShare = selectPrivateShareRow(config.privateShares, config.privateShareDeviceId) ?? config.privateShare ?? null
   config.privateShareActive = !!(config.privateShare?.enabled && config.privateShare?.active)
+  config.refreshToken = config.refreshToken ?? null
+  config.deviceSessionId = config.deviceSessionId ?? null
   saveConfig(config)
 
   clog.info('PROCESS', '=== CLI START ===', {
@@ -1630,6 +1649,8 @@ async function main() {
     try {
       const user = await authenticate()
       config.token = user.token
+      config.refreshToken = user.refreshToken ?? null
+      config.deviceSessionId = user.deviceSessionId ?? null
       config.userId = user.id
       config.username = user.username
       config.country = user.country ?? 'RW'

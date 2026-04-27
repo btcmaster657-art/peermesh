@@ -135,6 +135,8 @@ let settingsWindow = null
 let running = false
 let config = {
   token: '',
+  refreshToken: '',
+  deviceSessionId: '',
   userId: '',
   country: 'RW',
   trust: 50,
@@ -239,6 +241,8 @@ async function clearDesktopAuth(reason, { rotateIdentity = false, revoke = true 
   config = {
     ...config,
     token: '',
+    refreshToken: '',
+    deviceSessionId: '',
     userId: '',
     country: 'RW',
     trust: 50,
@@ -782,6 +786,8 @@ function loadConfig() {
     sharedIdentityFile: SHARED_IDENTITY_FILE,
   })
   config.hasAcceptedProviderTerms = !!config.hasAcceptedProviderTerms
+  config.refreshToken = config.refreshToken ?? ''
+  config.deviceSessionId = config.deviceSessionId ?? ''
   config.connectionSlots = clampSlots(config.connectionSlots ?? 1)
   if (typeof config.launchOnStartup !== 'boolean') config.launchOnStartup = getDefaultLaunchOnStartup()
   if (typeof config.autoShareOnLaunch !== 'boolean') {
@@ -818,6 +824,18 @@ async function verifyStoredDesktopAuth() {
       signal: AbortSignal.timeout(5000),
     })
     if (res.ok) return true
+    if (res.status === 401) {
+      const refreshed = await tryRefreshDesktopToken()
+      if (refreshed) return true
+    }
+    if (res.status === 403) {
+      const body = await res.json().catch(() => ({}))
+      if (body.revoked === true) {
+        log.warn('AUTH', 'stored desktop token revoked', { userId: config.userId })
+        await clearDesktopAuth('stored_token_revoked')
+        return false
+      }
+    }
     log.warn('AUTH', 'stored desktop token rejected', { status: res.status, userId: config.userId })
     await clearDesktopAuth('stored_token_rejected')
     return false
@@ -828,9 +846,15 @@ async function verifyStoredDesktopAuth() {
 }
 
 async function tryRefreshDesktopToken() {
-  if (!config.userId) return false
+  if (!config.userId || !config.refreshToken || !config.deviceSessionId) return false
   try {
-    const res = await fetch(`${API_BASE}/api/extension-auth?refresh=1&userId=${encodeURIComponent(config.userId)}`, {
+    const res = await fetch(`${API_BASE}/api/extension-auth/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        deviceSessionId: config.deviceSessionId,
+        refreshToken: config.refreshToken,
+      }),
       signal: AbortSignal.timeout(5000),
     })
     if (res.status === 403) {
@@ -843,7 +867,14 @@ async function tryRefreshDesktopToken() {
     }
     if (!res.ok) return false
     const data = await res.json()
-    if (data.token) { config.token = data.token; saveConfig(); log.info('AUTH', 'desktop token refreshed', { userId: config.userId }); return true }
+    if (data.token && data.refreshToken && data.deviceSessionId) {
+      config.token = data.token
+      config.refreshToken = data.refreshToken
+      config.deviceSessionId = data.deviceSessionId
+      saveConfig()
+      log.info('AUTH', 'desktop token refreshed', { userId: config.userId, deviceSessionId: config.deviceSessionId })
+      return true
+    }
   } catch {}
   return false
 }
@@ -909,7 +940,11 @@ function getPublicState() {
   return {
     running,
     shareEnabled: !!config.shareEnabled,
-    config: { ...config, token: config.token ? '***' : '' },
+    config: {
+      ...config,
+      token: config.token ? '***' : '',
+      refreshToken: config.refreshToken ? '***' : '',
+    },
     baseDeviceId: config.baseDeviceId || null,
     connectionSlots: clampSlots(config.connectionSlots ?? 1),
     connectionSlotsSync: config.connectionSlotsSync ?? null,
@@ -1849,7 +1884,15 @@ const controlServer = http.createServer((req, res) => {
             if (!vRes.ok) { res.writeHead(401, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Token verification failed' })); return }
           } catch (e) { log.warn('CONTROL', '/native/auth verify error (offline?)', { err: e.message }) }
         }
-        config = { ...config, token: data.token ?? config.token, userId: data.userId ?? config.userId, country: data.country ?? config.country, trust: data.trust ?? config.trust }
+        config = {
+          ...config,
+          token: data.token ?? config.token,
+          refreshToken: data.refreshToken ?? config.refreshToken,
+          deviceSessionId: data.deviceSessionId ?? config.deviceSessionId,
+          userId: data.userId ?? config.userId,
+          country: data.country ?? config.country,
+          trust: data.trust ?? config.trust,
+        }
         await pollTodayBytes()
         saveConfig(); updateTray()
         log.info('CONTROL', '/native/auth Ã¢â‚¬â€ config updated', { userId: config.userId, country: config.country })
@@ -1872,7 +1915,17 @@ const controlServer = http.createServer((req, res) => {
           res.end(JSON.stringify({ error: 'This desktop is signed in as a different user' }))
           return
         }
-        config = { ...config, token: data.token ?? config.token, userId: data.userId ?? config.userId, country: data.country ?? config.country, trust: data.trust ?? config.trust, connectionSlots: clampSlots(data.slots ?? data.connectionSlots ?? config.connectionSlots), shareEnabled: true }
+        config = {
+          ...config,
+          token: data.token ?? config.token,
+          refreshToken: data.refreshToken ?? config.refreshToken,
+          deviceSessionId: data.deviceSessionId ?? config.deviceSessionId,
+          userId: data.userId ?? config.userId,
+          country: data.country ?? config.country,
+          trust: data.trust ?? config.trust,
+          connectionSlots: clampSlots(data.slots ?? data.connectionSlots ?? config.connectionSlots),
+          shareEnabled: true,
+        }
         ensureSlotStates()
         await pollTodayBytes()
         saveConfig()
@@ -2320,7 +2373,7 @@ ipcMain.handle('update-private-share', async (_, payload = {}) => {
   }
 })
 
-ipcMain.handle('sign-in', async (_, { token, userId, country, trust }) => {
+ipcMain.handle('sign-in', async (_, { token, refreshToken, deviceSessionId, userId, country, trust }) => {
   logIpc('sign-in attempt', { userId, country })
   try {
     logRequest('GET', `${API_BASE}/api/extension-auth?verify=1&userId=${userId}`)
@@ -2332,7 +2385,7 @@ ipcMain.handle('sign-in', async (_, { token, userId, country, trust }) => {
       return { success: false, error: 'Token verification failed' }
     }
   } catch (e) { log.warn('IPC', 'sign-in verify error (offline?)', { err: e.message }) }
-  config = { ...config, token, userId, country, trust }
+  config = { ...config, token, refreshToken: refreshToken ?? config.refreshToken, deviceSessionId: deviceSessionId ?? config.deviceSessionId, userId, country, trust }
   try {
     await refreshSharingConfig()
   } catch {}
@@ -2385,7 +2438,7 @@ ipcMain.handle('sign-out', async () => {
       await fetch(`${API_BASE}/api/extension-auth/revoke`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.token}` },
-        body: JSON.stringify({ userId: config.userId }),
+        body: JSON.stringify({ userId: config.userId, deviceSessionId: config.deviceSessionId || null }),
         signal: AbortSignal.timeout(4000),
       })
     } catch (e) {

@@ -2,14 +2,20 @@ import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { adminClient } from '@/lib/supabase/admin'
 import { isUserTrusted } from '@/lib/traffic-filter'
-import { verifyDesktopToken } from '@/lib/desktop-token'
+import { resolveBearerUser } from '@/lib/device-sessions'
 import { createHmac } from 'crypto'
 import { isPrivateShareActive, normalizePrivateShareCode } from '@/lib/private-sharing'
 import { getRelayFallbackList, relayHttpUrl, RELAY_ENDPOINTS } from '@/lib/relay-endpoints'
 import { buildOccupiedProviderDeviceSet, filterAvailableProviderDevices } from '@/lib/provider-capacity'
 import { getConnectionAccessRequirement } from '@/lib/account-access'
 
-const RECEIPT_SECRET = process.env.RELAY_SECRET ?? process.env.RECEIPT_SECRET ?? 'dev-secret'
+function getReceiptSecret(): string {
+  const secret = process.env.RECEIPT_SECRET ?? process.env.RELAY_SECRET ?? ''
+  if (!secret) {
+    throw new Error('RECEIPT_SECRET is not configured')
+  }
+  return secret
+}
 
 export function issueAccountabilityReceipt(payload: {
   sessionId: string
@@ -18,7 +24,7 @@ export function issueAccountabilityReceipt(payload: {
   timestamp: number
 }): string {
   const data = Buffer.from(JSON.stringify(payload)).toString('base64url')
-  const sig = createHmac('sha256', RECEIPT_SECRET).update(data).digest('base64url')
+  const sig = createHmac('sha256', getReceiptSecret()).update(data).digest('base64url')
   return `${data}.${sig}`
 }
 
@@ -28,7 +34,7 @@ export function verifyAccountabilityReceipt(receipt: string): {
 } {
   try {
     const [data, sig] = receipt.split('.')
-    const expected = createHmac('sha256', RECEIPT_SECRET).update(data).digest('base64url')
+    const expected = createHmac('sha256', getReceiptSecret()).update(data).digest('base64url')
     if (sig !== expected) return { valid: false }
     return { valid: true, payload: JSON.parse(Buffer.from(data, 'base64url').toString()) }
   } catch {
@@ -70,13 +76,14 @@ export async function POST(req: Request) {
     const auth = req.headers.get('authorization') ?? ''
     const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
     if (token) {
-      const tokenUser = (await adminClient.auth.getUser(token)).data.user ?? null
-      if (tokenUser?.id) {
-        userId = tokenUser.id
-        emailConfirmed = !!tokenUser.email_confirmed_at
-      } else {
-        userId = verifyDesktopToken(token) ?? null
-        emailConfirmed = !!userId
+      const resolved = await resolveBearerUser(token)
+      if (resolved.authKind === 'supabase') {
+        const tokenUser = (await adminClient.auth.getUser(token)).data.user ?? null
+        userId = tokenUser?.id ?? null
+        emailConfirmed = !!tokenUser?.email_confirmed_at
+      } else if (resolved.authKind === 'desktop') {
+        userId = resolved.userId
+        emailConfirmed = !!resolved.userId
       }
     }
   }

@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { adminClient } from '@/lib/supabase/admin'
-import { verifyDesktopToken } from '@/lib/desktop-token'
+import { resolveBearerUser } from '@/lib/device-sessions'
 import {
   buildPrivateShareExpiry,
   generatePrivateShareCode,
@@ -434,11 +434,7 @@ async function resolveUserId(req: Request, bodyUserId?: string): Promise<string 
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
   if (!token) return null
 
-  const fromDesktop = verifyDesktopToken(token)
-  if (fromDesktop) return fromDesktop
-
-  const { data } = await adminClient.auth.getUser(token)
-  return data.user?.id ?? null
+  return (await resolveBearerUser(token)).userId
 }
 
 // ── GET: fetch fresh profile stats (extension polls this) ──────────────────
