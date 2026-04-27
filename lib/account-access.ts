@@ -6,6 +6,8 @@ export type ConnectionAccessProfile = {
   contribution_credits_bytes?: number | string | null
 }
 
+export type ConnectionAccessMode = 'public' | 'private'
+
 export type ConnectionAccessRequirement = {
   ok: boolean
   code: 'phone_verification_required' | 'usage_access_required' | null
@@ -16,7 +18,6 @@ export type ConnectionAccessRequirement = {
 export function hasPaidAccess(profile: ConnectionAccessProfile | null | undefined): boolean {
   return Number(profile?.wallet_balance_usd ?? 0) > 0
     || Number(profile?.contribution_credits_bytes ?? 0) > 0
-    || !!profile?.is_premium
 }
 
 export function hasUsageAccess(profile: ConnectionAccessProfile | null | undefined): boolean {
@@ -25,13 +26,27 @@ export function hasUsageAccess(profile: ConnectionAccessProfile | null | undefin
 
 export function getConnectionAccessRequirement(
   profile: ConnectionAccessProfile | null | undefined,
+  options: {
+    mode?: ConnectionAccessMode
+  } = {},
 ): ConnectionAccessRequirement {
+  const mode = options.mode === 'private' ? 'private' : 'public'
+
   if (!profile?.is_verified) {
     return {
       ok: false,
       code: 'phone_verification_required',
       error: 'Verify your phone to connect to providers.',
       nextStep: '/verify/phone',
+    }
+  }
+
+  if (mode === 'private') {
+    return {
+      ok: true,
+      code: null,
+      error: null,
+      nextStep: null,
     }
   }
 

@@ -43,7 +43,7 @@ function getHelperMismatchError(helper = state.helper) {
   const source = helper?.source === 'cli' ? 'CLI' : 'desktop app'
   return `This ${source} is signed in as a different user. Sign out of the ${source} first.`
 }
-const FREE_TIER_MESSAGE = 'FREE LAYER â€” Enable sharing above to connect, or fund your USD wallet to browse without sharing.'
+const FREE_TIER_MESSAGE = 'FREE LAYER â€” Enable sharing above to connect publicly, or fund your USD wallet to browse without sharing.'
 const DAILY_LIMIT_MIN_MB = 1024
 
 function withSharingHeaders(token, contentType = true) {
@@ -109,7 +109,7 @@ function helperSharingPending(helper = ownedHelper()) {
 }
 
 function hasPaidAccess(user = state.user) {
-  return Number(user?.walletBalanceUsd ?? 0) > 0 || Number(user?.contributionCreditsBytes ?? 0) > 0 || !!user?.isPremium
+  return Number(user?.walletBalanceUsd ?? 0) > 0 || Number(user?.contributionCreditsBytes ?? 0) > 0
 }
 
 function getUserSharingToken() {
@@ -656,6 +656,7 @@ function renderDashboard(app) {
   }).join('')
   const helperSource = standaloneHelper ? 'Extension' : activeHelper?.source === 'cli' ? 'CLI' : helperReady ? 'Desktop' : 'PeerMesh'
   const freeTierBlocked = !hasPaidAccess(user) && !isSharing
+  const publicConnectBlocked = freeTierBlocked
   const helperLabel = helperMismatch
     ? 'Local desktop helper belongs to another user. Sign out there first.'
     : standaloneHelper
@@ -746,14 +747,14 @@ function renderDashboard(app) {
       <div class="section-label">Private code</div>
       <div style="display:grid;grid-template-columns:1fr auto;gap:8px">
         <input id="privateCodeInput" value="${state.privateCodeInput || ''}" placeholder="9-digit code" inputmode="numeric" maxlength="9" style="padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-family:'Courier New',monospace;font-size:11px;letter-spacing:1px" />
-        <button class="connect-btn" id="connectPrivateBtn" style="padding:0 12px" ${!state.privateCodeInput || !state.isOnline || state.connecting || freeTierBlocked ? 'disabled' : ''}>
+        <button class="connect-btn" id="connectPrivateBtn" style="padding:0 12px" ${!state.privateCodeInput || !state.isOnline || state.connecting ? 'disabled' : ''}>
           ${state.connecting && state.privateCodeInput ? '...' : 'CODE'}
         </button>
       </div>
       <div style="margin-top:6px;font-size:10px;color:var(--muted);line-height:1.5">Locks the session to one known device and its active slots only.</div>
     </div>
     <div class="section">
-      <button class="connect-btn" id="connectBtn" ${!selectedCountry || !state.isOnline || state.connecting || freeTierBlocked ? 'disabled' : ''}>
+      <button class="connect-btn" id="connectBtn" ${!selectedCountry || !state.isOnline || state.connecting || publicConnectBlocked ? 'disabled' : ''}>
         ${state.connecting
           ? `<span style="display:inline-flex;align-items:center;gap:8px"><span style="width:10px;height:10px;border:2px solid rgba(0,0,0,0.2);border-top-color:#000;border-radius:50%;animation:spin 0.7s linear infinite;display:inline-block"></span>CONNECTING...</span>`
           : !state.isOnline ? 'NO INTERNET'
@@ -768,7 +769,7 @@ function renderDashboard(app) {
     </div>
     `}
 
-    ${freeTierBlocked && !session && (selectedCountry || state.privateCodeInput)
+    ${publicConnectBlocked && !session && selectedCountry
       ? `<div class="section" style="background:rgba(255,68,102,0.08);border-top:1px solid rgba(255,68,102,0.2);border-bottom:1px solid rgba(255,68,102,0.2);font-size:11px;color:#ff9090;line-height:1.5">
            <span style="font-family:'Courier New',monospace;font-size:10px;letter-spacing:0.5px">FREE TIER â€” </span>${FREE_TIER_MESSAGE.replace('FREE TIER â€” ', '')}
          </div>`

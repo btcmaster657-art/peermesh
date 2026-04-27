@@ -109,7 +109,7 @@ export async function POST(req: Request) {
 
   const { data: profile } = await adminClient
     .from('profiles')
-    .select('trust_score, is_verified, is_premium, is_sharing, bandwidth_used_month, bandwidth_limit, preferred_providers, wallet_balance_usd, contribution_credits_bytes')
+    .select('trust_score, is_verified, is_sharing, bandwidth_used_month, bandwidth_limit, preferred_providers, wallet_balance_usd, contribution_credits_bytes')
     .eq('id', userId)
     .single()
 
@@ -117,7 +117,9 @@ export async function POST(req: Request) {
   if (!activeProfile) {
     return NextResponse.json({ error: 'Profile not found' }, { status: 404 })
   }
-  const accessRequirement = getConnectionAccessRequirement(activeProfile)
+  const accessRequirement = getConnectionAccessRequirement(activeProfile, {
+    mode: hasPrivateCode ? 'private' : 'public',
+  })
   if (!accessRequirement.ok) {
     return NextResponse.json({
       error: accessRequirement.error,

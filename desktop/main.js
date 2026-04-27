@@ -529,16 +529,12 @@ function applySharingProfileData(data, { source = 'remote' } = {}) {
   const visibilityChanged = previousPrivateShareActive !== nextPrivateShareActive || previousPrivateShareCode !== nextPrivateShareCode
 
   if (privacyToggleChanged && (config.shareEnabled || activeSlotCount() > 0)) {
-    log.warn('PRIVATE', 'private sharing mode changed - stopping provider until manually restarted', {
+    log.info('PRIVATE', 'private sharing mode changed - reconnecting provider', {
       source,
       from: previousPrivateShareEnabled,
       to: nextPrivateShareEnabled,
     })
-    stopRelay()
-    config.shareEnabled = false
-    saveConfig()
-    updateTray()
-    showNotification('PeerMesh sharing paused', 'Private sharing changed. Start sharing again to apply the new mode.')
+    restartRelayForConfigChange('private_share_sync', 'Private sharing changed. Reconnecting to apply the new mode.')
   } else if (visibilityChanged) {
     log.info('PRIVATE', 'private sharing state synced', {
       source,
@@ -1080,15 +1076,11 @@ async function updatePrivateShareState({ enabled, refresh = false, expiryHours, 
   saveConfig()
 
   if (previousEnabled !== !!config.privateShare?.enabled && (config.shareEnabled || activeSlotCount() > 0)) {
-    log.info('PRIVATE', 'private sharing mode changed locally - stopping until manually restarted', {
+    log.info('PRIVATE', 'private sharing mode changed locally - reconnecting provider', {
       from: previousEnabled,
       to: !!config.privateShare?.enabled,
     })
-    stopRelay()
-    config.shareEnabled = false
-    saveConfig()
-    updateTray()
-    showNotification('PeerMesh sharing paused', 'Private sharing changed. Start sharing again to apply the new mode.')
+    restartRelayForConfigChange('private_share_local', 'Private sharing changed. Reconnecting to apply the new mode.')
   }
 
   updateTray()
@@ -1649,6 +1641,29 @@ function connectRelay() {
   syncAggregateState()
   log.info('RELAY', 'connectRelay START', { userId: config.userId, country: config.country, slots: config.connectionSlots })
   logState('pre-connect')
+}
+
+function restartRelayForConfigChange(reason, notificationBody = null) {
+  const shouldResume = config.shareEnabled || activeSlotCount() > 0
+  if (!shouldResume) {
+    updateTray()
+    return false
+  }
+
+  log.info('RELAY', 'restarting provider to apply config change', { reason })
+  stopRelay()
+
+  if (!config.token || !config.userId || limitHit) {
+    updateTray()
+    return false
+  }
+
+  config.shareEnabled = true
+  saveConfig()
+  connectRelay()
+  updateTray()
+  if (notificationBody) showNotification('PeerMesh updated', notificationBody)
+  return true
 }
 
 function stopRelay() {

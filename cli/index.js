@@ -660,18 +660,12 @@ function applySharingProfileData(data, { source = 'remote' } = {}) {
   const visibilityChanged = previousPrivateShareActive !== nextPrivateShareActive || previousPrivateShareCode !== nextPrivateShareCode
 
   if (privacyToggleChanged && config.shareEnabled && isRunning()) {
-    clog.warn('PRIVATE', 'private sharing mode changed - stopping provider until manually restarted', {
+    clog.info('PRIVATE', 'private sharing mode changed - reconnecting provider', {
       source,
       from: previousPrivateShareEnabled,
       to: nextPrivateShareEnabled,
     })
-    stopRelay()
-    config.shareEnabled = false
-    saveConfig(config)
-    console.log('')
-    console.log('  Private sharing changed.')
-    console.log('  Sharing stopped. Start sharing again manually to apply the new mode.')
-    console.log('')
+    restartRelayForConfigChange('private_share_sync', _controlLimitBytes, 'Private sharing changed. Reconnecting to apply the new mode.')
   } else if (visibilityChanged) {
     clog.info('PRIVATE', 'private sharing state synced', {
       source,
@@ -826,17 +820,11 @@ async function updatePrivateShareState({ enabled, refresh = false, expiryHours, 
   saveConfig(config)
 
   if (config.shareEnabled && isRunning() && previousEnabled !== !!config.privateShare?.enabled) {
-    clog.info('PRIVATE', 'private sharing mode changed locally - stopping until manually restarted', {
+    clog.info('PRIVATE', 'private sharing mode changed locally - reconnecting provider', {
       from: previousEnabled,
       to: !!config.privateShare?.enabled,
     })
-    stopRelay()
-    config.shareEnabled = false
-    saveConfig(config)
-    console.log('')
-    console.log('  Private sharing changed.')
-    console.log('  Sharing stopped. Start sharing again manually to apply the new mode.')
-    console.log('')
+    restartRelayForConfigChange('private_share_local', _controlLimitBytes, 'Private sharing changed. Reconnecting to apply the new mode.')
   }
 
   return config.privateShare
@@ -1165,6 +1153,26 @@ function connectRelay(limitBytes) {
   _userStopped = false
   ensureSlotStates().forEach(slot => connectSlot(slot, limitBytes))
   clogState('connectRelay')
+}
+
+function restartRelayForConfigChange(reason, limitBytes, message = null) {
+  const shouldResume = !!config.shareEnabled || isRunning()
+  if (!shouldResume) return false
+
+  clog.info('RELAY', 'restarting provider to apply config change', { reason })
+  stopRelay()
+
+  if (!config.token || !config.userId || limitHit) return false
+
+  config.shareEnabled = true
+  saveConfig(config)
+  connectRelay(limitBytes)
+  if (message) {
+    console.log('')
+    console.log(`  ${message}`)
+    console.log('')
+  }
+  return true
 }
 
 function stopRelay() {

@@ -1011,7 +1011,7 @@ export default function Dashboard() {
       router.push('/verify/phone')
       return
     }
-    if (!hasPaidAccess && !displayIsSharing) {
+    if (!isPrivateConnect && !hasPaidAccess && !displayIsSharing) {
       router.push('/verify/payment')
       return
     }
@@ -1302,7 +1302,7 @@ export default function Dashboard() {
           <button
             onClick={handleConnect}
             disabled={connecting || !privateConnectReady}
-            title={selectedCountry ? 'Clear country selection to use private code' : !profile.is_verified ? 'Verify your phone to connect' : !hasPaidAccess && !displayIsSharing ? 'Enable sharing or fund your wallet to connect' : undefined}
+            title={selectedCountry ? 'Clear country selection to use private code' : !profile.is_verified ? 'Verify your phone to connect' : undefined}
             style={{ padding: '10px 14px', background: privateConnectReady ? 'var(--accent)' : 'var(--border)', color: privateConnectReady ? '#000' : 'var(--muted)', border: 'none', borderRadius: '8px', fontFamily: 'var(--font-geist-mono)', fontSize: '10px', fontWeight: 700, letterSpacing: '0.5px', cursor: connecting || !privateConnectReady ? 'not-allowed' : 'pointer' }}
           >
             {connecting && privateConnectReady ? 'CONNECTING...' : 'CONNECT CODE'}
@@ -1783,11 +1783,18 @@ export default function Dashboard() {
 
       {/* Free tier enforcement – shown on all screen sizes */}
       {!hasPaidAccess && !isSharing && (selectedCountry || privateConnectReady) && !isMobile && (
-        <div style={{ background: 'rgba(255,80,80,0.07)', border: '1px solid rgba(255,80,80,0.3)', borderRadius: '10px', padding: '12px 16px', marginBottom: '16px', fontSize: '12px', color: '#ff9090' }}>
-          <span style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', letterSpacing: '0.5px' }}>FREE LAYER – </span>
-          Enable sharing above to connect, or{' '}
-          <a href="/verify/payment" style={{ color: 'var(--accent)', textDecoration: 'underline' }}>fund your wallet</a> to browse without sharing.
-        </div>
+        selectedCountry ? (
+          <div style={{ background: 'rgba(255,80,80,0.07)', border: '1px solid rgba(255,80,80,0.3)', borderRadius: '10px', padding: '12px 16px', marginBottom: '16px', fontSize: '12px', color: '#ff9090' }}>
+            <span style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', letterSpacing: '0.5px' }}>FREE LAYER – </span>
+            Enable sharing above to connect publicly, or{' '}
+            <a href="/verify/payment" style={{ color: 'var(--accent)', textDecoration: 'underline' }}>fund your wallet</a> to browse without sharing.
+          </div>
+        ) : (
+          <div style={{ background: 'rgba(0,255,136,0.07)', border: '1px solid rgba(0,255,136,0.24)', borderRadius: '10px', padding: '12px 16px', marginBottom: '16px', fontSize: '12px', color: 'var(--accent)' }}>
+            <span style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', letterSpacing: '0.5px' }}>PRIVATE CONNECT – </span>
+            Private code sessions use your base allowance. Wallet funding only increases limits and adds advanced features.
+          </div>
+        )
       )}
 
       {/* Close desktop-only wrapper */}

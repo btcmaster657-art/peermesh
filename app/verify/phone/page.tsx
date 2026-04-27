@@ -23,7 +23,6 @@ function PhoneVerifyPageClient() {
     setLoading(true)
     try {
       const { data: { session } } = await supabase.auth.getSession()
-      console.log('session on phone page:', session?.access_token?.slice(0, 20))
       if (!session) {
         setError('Session expired — please sign in again')
         setLoading(false)

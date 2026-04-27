@@ -879,10 +879,10 @@ export async function PUT(req: Request) {
   if (providerIp) {
     // Relay-forwarded heartbeat — geo-lookup the real provider IP
     try {
-      const geo = await fetch(`http://ip-api.com/json/${providerIp}?fields=status,countryCode`, { signal: AbortSignal.timeout(3000) })
+      const geo = await fetch(`https://ipapi.co/${encodeURIComponent(providerIp)}/country/`, { signal: AbortSignal.timeout(3000) })
       if (geo.ok) {
-        const json = await geo.json()
-        if (json.status === 'success' && json.countryCode) country = json.countryCode.toUpperCase()
+        const countryCode = (await geo.text()).trim().toUpperCase()
+        if (/^[A-Z]{2}$/.test(countryCode)) country = countryCode
       }
     } catch {}
   } else {

@@ -40,7 +40,7 @@ const sessionRequests = new Map<string, { count: number; windowStart: number }>(
 export function checkRateLimit(sessionId: string): boolean {
   const now = Date.now()
   const WINDOW = 60_000
-  const MAX = 100 * 60
+  const MAX = 100
 
   const record = sessionRequests.get(sessionId)
   if (!record) {
