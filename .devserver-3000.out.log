@@ -236,3 +236,4 @@ Creating turbopack project { dir: 'C:\\Users\\ajibe\\peermesh', testMode: true }
  GET /auth 404 in 164ms (next.js: -27516µs, proxy.ts: 133ms, application-code: 59ms)
  GET /auth 404 in 248ms (next.js: -41603µs, proxy.ts: 223ms, application-code: 67ms)
  GET /auth 404 in 160ms (next.js: -29532µs, proxy.ts: 111ms, application-code: 78ms)
+ GET /auth 404 in 176ms (next.js: -30739µs, proxy.ts: 145ms, application-code: 62ms)

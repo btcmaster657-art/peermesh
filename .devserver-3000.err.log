@@ -59,3 +59,5 @@ Read more: https://nextjs.org/docs/app/api-reference/config/next-config-js/allow
     at module evaluation (.next\dev\server\edge\chunks\[root-of-the-server]__11ru_ap._.js:16:11)
 ⨯ Error: Could not parse module '[project]/middleware.ts', file not found
     at module evaluation (.next\dev\server\edge\chunks\[root-of-the-server]__11ru_ap._.js:16:11)
+⨯ Error: Could not parse module '[project]/middleware.ts', file not found
+    at module evaluation (.next\dev\server\edge\chunks\[root-of-the-server]__11ru_ap._.js:16:11)
