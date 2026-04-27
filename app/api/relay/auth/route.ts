@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
-import { resolveBearerUser } from '@/lib/device-sessions'
 import { adminClient } from '@/lib/supabase/admin'
+import { canRoleProvideNetwork, getProviderRoleError } from '@/lib/roles'
+import { resolveAuthTokenUser } from '@/lib/requester-auth'
 
 const RELAY_SECRET = process.env.RELAY_SECRET ?? ''
 
@@ -11,23 +12,7 @@ type RequesterSessionRow = {
   target_country: string | null
   provider_id: string | null
   provider_base_device_id: string | null
-}
-
-async function resolveTokenUserId(token: string): Promise<{ userId: string | null; tokenKind: 'supabase' | 'desktop' | null }> {
-  const desktop = await resolveBearerUser(token)
-  if (desktop.authKind === 'desktop' && desktop.userId) {
-    return { userId: desktop.userId, tokenKind: 'desktop' }
-  }
-
-  try {
-    const { data } = await adminClient.auth.getUser(token)
-    return {
-      userId: data.user?.id ?? null,
-      tokenKind: data.user?.id ? 'supabase' : null,
-    }
-  } catch {
-    return { userId: null, tokenKind: null }
-  }
+  api_key_id: string | null
 }
 
 export async function POST(req: Request) {
@@ -45,10 +30,12 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'token and role are required' }, { status: 400 })
   }
 
-  const { userId, tokenKind } = await resolveTokenUserId(token)
-  if (!userId || !tokenKind) {
+  const auth = await resolveAuthTokenUser(token)
+  if (!auth?.userId) {
     return NextResponse.json({ error: 'Invalid relay auth token' }, { status: 401 })
   }
+  const userId = auth.userId
+  const tokenKind = auth.kind
 
   if (expectedUserId && expectedUserId !== userId) {
     return NextResponse.json({ error: 'Relay auth token does not match the claimed user' }, { status: 403 })
@@ -56,7 +43,7 @@ export async function POST(req: Request) {
 
   const { data: profile, error: profileError } = await adminClient
     .from('profiles')
-    .select('trust_score')
+    .select('trust_score, role, is_verified, has_accepted_provider_terms')
     .eq('id', userId)
     .maybeSingle()
 
@@ -65,6 +52,18 @@ export async function POST(req: Request) {
   }
 
   if (role === 'provider') {
+    if (tokenKind === 'api_key') {
+      return NextResponse.json({ error: 'API keys cannot register provider relays' }, { status: 403 })
+    }
+    if (!canRoleProvideNetwork(profile.role)) {
+      return NextResponse.json({ error: getProviderRoleError(profile.role) }, { status: 403 })
+    }
+    if (profile.is_verified !== true) {
+      return NextResponse.json({ error: 'Verify your phone before sharing bandwidth.' }, { status: 403 })
+    }
+    if (profile.has_accepted_provider_terms !== true) {
+      return NextResponse.json({ error: 'Accept the provider disclosure before sharing bandwidth.' }, { status: 403 })
+    }
     return NextResponse.json({
       ok: true,
       userId,
@@ -80,7 +79,7 @@ export async function POST(req: Request) {
 
   const { data: session, error: sessionError } = await adminClient
     .from('sessions')
-    .select('id, user_id, status, target_country, provider_id, provider_base_device_id')
+    .select('id, user_id, status, target_country, provider_id, provider_base_device_id, api_key_id')
     .eq('id', dbSessionId)
     .maybeSingle()
 
@@ -92,6 +91,11 @@ export async function POST(req: Request) {
 
   if (sessionRow.user_id !== userId) {
     return NextResponse.json({ error: 'Session does not belong to this user' }, { status: 403 })
+  }
+  if (tokenKind === 'api_key') {
+    if (!auth.apiKey?.id || sessionRow.api_key_id !== auth.apiKey.id) {
+      return NextResponse.json({ error: 'This API key was not used to authorize the session' }, { status: 403 })
+    }
   }
 
   if (!['pending', 'active'].includes(sessionRow.status)) {

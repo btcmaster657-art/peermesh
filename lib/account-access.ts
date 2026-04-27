@@ -1,4 +1,7 @@
+import { canRoleUseNetwork, getUsageRoleError, normalizePeerMeshRole } from './roles.ts'
+
 export type ConnectionAccessProfile = {
+  role?: string | null
   is_verified?: boolean | null
   is_sharing?: boolean | null
   is_premium?: boolean | null
@@ -10,7 +13,7 @@ export type ConnectionAccessMode = 'public' | 'private'
 
 export type ConnectionAccessRequirement = {
   ok: boolean
-  code: 'phone_verification_required' | 'usage_access_required' | null
+  code: 'phone_verification_required' | 'usage_access_required' | 'role_not_allowed' | null
   error: string | null
   nextStep: '/verify/phone' | '/verify/payment' | null
 }
@@ -41,12 +44,31 @@ export function getConnectionAccessRequirement(
     }
   }
 
+  if (!canRoleUseNetwork(profile?.role)) {
+    return {
+      ok: false,
+      code: 'role_not_allowed',
+      error: getUsageRoleError(profile?.role),
+      nextStep: null,
+    }
+  }
+
   if (mode === 'private') {
     return {
       ok: true,
       code: null,
       error: null,
       nextStep: null,
+    }
+  }
+
+  const role = normalizePeerMeshRole(profile?.role)
+  if (role === 'client' && !hasPaidAccess(profile)) {
+    return {
+      ok: false,
+      code: 'usage_access_required',
+      error: 'CLIENT MODE - Fund your USD wallet or spend contribution credits to connect publicly.',
+      nextStep: '/verify/payment',
     }
   }
 

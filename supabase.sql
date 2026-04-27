@@ -98,6 +98,16 @@ create table sessions (
   id             uuid primary key default gen_random_uuid(),
   user_id        uuid references profiles(id) on delete cascade not null, -- requester
   provider_id    uuid references profiles(id) on delete set null,          -- set on agent_ready
+  request_access_mode text not null default 'public' check (request_access_mode in ('public','private')),
+  request_auth_kind text not null default 'user' check (request_auth_kind in ('user','desktop','api_key')),
+  api_key_id     uuid,
+  request_id     text,
+  pricing_tier   text check (pricing_tier in ('standard','advanced','enterprise','contributor')),
+  requested_bandwidth_gb numeric(10,4),
+  requested_rpm  integer,
+  requested_period_hours integer,
+  requested_session_mode text check (requested_session_mode in ('rotating','sticky')),
+  estimated_cost_usd numeric(14,4) not null default 0,
   provider_kind  text,                                                      -- 'desktop'|'cli'|'extension'
   provider_device_id text,
   provider_base_device_id text,
@@ -351,6 +361,8 @@ create table api_usage (
   session_mode text not null default 'rotating' check (session_mode in ('rotating','sticky')),
   duration_minutes integer not null default 0,
   estimated_cost_usd numeric(14,4) not null default 0,
+  collected_cost_usd numeric(14,4) not null default 0,
+  shortfall_cost_usd numeric(14,4) not null default 0,
   created_at timestamptz default now()
 );
 
@@ -610,6 +622,16 @@ alter table sessions add column if not exists target_host text;
 alter table sessions add column if not exists target_hosts text[] default '{}';
 alter table sessions add column if not exists signed_receipt text;
 alter table sessions add column if not exists disconnect_reason text;
+alter table sessions add column if not exists request_access_mode text not null default 'public';
+alter table sessions add column if not exists request_auth_kind text not null default 'user';
+alter table sessions add column if not exists api_key_id uuid;
+alter table sessions add column if not exists request_id text;
+alter table sessions add column if not exists pricing_tier text;
+alter table sessions add column if not exists requested_bandwidth_gb numeric(10,4);
+alter table sessions add column if not exists requested_rpm integer;
+alter table sessions add column if not exists requested_period_hours integer;
+alter table sessions add column if not exists requested_session_mode text;
+alter table sessions add column if not exists estimated_cost_usd numeric(14,4) not null default 0;
 
 alter table abuse_reports add column if not exists reported_user_id uuid references profiles(id) on delete set null;
 alter table abuse_reports add column if not exists report_subject text not null default 'provider';
@@ -863,8 +885,22 @@ create table if not exists api_usage (
   session_mode text not null default 'rotating' check (session_mode in ('rotating','sticky')),
   duration_minutes integer not null default 0,
   estimated_cost_usd numeric(14,4) not null default 0,
+  collected_cost_usd numeric(14,4) not null default 0,
+  shortfall_cost_usd numeric(14,4) not null default 0,
   created_at timestamptz default now()
 );
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'sessions_api_key_id_fkey'
+  ) then
+    alter table sessions
+      add constraint sessions_api_key_id_fkey
+      foreign key (api_key_id) references api_keys(id) on delete set null;
+  end if;
+end $$;
 create index if not exists api_usage_user_created_idx on api_usage (user_id, created_at desc);
 create index if not exists api_usage_key_created_idx on api_usage (api_key_id, created_at desc);
 alter table api_usage enable row level security;

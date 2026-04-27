@@ -17,6 +17,16 @@ alter table sessions add column if not exists target_host text;
 alter table sessions add column if not exists target_hosts text[] default '{}';
 alter table sessions add column if not exists signed_receipt text;
 alter table sessions add column if not exists disconnect_reason text;
+alter table sessions add column if not exists request_access_mode text not null default 'public';
+alter table sessions add column if not exists request_auth_kind text not null default 'user';
+alter table sessions add column if not exists api_key_id uuid;
+alter table sessions add column if not exists request_id text;
+alter table sessions add column if not exists pricing_tier text;
+alter table sessions add column if not exists requested_bandwidth_gb numeric(10,4);
+alter table sessions add column if not exists requested_rpm integer;
+alter table sessions add column if not exists requested_period_hours integer;
+alter table sessions add column if not exists requested_session_mode text;
+alter table sessions add column if not exists estimated_cost_usd numeric(14,4) not null default 0;
 
 alter table provider_devices add column if not exists relay_url text default null;
 alter table provider_devices add column if not exists connection_slots integer not null default 1;
@@ -141,8 +151,22 @@ create table if not exists api_usage (
   session_mode text not null default 'rotating' check (session_mode in ('rotating','sticky')),
   duration_minutes integer not null default 0,
   estimated_cost_usd numeric(14,4) not null default 0,
+  collected_cost_usd numeric(14,4) not null default 0,
+  shortfall_cost_usd numeric(14,4) not null default 0,
   created_at timestamptz default now()
 );
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'sessions_api_key_id_fkey'
+  ) then
+    alter table sessions
+      add constraint sessions_api_key_id_fkey
+      foreign key (api_key_id) references api_keys(id) on delete set null;
+  end if;
+end $$;
 
 update sessions
 set target_hosts = array[target_host]

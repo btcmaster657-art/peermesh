@@ -50,6 +50,9 @@ export type ApiKeyTierConfig = {
 }
 
 const BASE_PER_GB_USD = 1
+const BROWSE_PER_GB_USD = 3
+const PROVIDER_REVENUE_SHARE = 0.6
+const PREMIUM_BANDWIDTH_BONUS_BYTES = 5 * 1024 ** 3
 
 const TIER_CONFIG: Record<ApiKeyTier, ApiKeyTierConfig> = {
   standard: {
@@ -99,6 +102,15 @@ function roundCurrency(value: number): number {
   return Math.round(value * 100) / 100
 }
 
+function roundCurrency4(value: number): number {
+  return Math.round(value * 10_000) / 10_000
+}
+
+function getPositiveNumberEnv(name: string, fallback: number): number {
+  const raw = Number(process.env[name] ?? '')
+  return Number.isFinite(raw) && raw > 0 ? raw : fallback
+}
+
 function rpmFactor(rpm: number): number {
   if (rpm <= 60) return 1
   if (rpm <= 120) return 1.22
@@ -139,6 +151,81 @@ export function sharedBytesToCreditBytes(bytesShared: number): number {
 
 export function bytesToGb(bytes: number): number {
   return bytes / (1024 ** 3)
+}
+
+export function getPremiumBandwidthBonusBytes(isPremium?: boolean | null): number {
+  if (!isPremium) return 0
+  return Math.floor(getPositiveNumberEnv('PEERMESH_PREMIUM_BONUS_BYTES', PREMIUM_BANDWIDTH_BONUS_BYTES))
+}
+
+export function getEffectiveBandwidthLimitBytes(baseLimit: number, isPremium?: boolean | null): number {
+  const normalizedBaseLimit = Math.max(0, Math.floor(Number(baseLimit) || 0))
+  return normalizedBaseLimit + getPremiumBandwidthBonusBytes(isPremium)
+}
+
+export function calculateBrowseUsageCostUsd(bytesUsed: number): number {
+  const pricePerGb = getPositiveNumberEnv('PEERMESH_BROWSE_USD_PER_GB', BROWSE_PER_GB_USD)
+  return roundCurrency4(Math.max(0, bytesToGb(Math.max(0, bytesUsed))) * pricePerGb)
+}
+
+export function calculateProviderRevenueShareUsd(grossUsd: number): number {
+  const share = Math.min(1, getPositiveNumberEnv('PEERMESH_PROVIDER_REVENUE_SHARE', PROVIDER_REVENUE_SHARE))
+  return roundCurrency(Math.max(0, grossUsd) * share)
+}
+
+export function estimateApiUsageCost(input: PricingQuoteInput): number {
+  const quote = quoteApiUsage(input)
+  return roundCurrency4(quote.estimatedUsd)
+}
+
+export type UserUsageSettlement = {
+  effectiveBandwidthLimitBytes: number
+  freeBytes: number
+  creditBytes: number
+  paidBytes: number
+  grossChargeUsd: number
+  walletDebitUsd: number
+  shortfallUsd: number
+  providerPayoutUsd: number
+  platformRevenueUsd: number
+}
+
+export function settleUserUsage(input: {
+  bytesUsed: number
+  bandwidthUsedMonth: number
+  bandwidthLimit: number
+  isPremium?: boolean | null
+  contributionCreditsBytes: number
+  walletBalanceUsd: number
+}): UserUsageSettlement {
+  const bytesUsed = Math.max(0, Math.floor(Number(input.bytesUsed) || 0))
+  const effectiveBandwidthLimitBytes = getEffectiveBandwidthLimitBytes(input.bandwidthLimit, input.isPremium)
+  const bandwidthUsedMonth = Math.max(0, Math.floor(Number(input.bandwidthUsedMonth) || 0))
+  const contributionCreditsBytes = Math.max(0, Math.floor(Number(input.contributionCreditsBytes) || 0))
+  const walletBalanceUsd = Math.max(0, roundCurrency(Number(input.walletBalanceUsd) || 0))
+
+  const freeRemainingBytes = Math.max(0, effectiveBandwidthLimitBytes - bandwidthUsedMonth)
+  const freeBytes = Math.min(bytesUsed, freeRemainingBytes)
+  const remainingAfterFree = Math.max(0, bytesUsed - freeBytes)
+  const creditBytes = Math.min(remainingAfterFree, contributionCreditsBytes)
+  const paidBytes = Math.max(0, remainingAfterFree - creditBytes)
+  const grossChargeUsd = calculateBrowseUsageCostUsd(paidBytes)
+  const walletDebitUsd = roundCurrency(Math.min(walletBalanceUsd, grossChargeUsd))
+  const shortfallUsd = roundCurrency(Math.max(0, grossChargeUsd - walletDebitUsd))
+  const providerPayoutUsd = calculateProviderRevenueShareUsd(walletDebitUsd)
+  const platformRevenueUsd = roundCurrency(Math.max(0, walletDebitUsd - providerPayoutUsd))
+
+  return {
+    effectiveBandwidthLimitBytes,
+    freeBytes,
+    creditBytes,
+    paidBytes,
+    grossChargeUsd,
+    walletDebitUsd,
+    shortfallUsd,
+    providerPayoutUsd,
+    platformRevenueUsd,
+  }
 }
 
 export function quoteApiUsage(input: PricingQuoteInput): PricingQuote {

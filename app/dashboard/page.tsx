@@ -284,6 +284,7 @@ export default function Dashboard() {
   const [loadError, setLoadError] = useState<string | null>(null)
   const [shareError, setShareError] = useState<string | null>(null)
   const [connectError, setConnectError] = useState<string | null>(null)
+  const [roleSaving, setRoleSaving] = useState(false)
   const [signingOut, setSigningOut] = useState(false)
   const [isOnline, setIsOnline] = useState(true)
   const [latestDesktopVersion, setLatestDesktopVersion] = useState<string | null>(null)
@@ -1007,6 +1008,10 @@ export default function Dashboard() {
     const isPrivateConnect = !selectedCountry && !!trimmedPrivateCode
     if ((!selectedCountry && !trimmedPrivateCode) || !profile) return
     setConnectError(null)
+    if (profile.role === 'host') {
+      setConnectError('Host accounts can only share. Switch role to Peer or Client to connect.')
+      return
+    }
     if (!profile.is_verified) {
       router.push('/verify/phone')
       return
@@ -1040,6 +1045,32 @@ export default function Dashboard() {
       setConnectError(msg === 'Failed to fetch' ? 'Network error – could not reach server' : msg)
     } finally {
       setConnecting(false)
+    }
+  }
+
+  async function updateRole(nextRole: 'peer' | 'host' | 'client') {
+    if (!profile || roleSaving || nextRole === profile.role) return
+    setRoleSaving(true)
+    setConnectError(null)
+    setShareError(null)
+    try {
+      const { data: { session } } = await supabase.auth.getSession()
+      const token = session?.access_token ?? null
+      const res = await fetch('/api/account/role', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ role: nextRole }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.error ?? `Could not switch role (${res.status})`)
+      setProfile(current => current ? { ...current, role: data.role } : current)
+    } catch (err) {
+      setShareError(err instanceof Error ? err.message : 'Could not switch role')
+    } finally {
+      setRoleSaving(false)
     }
   }
 
@@ -1088,6 +1119,9 @@ export default function Dashboard() {
   const desktopAvailable = desktop?.available ?? false
   const helperOwnedByCurrentUser = isDesktopOwnedByUser(desktop, profile.id)
   const desktopAvailableForUser = desktopAvailable && helperOwnedByCurrentUser
+  const canProvideRole = profile.role === 'peer' || profile.role === 'host'
+  const providerControlsEnabled = helperOwnedByCurrentUser && canProvideRole
+  const desktopAvailableForProvider = desktopAvailableForUser && canProvideRole
   const primaryWhere = desktop?.where ?? desktop?.source ?? null
   const isCLI = primaryWhere === 'cli'
   const isDesktopApp = primaryWhere === 'desktop'
@@ -1245,11 +1279,45 @@ export default function Dashboard() {
       </div>
 
       <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '12px', padding: '16px', marginBottom: '20px' }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap' }}>
+          <div>
+            <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--accent)', letterSpacing: '1px', marginBottom: '6px' }}>ROLE</div>
+            <div style={{ fontSize: '12px', color: 'var(--muted)', lineHeight: 1.6 }}>
+              Peer shares and uses. Host shares only. Client uses only and cannot expose provider slots.
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+            {(['peer', 'host', 'client'] as const).map((role) => (
+              <button
+                key={role}
+                onClick={() => updateRole(role)}
+                disabled={roleSaving || profile.role === role}
+                style={{
+                  padding: '9px 12px',
+                  borderRadius: '8px',
+                  border: `1px solid ${profile.role === role ? 'rgba(0,255,136,0.4)' : 'var(--border)'}`,
+                  background: profile.role === role ? 'var(--accent-dim)' : 'var(--bg)',
+                  color: profile.role === role ? 'var(--accent)' : 'var(--text)',
+                  textTransform: 'uppercase',
+                  fontFamily: 'var(--font-geist-mono)',
+                  fontSize: '11px',
+                  cursor: roleSaving || profile.role === role ? 'not-allowed' : 'pointer',
+                  opacity: roleSaving && profile.role !== role ? 0.7 : 1,
+                }}
+              >
+                {roleSaving && profile.role !== role ? 'SAVING...' : role}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '12px', padding: '16px', marginBottom: '20px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', alignItems: 'flex-start', flexWrap: 'wrap', marginBottom: '12px' }}>
           <div>
             <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--accent)', letterSpacing: '1px', marginBottom: '6px' }}>WALLET AND CREDITS</div>
             <div style={{ fontSize: '12px', color: 'var(--muted)', lineHeight: 1.6 }}>
-              Free monthly allocation and contribution credits are consumed before paid API balance.
+              Free monthly allocation and contribution credits are consumed before paid wallet balance.
             </div>
           </div>
           <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>

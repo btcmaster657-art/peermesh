@@ -1,4 +1,11 @@
 import { adminClient } from '@/lib/supabase/admin'
+import {
+  calculateProviderRevenueShareUsd,
+  estimateApiUsageCost,
+  settleUserUsage,
+  type ApiKeyTier,
+  type ApiSessionMode,
+} from '@/lib/billing'
 
 export type WalletTopUpSettlementInput = {
   userId: string
@@ -10,8 +17,27 @@ export type WalletTopUpSettlementInput = {
   rawResponse?: Record<string, unknown> | null
 }
 
+export type SessionUsageSettlementInput = {
+  requesterId: string
+  providerUserId?: string | null
+  sessionId: string
+  bytesUsed: number
+  source: 'user' | 'api_key'
+  apiKeyId?: string | null
+  apiRequestId?: string | null
+  tier?: ApiKeyTier | null
+  requestedRpm?: number | null
+  requestedPeriodHours?: number | null
+  requestedSessionMode?: ApiSessionMode | null
+  durationMinutes?: number | null
+}
+
 function roundCurrency(value: number): number {
   return Math.round(value * 100) / 100
+}
+
+function roundCurrency4(value: number): number {
+  return Math.round(value * 10_000) / 10_000
 }
 
 export async function getWalletSummary(userId: string) {
@@ -141,5 +167,186 @@ export async function settleWalletTopUp(input: WalletTopUpSettlementInput) {
   return {
     alreadyApplied: false,
     walletBalanceUsd: nextBalanceUsd,
+  }
+}
+
+export async function settleSessionUsage(input: SessionUsageSettlementInput) {
+  const bytesUsed = Math.max(0, Math.floor(Number(input.bytesUsed) || 0))
+  if (!input.requesterId || !input.sessionId || bytesUsed <= 0) {
+    return {
+      walletDebitUsd: 0,
+      providerPayoutUsd: 0,
+      platformRevenueUsd: 0,
+      grossChargeUsd: 0,
+      shortfallUsd: 0,
+      contributionCreditsSpentBytes: 0,
+      apiUsageRecorded: false,
+    }
+  }
+
+  const { data: requesterProfile, error: requesterError } = await adminClient
+    .from('profiles')
+    .select('bandwidth_used_month, bandwidth_limit, is_premium, contribution_credits_bytes, wallet_balance_usd')
+    .eq('id', input.requesterId)
+    .single<{
+      bandwidth_used_month: number | null
+      bandwidth_limit: number | null
+      is_premium: boolean | null
+      contribution_credits_bytes: number | null
+      wallet_balance_usd: number | null
+    }>()
+
+  if (requesterError || !requesterProfile) {
+    throw new Error(requesterError?.message ?? 'Could not load requester billing state')
+  }
+
+  let grossChargeUsd = 0
+  let walletDebitUsd = 0
+  let shortfallUsd = 0
+  let providerPayoutUsd = 0
+  let platformRevenueUsd = 0
+  let contributionCreditsSpentBytes = 0
+
+  if (input.source === 'api_key') {
+    const tier = input.tier ?? 'standard'
+    const requestedRpm = Math.max(1, Math.floor(Number(input.requestedRpm) || 60))
+    const requestedPeriodHours = Math.max(1, Math.floor(Number(input.requestedPeriodHours) || 1))
+    const requestedSessionMode = input.requestedSessionMode === 'sticky' ? 'sticky' : 'rotating'
+    grossChargeUsd = roundCurrency4(estimateApiUsageCost({
+      tier,
+      bandwidthGb: bytesUsed / (1024 ** 3),
+      rpm: requestedRpm,
+      periodHours: requestedPeriodHours,
+      sessionMode: requestedSessionMode,
+    }))
+    walletDebitUsd = roundCurrency(Math.min(Number(requesterProfile.wallet_balance_usd ?? 0), grossChargeUsd))
+    shortfallUsd = roundCurrency(Math.max(0, grossChargeUsd - walletDebitUsd))
+    providerPayoutUsd = calculateProviderRevenueShareUsd(walletDebitUsd)
+    platformRevenueUsd = roundCurrency(Math.max(0, walletDebitUsd - providerPayoutUsd))
+  } else {
+    const usage = settleUserUsage({
+      bytesUsed,
+      bandwidthUsedMonth: Number(requesterProfile.bandwidth_used_month ?? 0),
+      bandwidthLimit: Number(requesterProfile.bandwidth_limit ?? 0),
+      isPremium: requesterProfile.is_premium === true,
+      contributionCreditsBytes: Number(requesterProfile.contribution_credits_bytes ?? 0),
+      walletBalanceUsd: Number(requesterProfile.wallet_balance_usd ?? 0),
+    })
+    grossChargeUsd = usage.grossChargeUsd
+    walletDebitUsd = usage.walletDebitUsd
+    shortfallUsd = usage.shortfallUsd
+    providerPayoutUsd = usage.providerPayoutUsd
+    platformRevenueUsd = usage.platformRevenueUsd
+    contributionCreditsSpentBytes = usage.creditBytes
+  }
+
+  const nextWalletBalanceUsd = roundCurrency(Math.max(0, Number(requesterProfile.wallet_balance_usd ?? 0) - walletDebitUsd))
+  const nextContributionCreditsBytes = Math.max(
+    0,
+    Number(requesterProfile.contribution_credits_bytes ?? 0) - contributionCreditsSpentBytes,
+  )
+
+  if (walletDebitUsd > 0 || contributionCreditsSpentBytes > 0) {
+    const { error: updateRequesterError } = await adminClient
+      .from('profiles')
+      .update({
+        wallet_balance_usd: nextWalletBalanceUsd,
+        contribution_credits_bytes: nextContributionCreditsBytes,
+      })
+      .eq('id', input.requesterId)
+
+    if (updateRequesterError) {
+      throw new Error(updateRequesterError.message)
+    }
+  }
+
+  if (walletDebitUsd > 0) {
+    await adminClient
+      .from('wallet_ledger')
+      .insert({
+        user_id: input.requesterId,
+        kind: 'debit',
+        amount_usd: walletDebitUsd,
+        currency: 'USD',
+        reference: `session:${input.sessionId}`,
+        metadata: {
+          source: input.source,
+          sessionId: input.sessionId,
+          bytesUsed,
+          grossChargeUsd,
+          shortfallUsd,
+        },
+      })
+  }
+
+  if (input.providerUserId && providerPayoutUsd > 0) {
+    const { data: providerProfile, error: providerError } = await adminClient
+      .from('profiles')
+      .select('wallet_pending_payout_usd, payout_currency')
+      .eq('id', input.providerUserId)
+      .single<{
+        wallet_pending_payout_usd: number | null
+        payout_currency: string | null
+      }>()
+
+    if (providerError || !providerProfile) {
+      throw new Error(providerError?.message ?? 'Could not load provider payout state')
+    }
+
+    const nextPendingPayoutUsd = roundCurrency(
+      Number(providerProfile.wallet_pending_payout_usd ?? 0) + providerPayoutUsd,
+    )
+
+    await adminClient
+      .from('profiles')
+      .update({ wallet_pending_payout_usd: nextPendingPayoutUsd })
+      .eq('id', input.providerUserId)
+
+    await adminClient
+      .from('provider_payouts')
+      .insert({
+        user_id: input.providerUserId,
+        amount_usd: providerPayoutUsd,
+        destination_currency: providerProfile.payout_currency ?? 'USD',
+        status: 'pending',
+        metadata: {
+          sessionId: input.sessionId,
+          requesterId: input.requesterId,
+          source: input.source,
+          bytesUsed,
+          grossChargeUsd,
+          platformRevenueUsd,
+        },
+      })
+  }
+
+  let apiUsageRecorded = false
+  if (input.source === 'api_key' && input.apiKeyId) {
+    await adminClient
+      .from('api_usage')
+      .insert({
+        api_key_id: input.apiKeyId,
+        user_id: input.requesterId,
+        session_id: input.sessionId,
+        request_id: input.apiRequestId ?? null,
+        bandwidth_bytes: bytesUsed,
+        rpm_requested: Math.max(0, Math.floor(Number(input.requestedRpm) || 0)),
+        session_mode: input.requestedSessionMode === 'sticky' ? 'sticky' : 'rotating',
+        duration_minutes: Math.max(0, Math.floor(Number(input.durationMinutes) || 0)),
+        estimated_cost_usd: grossChargeUsd,
+        collected_cost_usd: walletDebitUsd,
+        shortfall_cost_usd: shortfallUsd,
+      })
+    apiUsageRecorded = true
+  }
+
+  return {
+    walletDebitUsd,
+    providerPayoutUsd,
+    platformRevenueUsd,
+    grossChargeUsd,
+    shortfallUsd,
+    contributionCreditsSpentBytes,
+    apiUsageRecorded,
   }
 }

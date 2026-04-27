@@ -1,13 +1,14 @@
 import { NextResponse } from 'next/server'
-import { createClient } from '@/lib/supabase/server'
 import { adminClient } from '@/lib/supabase/admin'
 import { isUserTrusted } from '@/lib/traffic-filter'
-import { resolveBearerUser } from '@/lib/device-sessions'
 import { createHmac } from 'crypto'
 import { isPrivateShareActive, normalizePrivateShareCode } from '@/lib/private-sharing'
 import { getRelayFallbackList, relayHttpUrl, RELAY_ENDPOINTS } from '@/lib/relay-endpoints'
 import { buildOccupiedProviderDeviceSet, filterAvailableProviderDevices } from '@/lib/provider-capacity'
-import { getConnectionAccessRequirement } from '@/lib/account-access'
+import { getConnectionAccessRequirement, hasPaidAccess } from '@/lib/account-access'
+import { getEffectiveBandwidthLimitBytes, quoteApiUsage } from '@/lib/billing'
+import { touchApiKeyLastUsed } from '@/lib/api-keys'
+import { resolveRequesterAuth } from '@/lib/requester-auth'
 
 function getReceiptSecret(): string {
   const secret = process.env.RECEIPT_SECRET ?? process.env.RELAY_SECRET ?? ''
@@ -67,27 +68,10 @@ function orderRelayCandidates(
 }
 
 export async function POST(req: Request) {
-  const supabase = await createClient()
-  const sessionUser = (await supabase.auth.getUser()).data.user ?? null
-  let userId = sessionUser?.id ?? null
-  let emailConfirmed = !!sessionUser?.email_confirmed_at
-
-  if (!userId) {
-    const auth = req.headers.get('authorization') ?? ''
-    const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
-    if (token) {
-      const resolved = await resolveBearerUser(token)
-      if (resolved.authKind === 'supabase') {
-        const tokenUser = (await adminClient.auth.getUser(token)).data.user ?? null
-        userId = tokenUser?.id ?? null
-        emailConfirmed = !!tokenUser?.email_confirmed_at
-      } else if (resolved.authKind === 'desktop') {
-        userId = resolved.userId
-        emailConfirmed = !!resolved.userId
-      }
-    }
-  }
-  if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  const auth = await resolveRequesterAuth(req)
+  if (!auth?.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  const userId = auth.userId
+  const emailConfirmed = auth.emailConfirmed
   if (!emailConfirmed) {
     return NextResponse.json({
       error: 'Confirm your email before connecting.',
@@ -100,6 +84,7 @@ export async function POST(req: Request) {
   const hasPrivateCode = body.privateCode !== undefined
   const privateCode = normalizePrivateShareCode(body.privateCode)
   let country = typeof body.country === 'string' ? body.country.trim().toUpperCase() : ''
+  const apiRequestId = typeof body.requestId === 'string' ? body.requestId.trim().slice(0, 120) : null
   if (!country && !hasPrivateCode) {
     return NextResponse.json({ error: 'country or privateCode is required' }, { status: 400 })
   }
@@ -109,7 +94,7 @@ export async function POST(req: Request) {
 
   const { data: profile } = await adminClient
     .from('profiles')
-    .select('trust_score, is_verified, is_sharing, bandwidth_used_month, bandwidth_limit, preferred_providers, wallet_balance_usd, contribution_credits_bytes')
+    .select('role, trust_score, is_verified, is_sharing, is_premium, bandwidth_used_month, bandwidth_limit, preferred_providers, wallet_balance_usd, contribution_credits_bytes')
     .eq('id', userId)
     .single()
 
@@ -117,21 +102,88 @@ export async function POST(req: Request) {
   if (!activeProfile) {
     return NextResponse.json({ error: 'Profile not found' }, { status: 404 })
   }
-  const accessRequirement = getConnectionAccessRequirement(activeProfile, {
-    mode: hasPrivateCode ? 'private' : 'public',
-  })
-  if (!accessRequirement.ok) {
-    return NextResponse.json({
-      error: accessRequirement.error,
-      code: accessRequirement.code,
-      nextStep: accessRequirement.nextStep,
-    }, { status: 403 })
-  }
   if (!isUserTrusted(activeProfile.trust_score)) {
     return NextResponse.json({ error: 'Account suspended due to low trust score' }, { status: 403 })
   }
-  if (activeProfile.bandwidth_used_month >= activeProfile.bandwidth_limit) {
-    return NextResponse.json({ error: 'Monthly bandwidth limit reached. Wait for reset or fund your USD wallet for higher usage.' }, { status: 403 })
+
+  const requestAuthKind = auth.kind === 'desktop'
+    ? 'desktop'
+    : auth.kind === 'api_key'
+      ? 'api_key'
+      : 'user'
+  let pricingTier: string | null = null
+  let requestedBandwidthGb: number | null = null
+  let requestedRpm: number | null = null
+  let requestedPeriodHours: number | null = null
+  let requestedSessionMode: 'rotating' | 'sticky' | null = null
+  let estimatedCostUsd = 0
+
+  if (auth.kind === 'api_key') {
+    const requestedMode = body.sessionMode === 'sticky' ? 'sticky' : 'rotating'
+    const requestedRpmValue = Math.max(1, Math.floor(Number(body.rpm ?? 60) || 60))
+    const requestedPeriodHoursValue = Math.max(1, Math.floor(Number(body.periodHours ?? 1) || 1))
+    const requestedBandwidthGbValue = Math.max(0.05, Number(body.bandwidthGb ?? 1) || 1)
+
+    if (requestedRpmValue > auth.apiKey.rpmLimit) {
+      return NextResponse.json({ error: `${auth.apiKey.name} is capped at ${auth.apiKey.rpmLimit} RPM.` }, { status: 403 })
+    }
+    if (requestedMode === 'sticky' && auth.apiKey.sessionMode !== 'sticky') {
+      return NextResponse.json({ error: `${auth.apiKey.name} only supports rotating sessions.` }, { status: 403 })
+    }
+    if (auth.apiKey.requiresVerification && activeProfile.is_verified !== true) {
+      return NextResponse.json({ error: 'This API key requires a phone-verified account before sticky usage can be activated.' }, { status: 403 })
+    }
+
+    const quote = quoteApiUsage({
+      tier: auth.apiKey.tier,
+      bandwidthGb: requestedBandwidthGbValue,
+      rpm: requestedRpmValue,
+      periodHours: requestedPeriodHoursValue,
+      sessionMode: requestedMode,
+    })
+    if (!quote.ok) {
+      return NextResponse.json({
+        error: quote.constraints[0]?.message ?? 'Requested API usage exceeds the key limits.',
+        constraints: quote.constraints,
+      }, { status: 403 })
+    }
+
+    estimatedCostUsd = Number(quote.estimatedUsd ?? 0)
+    if (Number(activeProfile.wallet_balance_usd ?? 0) < estimatedCostUsd) {
+      return NextResponse.json({
+        error: `Insufficient wallet balance. Fund at least $${estimatedCostUsd.toFixed(2)} for this API session.`,
+      }, { status: 403 })
+    }
+
+    pricingTier = auth.apiKey.tier
+    requestedBandwidthGb = requestedBandwidthGbValue
+    requestedRpm = requestedRpmValue
+    requestedPeriodHours = requestedPeriodHoursValue
+    requestedSessionMode = requestedMode
+  } else {
+    const accessRequirement = getConnectionAccessRequirement(activeProfile, {
+      mode: hasPrivateCode ? 'private' : 'public',
+    })
+    if (!accessRequirement.ok) {
+      return NextResponse.json({
+        error: accessRequirement.error,
+        code: accessRequirement.code,
+        nextStep: accessRequirement.nextStep,
+      }, { status: 403 })
+    }
+
+    const effectiveLimit = getEffectiveBandwidthLimitBytes(
+      Number(activeProfile.bandwidth_limit ?? 0),
+      activeProfile.is_premium === true,
+    )
+    const monthlyUsage = Number(activeProfile.bandwidth_used_month ?? 0)
+    if (monthlyUsage >= effectiveLimit && !hasPaidAccess(activeProfile)) {
+      return NextResponse.json({
+        error: 'Monthly free allocation exhausted. Use contribution credits or fund your USD wallet for more usage.',
+        code: 'usage_access_required',
+        nextStep: '/verify/payment',
+      }, { status: 403 })
+    }
   }
 
   // Query live provider devices for this country to build a targeted relay list.
@@ -272,6 +324,16 @@ export async function POST(req: Request) {
     .from('sessions')
     .insert({
       user_id: userId,
+      request_access_mode: hasPrivateCode ? 'private' : 'public',
+      request_auth_kind: requestAuthKind,
+      api_key_id: auth.apiKey?.id ?? null,
+      request_id: apiRequestId,
+      pricing_tier: pricingTier,
+      requested_bandwidth_gb: requestedBandwidthGb,
+      requested_rpm: requestedRpm,
+      requested_period_hours: requestedPeriodHours,
+      requested_session_mode: requestedSessionMode,
+      estimated_cost_usd: estimatedCostUsd,
       provider_id: privateProviderUserId,
       provider_base_device_id: privateBaseDeviceId,
       target_country: country,
@@ -297,6 +359,10 @@ export async function POST(req: Request) {
     .from('sessions')
     .update({ signed_receipt: receipt })
     .eq('id', session.id)
+
+  if (auth.apiKey?.id) {
+    await touchApiKeyLastUsed(auth.apiKey.id)
+  }
 
   return NextResponse.json({
     sessionId: session.id,

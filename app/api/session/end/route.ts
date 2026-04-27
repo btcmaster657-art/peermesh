@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
-import { createClient } from '@/lib/supabase/server'
 import { adminClient } from '@/lib/supabase/admin'
-import { resolveBearerUser } from '@/lib/device-sessions'
+import { resolveRequesterAuth } from '@/lib/requester-auth'
+import { settleSessionUsage } from '@/lib/wallet'
 
 const RELAY_SECRET = process.env.RELAY_SECRET ?? ''
 
@@ -86,15 +86,8 @@ export async function POST(req: Request) {
   let userId: string | null = null
 
   if (!isRelay) {
-    const supabase = await createClient()
-    userId = (await supabase.auth.getUser()).data.user?.id ?? null
-    if (!userId) {
-      const auth = req.headers.get('authorization') ?? ''
-      const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
-      if (token) {
-        userId = (await resolveBearerUser(token)).userId
-      }
-    }
+    const auth = await resolveRequesterAuth(req)
+    userId = auth?.userId ?? null
     if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
@@ -118,7 +111,7 @@ export async function POST(req: Request) {
   // Load current session to fill in any fields the caller did not provide.
   const { data: existing, error: lookupError } = await adminClient
     .from('sessions')
-    .select('provider_id, provider_kind, provider_device_id, provider_base_device_id, relay_endpoint, target_country, target_host, target_hosts, user_id, status, bytes_used, disconnect_reason')
+    .select('provider_id, provider_kind, provider_device_id, provider_base_device_id, relay_endpoint, target_country, target_host, target_hosts, user_id, status, bytes_used, disconnect_reason, request_auth_kind, api_key_id, request_id, pricing_tier, requested_rpm, requested_period_hours, requested_session_mode, started_at')
     .eq('id', sessionId)
     .maybeSingle()
 
@@ -137,6 +130,9 @@ export async function POST(req: Request) {
   const finalTargetHost = targetHost ?? existing?.target_host ?? null
   const finalDisconnectReason = disconnectReason ?? existing?.disconnect_reason ?? null
   const finalBytes = Math.max(Number(bytesUsed) || 0, Number(existing?.bytes_used) || 0)
+  const finalDurationMinutes = existing?.started_at
+    ? Math.max(0, Math.ceil((Date.now() - new Date(existing.started_at).getTime()) / 60_000))
+    : Math.max(0, Math.floor(Number(existing?.requested_period_hours ?? 0) * 60))
 
   // Merge incoming target_hosts with any already stored on the row.
   const existingHosts: string[] = (existing as { target_hosts?: string[] | null } | null)?.target_hosts ?? []
@@ -186,6 +182,34 @@ export async function POST(req: Request) {
   }
 
   const shouldApplyCounters = count !== 0
+  let settlement:
+    | {
+        walletDebitUsd: number
+        providerPayoutUsd: number
+        platformRevenueUsd: number
+        grossChargeUsd: number
+        shortfallUsd: number
+        contributionCreditsSpentBytes: number
+        apiUsageRecorded: boolean
+      }
+    | null = null
+
+  if (shouldApplyCounters && finalBytes > 0 && finalRequesterId) {
+    settlement = await settleSessionUsage({
+      requesterId: finalRequesterId,
+      providerUserId: finalProviderId,
+      sessionId,
+      bytesUsed: finalBytes,
+      source: existing?.request_auth_kind === 'api_key' ? 'api_key' : 'user',
+      apiKeyId: existing?.api_key_id ?? null,
+      apiRequestId: existing?.request_id ?? null,
+      tier: existing?.pricing_tier ?? null,
+      requestedRpm: existing?.requested_rpm ?? null,
+      requestedPeriodHours: existing?.requested_period_hours ?? null,
+      requestedSessionMode: existing?.requested_session_mode ?? null,
+      durationMinutes: finalDurationMinutes,
+    })
+  }
 
   await Promise.all([
     shouldApplyCounters && finalBytes > 0 && finalRequesterId
@@ -220,6 +244,7 @@ export async function POST(req: Request) {
     finalTargetHost,
     finalDisconnectReason,
     finalBytes,
+    settlement,
     endedActiveRow: count ?? 0,
   })
 

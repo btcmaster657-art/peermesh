@@ -8,6 +8,8 @@ import {
   isPrivateShareActive,
   parsePrivateShareExpiryHours,
 } from '@/lib/private-sharing'
+import { getEffectiveBandwidthLimitBytes } from '@/lib/billing'
+import { canRoleProvideNetwork, getProviderRoleError } from '@/lib/roles'
 
 const RELAY_SECRET = process.env.RELAY_SECRET ?? ''
 const SURFACE_ACTORS = new Set(['dashboard', 'desktop', 'cli', 'extension'])
@@ -118,6 +120,7 @@ type ProviderDeviceStateRow = {
 
 type ProfileStateRow = {
   role: string | null
+  is_verified?: boolean | null
   total_bytes_shared: number | null
   total_bytes_used: number | null
   bandwidth_used_month: number | null
@@ -437,6 +440,42 @@ async function resolveUserId(req: Request, bodyUserId?: string): Promise<string 
   return (await resolveBearerUser(token)).userId
 }
 
+async function loadProviderEligibilityProfile(userId: string): Promise<{
+  role: string | null
+  is_verified: boolean | null
+  has_accepted_provider_terms: boolean | null
+} | null> {
+  const { data, error } = await adminClient
+    .from('profiles')
+    .select('role, is_verified, has_accepted_provider_terms')
+    .eq('id', userId)
+    .maybeSingle<{
+      role: string | null
+      is_verified: boolean | null
+      has_accepted_provider_terms: boolean | null
+    }>()
+
+  if (error || !data) return null
+  return data
+}
+
+function getProviderEligibilityError(
+  profile: {
+    role: string | null
+    is_verified: boolean | null
+    has_accepted_provider_terms: boolean | null
+  } | null,
+  options: { requireTerms?: boolean } = {},
+): string | null {
+  if (!profile) return 'Profile not found'
+  if (!canRoleProvideNetwork(profile.role)) return getProviderRoleError(profile.role)
+  if (profile.is_verified !== true) return 'Verify your phone before sharing bandwidth.'
+  if (options.requireTerms !== false && profile.has_accepted_provider_terms !== true) {
+    return 'Accept the provider disclosure before sharing bandwidth.'
+  }
+  return null
+}
+
 // ── GET: fetch fresh profile stats (extension polls this) ──────────────────
 export async function GET(req: Request) {
   const url = new URL(req.url)
@@ -532,7 +571,7 @@ export async function GET(req: Request) {
     total_bytes_shared: data.total_bytes_shared,
     total_bytes_used: data.total_bytes_used,
     bandwidth_used_month: data.bandwidth_used_month,
-    bandwidth_limit: data.bandwidth_limit,
+    bandwidth_limit: getEffectiveBandwidthLimitBytes(Number(data.bandwidth_limit ?? 0), data.is_premium === true),
     trust_score: data.trust_score,
     is_sharing: data.is_sharing,
     is_premium: data.is_premium,
@@ -613,6 +652,8 @@ export async function POST(req: Request) {
   if (body.privateSharing && typeof body.privateSharing === 'object') {
     const userId = await resolveUserId(req)
     if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    const providerError = getProviderEligibilityError(await loadProviderEligibilityProfile(userId))
+    if (providerError) return NextResponse.json({ error: providerError }, { status: 403 })
 
     const requestedDeviceId = String(body.privateSharing.deviceId ?? '').trim()
     const requestedBaseDeviceId = String(body.privateSharing.baseDeviceId ?? '').trim()
@@ -707,6 +748,8 @@ export async function POST(req: Request) {
 
   // Setting daily share limit
   if ('dailyLimitMb' in body) {
+    const providerError = getProviderEligibilityError(await loadProviderEligibilityProfile(userId), { requireTerms: false })
+    if (providerError) return NextResponse.json({ error: providerError }, { status: 403 })
     const limitMb = parseDailyShareLimitMb(body.dailyLimitMb)
     if (limitMb === undefined) {
       return NextResponse.json({ error: 'dailyLimitMb must be null or at least 1024 MB (1 GB)' }, { status: 400 })
@@ -731,6 +774,8 @@ export async function POST(req: Request) {
 
   // Setting per-slot daily share limit
   if ('slotDailyLimitMb' in body) {
+    const providerError = getProviderEligibilityError(await loadProviderEligibilityProfile(userId), { requireTerms: false })
+    if (providerError) return NextResponse.json({ error: providerError }, { status: 403 })
     const slotDeviceId = typeof body.slotDeviceId === 'string' ? body.slotDeviceId.trim() : ''
     const slotBaseDeviceIdInput = typeof body.baseDeviceId === 'string' ? body.baseDeviceId.trim() : ''
     if (!slotDeviceId) {
@@ -799,6 +844,8 @@ export async function POST(req: Request) {
 
   // Setting connection slots — clean up stale private share slots with debouncing
   if ('connectionSlots' in body && typeof body.connectionSlots === 'number') {
+    const providerError = getProviderEligibilityError(await loadProviderEligibilityProfile(userId), { requireTerms: false })
+    if (providerError) return NextResponse.json({ error: providerError }, { status: 403 })
     const baseDeviceId = body.baseDeviceId ? String(body.baseDeviceId).trim() : null
     if (baseDeviceId) {
       const normalizedSlots = Math.max(1, Math.min(32, Number.parseInt(String(body.connectionSlots), 10) || 1))
@@ -825,6 +872,10 @@ export async function POST(req: Request) {
 
   if (typeof body.isSharing !== 'boolean') {
     return NextResponse.json({ error: 'isSharing must be boolean' }, { status: 400 })
+  }
+  if (body.isSharing) {
+    const providerError = getProviderEligibilityError(await loadProviderEligibilityProfile(userId))
+    if (providerError) return NextResponse.json({ error: providerError }, { status: 403 })
   }
 
   const { data: updatedProfile, error: updateError } = await adminClient
@@ -869,6 +920,8 @@ export async function PUT(req: Request) {
   }
 
   if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  const providerError = getProviderEligibilityError(await loadProviderEligibilityProfile(userId))
+  if (providerError) return NextResponse.json({ error: providerError }, { status: 403 })
 
   // Detect country from the request IP
   // x-vercel-ip-country is injected by Vercel for free — no external call needed.
