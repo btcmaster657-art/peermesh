@@ -30,7 +30,7 @@ async function getLiveRelays() {
 const CONFIG_DIR = join(homedir(), '.peermesh')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
 const SHARED_IDENTITY_FILE = join(CONFIG_DIR, 'machine-identity.json')
-const VERSION     = '1.0.52'
+const VERSION     = '1.0.54'
 const DEBUG_LOG = join(homedir(), 'Desktop', 'peermesh-debug.log')
 
 const CONTROL_PORT = 7654
@@ -631,6 +631,16 @@ function applySharingProfileData(data, { source = 'remote' } = {}) {
     ...(data.private_shares ?? (nextPrivateShare ? [nextPrivateShare] : [])),
     ...config.privateShares,
   ])
+  const selectedPrivateShare = selectPrivateShareRow(nextPrivateShares, config.privateShareDeviceId)
+  const nextPrivateShareEnabled = !!(selectedPrivateShare ?? nextPrivateShare)?.enabled
+  const nextPrivateShareActive = !!(selectedPrivateShare ?? nextPrivateShare)?.active
+
+  const resolvedProfileSync = preferLatestSync(previousProfileSync, data.profile_sync ?? null)
+  const resolvedConnectionSlotsSync = preferLatestSync(previousConnectionSlotsSync, data.connection_slots_sync ?? null)
+  const shouldApplyConnectionSlots = resolvedConnectionSlotsSync
+    ? getSyncTimestamp(resolvedConnectionSlotsSync?.state_changed_at) >= getSyncTimestamp(previousConnectionSlotsSync?.state_changed_at)
+    : true
+
   config.profileSync = resolvedProfileSync
   config.connectionSlotsSync = resolvedConnectionSlotsSync
   config.privateShares = nextPrivateShares
@@ -802,6 +812,12 @@ async function updatePrivateShareState({ enabled, refresh = false, expiryHours, 
     ...(data.private_shares ?? (data.private_share ? [data.private_share] : [])),
     ...config.privateShares,
   ])
+  config.privateShare = selectPrivateShareRow(config.privateShares, config.privateShareDeviceId) ?? null
+  config.privateShareDeviceId = config.privateShare?.device_id ?? config.privateShareDeviceId ?? null
+  config.privateShareActive = !!(config.privateShare?.enabled && config.privateShare?.active)
+  saveConfig(config)
+
+  if (previousEnabled !== !!config.privateShare?.enabled) {
     clog.info('PRIVATE', 'private sharing mode changed locally - reconnecting provider', {
       from: previousEnabled,
       to: !!config.privateShare?.enabled,
