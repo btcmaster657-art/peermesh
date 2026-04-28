@@ -489,6 +489,16 @@ function applySharingProfileData(data, { source = 'remote' } = {}) {
     ...(data.private_shares ?? (nextPrivateShare ? [nextPrivateShare] : [])),
     ...config.privateShares,
   ])
+  const selectedPrivateShare = selectPrivateShareRow(nextPrivateShares, config.privateShareDeviceId)
+  const nextPrivateShareEnabled = !!(selectedPrivateShare ?? nextPrivateShare)?.enabled
+  const nextPrivateShareActive = !!(selectedPrivateShare ?? nextPrivateShare)?.active
+
+  const resolvedProfileSync = preferLatestSyncRow(previousProfileSync, data.profile_sync ?? null)
+  const resolvedConnectionSlotsSync = preferLatestSyncRow(previousConnectionSlotsSync, data.connection_slots_sync ?? null)
+  const shouldApplyConnectionSlots = resolvedConnectionSlotsSync
+    ? getSyncTimestamp(resolvedConnectionSlotsSync?.state_changed_at) >= getSyncTimestamp(previousConnectionSlotsSync?.state_changed_at)
+    : true
+
   config.profileSync = resolvedProfileSync
   config.connectionSlotsSync = resolvedConnectionSlotsSync
   config.privateShares = nextPrivateShares
@@ -1051,6 +1061,12 @@ async function updatePrivateShareState({ enabled, refresh = false, expiryHours, 
     ...(data.private_shares ?? (data.private_share ? [data.private_share] : [])),
     ...config.privateShares,
   ])
+  config.privateShare = selectPrivateShareRow(config.privateShares, config.privateShareDeviceId) ?? null
+  config.privateShareDeviceId = config.privateShare?.device_id ?? config.privateShareDeviceId ?? null
+  config.privateShareActive = !!(config.privateShare?.enabled && config.privateShare?.active)
+  saveConfig()
+
+  if (previousEnabled !== !!config.privateShare?.enabled) {
     log.info('PRIVATE', 'private sharing mode changed locally - reconnecting provider', {
       from: previousEnabled,
       to: !!config.privateShare?.enabled,
